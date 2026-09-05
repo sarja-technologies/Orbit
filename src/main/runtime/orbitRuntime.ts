@@ -1,0 +1,281 @@
+import path from 'node:path'
+import { EventEmitter } from 'node:events'
+import type {
+  Artifact,
+  Conversation,
+  ID,
+  Project,
+  ProjectFile,
+  ProjectSnapshot,
+  ProviderStatus,
+  Reference,
+  Run,
+  RuntimeErrorInfo,
+  SystemStatus
+} from '@shared/domain'
+import type { ArtifactContent, SendMessageInput } from '@shared/contracts'
+import type { RuntimeEvent } from '@shared/runtime-events'
+import type { AgentProvider } from './provider'
+import type { OrbitStore } from '@main/persistence/store'
+import type { ArtifactService } from '@main/artifacts/artifactService'
+import { nowIso } from '@main/util/ids'
+
+interface ActiveRunState {
+  text: string
+}
+
+export class OrbitRuntime extends EventEmitter {
+  private readonly activeRuns = new Map<ID, ActiveRunState>()
+
+  constructor(
+    private readonly store: OrbitStore,
+    private readonly artifactService: ArtifactService,
+    private readonly provider: AgentProvider,
+    private readonly dataDir: string,
+    private readonly version: string
+  ) {
+    super()
+  }
+
+  async getSystemStatus(): Promise<SystemStatus> {
+    return {
+      appName: 'Orbit by AgentDock',
+      version: this.version,
+      dataDir: this.dataDir,
+      provider: await this.provider.getStatus()
+    }
+  }
+
+  async getProviderStatus(): Promise<ProviderStatus> {
+    return this.provider.getStatus()
+  }
+
+  listProjects(): Project[] {
+    return this.store.listProjects()
+  }
+
+  createProject(name: string): Project {
+    if (!name.trim()) throw new Error('Project name is required.')
+    const project = this.store.createProject(name)
+    this.store.createConversation(project.id, 'Main')
+    return project
+  }
+
+  openProject(projectId: ID): ProjectSnapshot {
+    return this.store.openProjectSnapshot(projectId)
+  }
+
+  createConversation(projectId: ID, title = 'New conversation'): Conversation {
+    return this.store.createConversation(projectId, title)
+  }
+
+  renameConversation(conversationId: ID, title: string): Conversation {
+    return this.store.renameConversation(conversationId, title)
+  }
+
+  async sendMessage(input: SendMessageInput): Promise<Run> {
+    const project = this.store.getProject(input.projectId)
+    if (!project) throw new Error('Project not found.')
+    const conversation = this.store.requireConversation(input.conversationId)
+    if (conversation.projectId !== project.id) throw new Error('Conversation does not belong to this project.')
+    if (!input.content.trim()) throw new Error('Message cannot be empty.')
+
+    this.store.createMessage({
+      projectId: project.id,
+      conversationId: conversation.id,
+      runId: null,
+      role: 'user',
+      content: input.content,
+      status: 'completed'
+    })
+    const run = this.store.createRun({
+      projectId: project.id,
+      conversationId: conversation.id,
+      metadata: {
+        attachmentFileIds: input.attachmentFileIds ?? [],
+        referencedArtifactIds: input.referencedArtifactIds ?? []
+      }
+    })
+    this.activeRuns.set(run.id, { text: '' })
+
+    const workspacePath = path.join(this.dataDir, 'projects', project.id, 'workspace')
+    const saveDir = path.join(this.dataDir, 'projects', project.id, 'agy-save')
+    const attachments = (input.attachmentFileIds ?? [])
+      .map((fileId) => this.store.getProjectFile(fileId))
+      .filter((file): file is ProjectFile => file !== null && file.projectId === project.id)
+    const referencedArtifacts = (input.referencedArtifactIds ?? [])
+      .map((artifactId) => this.store.getArtifact(artifactId))
+      .filter((artifact): artifact is Artifact => artifact !== null && artifact.projectId === project.id)
+      .map((artifact) => ({ id: artifact.id, name: artifact.name, location: artifact.location, mimeType: artifact.mimeType }))
+
+    void this.provider
+      .sendMessage(
+        {
+          projectId: project.id,
+          conversationId: conversation.id,
+          runId: run.id,
+          prompt: buildPrompt(input.content, referencedArtifacts),
+          nativeConversationId: conversation.nativeConversationId,
+          workspacePath,
+          saveDir,
+          attachments,
+          referencedArtifacts
+        },
+        (event) => this.handleProviderEvent(event)
+      )
+      .catch((error: unknown) => {
+        const runtimeError = normalizeError(error)
+        const failed: RuntimeEvent = {
+          type: 'run.failed',
+          projectId: project.id,
+          conversationId: conversation.id,
+          runId: run.id,
+          providerId: 'antigravity',
+          createdAt: nowIso(),
+          error: runtimeError
+        }
+        this.handleProviderEvent(failed)
+      })
+
+    return run
+  }
+
+  async cancelRun(runId: ID): Promise<Run> {
+    const run = this.store.updateRunState(runId, 'cancelling')
+    await this.provider.cancelRun(runId)
+    return run
+  }
+
+  attachFiles(projectId: ID, paths: string[]): ProjectFile[] {
+    return this.artifactService.attachProjectFiles(projectId, paths)
+  }
+
+  importArtifacts(projectId: ID, paths: string[], conversationId: ID | null = null): Artifact[] {
+    return this.artifactService.importUserArtifacts(projectId, paths, conversationId)
+  }
+
+  listArtifacts(projectId: ID): Artifact[] {
+    return this.store.listArtifacts(projectId)
+  }
+
+  getArtifactContent(artifactId: ID): ArtifactContent {
+    return this.artifactService.getContent(artifactId)
+  }
+
+  async revealArtifact(artifactId: ID): Promise<void> {
+    await this.artifactService.reveal(artifactId)
+  }
+
+  createReference(projectId: ID, artifactId: ID, destinationConversationId: ID): Reference {
+    return this.store.createReference({ projectId, artifactId, destinationConversationId })
+  }
+
+  async shutdown(): Promise<void> {
+    await this.provider.shutdown()
+  }
+
+  private handleProviderEvent(event: RuntimeEvent): void {
+    const active = this.activeRuns.get(event.runId)
+    const run = safeRequireRun(this.store, event.runId)
+    if (!run || run.projectId !== event.projectId || run.conversationId !== event.conversationId) return
+
+    if (event.type === 'text.delta') active && (active.text += event.delta)
+    if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
+    if (event.type === 'artifact.discovered') {
+      try {
+        const artifact = this.artifactService.registerProviderArtifact({
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          runId: event.runId,
+          sourcePath: event.sourcePath,
+          metadata: event.metadata ?? {}
+        })
+        const produced: RuntimeEvent = {
+          type: 'artifact.produced',
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          runId: event.runId,
+          providerId: 'antigravity',
+          createdAt: nowIso(),
+          artifact
+        }
+        this.store.addRunEvent(produced)
+        this.emit('event', produced)
+      } catch (error) {
+        const failed: RuntimeEvent = {
+          type: 'run.failed',
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          runId: event.runId,
+          providerId: 'antigravity',
+          createdAt: nowIso(),
+          error: normalizeError(error)
+        }
+        this.handleProviderEvent(failed)
+        return
+      }
+    }
+    if (event.type === 'run.completed') {
+      const text = event.finalText || active?.text || ''
+      if (event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
+      this.store.createMessage({
+        projectId: event.projectId,
+        conversationId: event.conversationId,
+        runId: event.runId,
+        role: 'assistant',
+        content: text,
+        status: 'completed'
+      })
+      this.store.updateRunState(event.runId, 'completed')
+      this.activeRuns.delete(event.runId)
+    }
+    if (event.type === 'run.failed') {
+      this.store.createMessage({
+        projectId: event.projectId,
+        conversationId: event.conversationId,
+        runId: event.runId,
+        role: 'assistant',
+        content: event.error.message,
+        status: 'failed'
+      })
+      this.store.updateRunState(event.runId, 'failed', event.error)
+      this.activeRuns.delete(event.runId)
+    }
+    if (event.type === 'run.cancelled') {
+      this.store.createMessage({
+        projectId: event.projectId,
+        conversationId: event.conversationId,
+        runId: event.runId,
+        role: 'assistant',
+        content: 'Request cancelled.',
+        status: 'cancelled'
+      })
+      this.store.updateRunState(event.runId, 'cancelled')
+      this.activeRuns.delete(event.runId)
+    }
+    this.store.addRunEvent(event)
+    this.emit('event', event)
+  }
+}
+
+function safeRequireRun(store: OrbitStore, runId: ID): Run | null {
+  try {
+    return store.requireRun(runId)
+  } catch {
+    return null
+  }
+}
+
+function normalizeError(error: unknown): RuntimeErrorInfo {
+  if (error instanceof Error) {
+    const code = typeof (error as Error & { code?: unknown }).code === 'string' ? String((error as Error & { code?: unknown }).code) : 'provider.failed'
+    return { code, message: error.message, retryable: false }
+  }
+  return { code: 'provider.failed', message: 'Provider failed.', retryable: false }
+}
+
+function buildPrompt(content: string, artifacts: Array<{ id: ID; name: string; location: string }>): string {
+  if (artifacts.length === 0) return content
+  const refs = artifacts.map((artifact) => `- ${artifact.name} (${artifact.id}) at ${artifact.location}`).join('\n')
+  return `${content}\n\nReferenced Orbit artifacts:\n${refs}`
+}

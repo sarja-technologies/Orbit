@@ -1,0 +1,39 @@
+{
+  "name": "orbit-by-agentdock",
+  "version": "0.1.0",
+  "description": "Orbit by AgentDock - a project-oriented Antigravity workspace.",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev --noSandbox",
+    "build": "npm run typecheck && electron-vite build",
+    "preview": "electron-vite preview --noSandbox",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:agy": "ORBIT_REAL_AGY=1 vitest run test/main/antigravity-live.test.ts",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sql.js": "^1.12.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
