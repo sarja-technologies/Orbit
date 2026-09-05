@@ -28,6 +28,7 @@ describe('App', () => {
           providerId: 'antigravity',
           nativeConversationId: null,
           status: 'idle',
+          transport: 'structured',
           createdAt: 'now',
           updatedAt: 'now'
         }
@@ -64,7 +65,8 @@ describe('App', () => {
       },
       conversations: {
         create: vi.fn(),
-        rename: vi.fn()
+        rename: vi.fn(),
+        setTransport: vi.fn()
       },
       messages: {
         send: vi.fn(async () => run)
@@ -73,6 +75,7 @@ describe('App', () => {
         cancel: vi.fn(),
         onEvent: vi.fn(() => () => undefined)
       },
+      interactions: { respond: vi.fn() },
       files: { attach: vi.fn() },
       artifacts: {
         list: vi.fn(),

@@ -27,7 +27,23 @@ export class OrbitDatabase {
       this.db = new this.SQL.Database()
     }
     this.exec(SCHEMA_SQL)
+    this.runMigrations()
     this.persist()
+  }
+
+  /** Orbit has no formal migration framework yet — each entry here is a
+   *  single idempotent `ALTER TABLE`, safe to re-run on every startup
+   *  (SQLite has no `ADD COLUMN IF NOT EXISTS`, so a "duplicate column"
+   *  failure is expected and ignored on every run after the first). */
+  private runMigrations(): void {
+    const migrations = ["ALTER TABLE conversations ADD COLUMN transport TEXT NOT NULL DEFAULT 'structured'"]
+    for (const migration of migrations) {
+      try {
+        this.exec(migration)
+      } catch (error) {
+        if (!messageOf(error).includes('duplicate column')) throw error
+      }
+    }
   }
 
   close(): void {
@@ -70,6 +86,10 @@ export class OrbitDatabase {
     if (!this.db) throw new Error('Orbit database has not been initialized.')
     return this.db
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export function jsonStringify(value: unknown): string {

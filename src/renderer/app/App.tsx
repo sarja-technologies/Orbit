@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { ArtifactContent } from '@shared/contracts'
 import type { Artifact, Conversation, ID, Message, Project, ProjectFile, ProjectSnapshot, ProviderStatus, Reference, Run } from '@shared/domain'
-import type { RuntimeEvent } from '@shared/runtime-events'
+import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 
@@ -38,6 +38,8 @@ export function App(): JSX.Element {
   const [attachmentFileIds, setAttachmentFileIds] = useState<ID[]>([])
   const [streamTextByRun, setStreamTextByRun] = useState<Record<string, string>>({})
   const [runningRunByConversation, setRunningRunByConversation] = useState<Record<string, string>>({})
+  const [pendingInteractionByRun, setPendingInteractionByRun] = useState<Record<string, InteractionRequiredEvent>>({})
+  const [respondingInteractionIds, setRespondingInteractionIds] = useState<Set<string>>(new Set())
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -191,6 +193,18 @@ export function App(): JSX.Element {
     if (event.type === 'text.delta') {
       setStreamTextByRun((current) => ({ ...current, [event.runId]: `${current[event.runId] ?? ''}${event.delta}` }))
     }
+    if (event.type === 'interaction.required' && event.canRespond) {
+      setPendingInteractionByRun((current) => ({ ...current, [event.runId]: event }))
+    }
+    if (event.type === 'interaction.resolved') {
+      setPendingInteractionByRun((current) => {
+        const next = { ...current }
+        for (const [runId, interaction] of Object.entries(next)) {
+          if (interaction.interactionId === event.interactionId) delete next[runId]
+        }
+        return next
+      })
+    }
     if (event.type === 'artifact.produced') {
       setSelectedArtifactId(event.artifact.id)
       void openProject(event.projectId, [], event.conversationId)
@@ -201,8 +215,44 @@ export function App(): JSX.Element {
         delete next[event.conversationId]
         return next
       })
+      setPendingInteractionByRun((current) => {
+        const next = { ...current }
+        delete next[event.runId]
+        return next
+      })
       void openProject(event.projectId, [], event.conversationId)
     }
+  }
+
+  async function respondToInteraction(runId: ID, interaction: InteractionRequiredEvent, optionId: string): Promise<void> {
+    if (!workspace.activeProject || !activeConversation) return
+    if (respondingInteractionIds.has(interaction.interactionId)) return
+    setRespondingInteractionIds((current) => new Set(current).add(interaction.interactionId))
+    try {
+      await requireOrbitApi().interactions.respond({
+        conversationId: activeConversation.id,
+        runId,
+        interactionId: interaction.interactionId,
+        optionId
+      })
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Unable to respond to that prompt.')
+    } finally {
+      setRespondingInteractionIds((current) => {
+        const next = new Set(current)
+        next.delete(interaction.interactionId)
+        return next
+      })
+    }
+  }
+
+  async function enableInteractiveMode(): Promise<void> {
+    if (!activeConversation || activeConversation.transport === 'pty') return
+    const updated = await requireOrbitApi().conversations.setTransport({ conversationId: activeConversation.id, transport: 'pty' })
+    setWorkspace((current) => ({
+      ...current,
+      conversations: current.conversations.map((conversation) => (conversation.id === updated.id ? updated : conversation))
+    }))
   }
 
   return (
@@ -286,6 +336,17 @@ export function App(): JSX.Element {
               <h1>{activeConversation?.title ?? 'Create a project to begin'}</h1>
               <p>{workspace.activeProject ? workspace.activeProject.name : 'Projects contain conversations, files, and artifacts.'}</p>
             </div>
+            {activeConversation ? (
+              <button
+                type="button"
+                className="transport-toggle"
+                disabled={activeConversation.transport === 'pty'}
+                title="Interactive mode keeps a live Antigravity session open so it can ask you questions or request permission. Cannot be turned back off for this conversation."
+                onClick={() => void enableInteractiveMode()}
+              >
+                {activeConversation.transport === 'pty' ? 'Interactive session' : 'Enable interactive mode'}
+              </button>
+            ) : null}
             {activeRunId ? (
               <button className="cancel" type="button" onClick={() => void cancelActiveRun()}>
                 Cancel
@@ -306,10 +367,29 @@ export function App(): JSX.Element {
                 <div className="message-body">{streamTextByRun[activeRunId]}</div>
               </article>
             ) : null}
+            {activeRunId && pendingInteractionByRun[activeRunId] ? (
+              <InteractionPanel
+                interaction={pendingInteractionByRun[activeRunId]!}
+                busy={respondingInteractionIds.has(pendingInteractionByRun[activeRunId]!.interactionId)}
+                onRespond={(optionId) => void respondToInteraction(activeRunId, pendingInteractionByRun[activeRunId]!, optionId)}
+              />
+            ) : null}
+            {activeConversation?.status === 'running' &&
+            !activeRunId &&
+            workspace.runs.some((run) => run.conversationId === activeConversation.id && run.state === 'waiting_for_interaction') ? (
+              <div className="interaction-panel stale">
+                A previous session left this conversation waiting on a native prompt that Orbit can no longer show. Cancel and send a new message to continue.
+              </div>
+            ) : null}
           </div>
 
           <form className="composer" onSubmit={(event) => void sendMessage(event)}>
-            <textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Orbit..." disabled={!activeConversation || Boolean(activeRunId)} />
+            <textarea
+              value={composer}
+              onChange={(event) => setComposer(event.target.value)}
+              placeholder="Ask Orbit..."
+              disabled={!activeConversation || Boolean(activeRunId) || Boolean(activeRunId && pendingInteractionByRun[activeRunId])}
+            />
             <button type="submit" disabled={!activeConversation || !composer.trim() || Boolean(activeRunId)}>
               Send
             </button>
@@ -367,6 +447,35 @@ function fromSnapshot(snapshot: ProjectSnapshot, projects: Project[], preferredC
     projectFiles: snapshot.projectFiles,
     references: snapshot.references
   }
+}
+
+function InteractionPanel({
+  interaction,
+  busy,
+  onRespond
+}: {
+  interaction: InteractionRequiredEvent
+  busy: boolean
+  onRespond: (optionId: string) => void
+}): JSX.Element {
+  return (
+    <div className="interaction-panel" role="alert">
+      <div className="interaction-prompt">{interaction.prompt}</div>
+      <div className="interaction-options">
+        {interaction.options.map((option) => (
+          <button
+            type="button"
+            key={option.id}
+            className={option.destructive ? 'destructive' : ''}
+            disabled={busy}
+            onClick={() => onRespond(option.id)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function ArtifactPreview({ artifact, content }: { artifact: Artifact | null; content: ArtifactContent | null }): JSX.Element {

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   provider_id TEXT NOT NULL,
   native_conversation_id TEXT,
   status TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'structured',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

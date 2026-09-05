@@ -11,7 +11,9 @@ import {
   idSchema,
   importArtifactSchema,
   renameConversationSchema,
-  sendMessageSchema
+  respondToInteractionSchema,
+  sendMessageSchema,
+  setConversationTransportSchema
 } from './validation'
 
 export function registerIpc(runtime: OrbitRuntime): void {
@@ -38,7 +40,12 @@ export function registerIpc(runtime: OrbitRuntime): void {
       referencedArtifactIds: parsed.referencedArtifactIds ?? []
     })
   })
+  ipcMain.handle(IPC_CHANNELS.conversationsSetTransport, (_event, input: unknown) => {
+    const parsed = setConversationTransportSchema.parse(input)
+    return runtime.setConversationTransport(parsed.conversationId, parsed.transport)
+  })
   ipcMain.handle(IPC_CHANNELS.runsCancel, (_event, input: unknown) => runtime.cancelRun(cancelRunSchema.parse(input).runId))
+  ipcMain.handle(IPC_CHANNELS.interactionsRespond, (_event, input: unknown) => runtime.respondToInteraction(respondToInteractionSchema.parse(input)))
   ipcMain.handle(IPC_CHANNELS.filesAttach, async (_event, input: unknown) => {
     const parsed = attachFilesSchema.parse(input)
     const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] })

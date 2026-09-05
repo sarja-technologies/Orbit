@@ -12,6 +12,8 @@ Orbit discovers `agy` from `PATH` (including the standard `~/.local/bin/agy` loc
 
 Each Orbit conversation persists the native Antigravity conversation ID returned by `stream-json`. Later turns resume that actual provider conversation with `--conversation`; Orbit does not reconstruct context by concatenating transcripts. One child process is used per run, and cancellation terminates only that process.
 
+A conversation can also be switched into interactive mode, which keeps a persistent, live `agy` session open so it can surface and answer native questions and permission prompts, and attach images natively via clipboard paste. See `docs/antigravity-transports.md` for the full design and what has actually been live-verified.
+
 ## Development
 
 ```bash
@@ -33,5 +35,7 @@ npm run test
 npm run build
 npm run verify
 ```
+
+`npm run test:agy` runs additional tests against the real, installed, signed-in `agy` CLI (both structured and interactive PTY transports) — opt-in via `ORBIT_REAL_AGY=1`, skipped otherwise.
 
 The retired Python SDK worker has been removed. Orbit has one production Antigravity backend: the native `agy` transport.

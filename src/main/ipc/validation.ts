@@ -16,6 +16,18 @@ export const renameConversationSchema = z.object({
   title: z.string().trim().min(1).max(120)
 })
 
+export const setConversationTransportSchema = z.object({
+  conversationId: idSchema,
+  transport: z.enum(['structured', 'pty'])
+})
+
+export const respondToInteractionSchema = z.object({
+  conversationId: idSchema,
+  runId: idSchema,
+  interactionId: z.string().trim().min(1).max(200),
+  optionId: z.string().trim().min(1).max(200)
+})
+
 export const sendMessageSchema = z.object({
   projectId: idSchema,
   conversationId: idSchema,

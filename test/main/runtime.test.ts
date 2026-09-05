@@ -15,6 +15,7 @@ import type { RuntimeEvent } from '../../src/shared/runtime-events'
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
   cancelRun = vi.fn(async () => undefined)
+  respondToInteraction = vi.fn(async () => undefined)
   shutdown = vi.fn(async () => undefined)
 
   async getStatus(): Promise<ProviderStatus> {
@@ -159,5 +160,51 @@ describe('OrbitRuntime', () => {
   it('emits only run-attributed events', async () => {
     const emitter = runtime as unknown as EventEmitter
     expect(emitter.listenerCount('event')).toBe(0)
+  })
+
+  it('sends transport to the provider and never silently downgrades a pty conversation back to structured', async () => {
+    const project = runtime.createProject('Transport')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    expect(conversation.transport).toBe('structured')
+
+    const asPty = runtime.setConversationTransport(conversation.id, 'pty')
+    expect(asPty.transport).toBe('pty')
+
+    const stillPty = runtime.setConversationTransport(conversation.id, 'structured')
+    expect(stillPty.transport).toBe('pty')
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    expect(provider.lastInput?.transport).toBe('pty')
+  })
+
+  it('rejects an interaction response for a run that is not waiting on one', async () => {
+    const project = runtime.createProject('Interaction guard')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    const run = store.createRun({ projectId: project.id, conversationId: conversation.id })
+    await expect(
+      runtime.respondToInteraction({ conversationId: conversation.id, runId: run.id, interactionId: 'bogus', optionId: '1' })
+    ).rejects.toThrow(/no pending interaction/i)
+    expect(provider.respondToInteraction).not.toHaveBeenCalled()
+  })
+
+  it('rejects an interaction response whose run belongs to a different conversation', async () => {
+    const project = runtime.createProject('Interaction cross-check')
+    const conversationA = runtime.openProject(project.id).conversations[0]!
+    const conversationB = runtime.createConversation(project.id, 'Second')
+    const run = store.createRun({ projectId: project.id, conversationId: conversationA.id })
+    store.updateRunState(run.id, 'waiting_for_interaction')
+    await expect(
+      runtime.respondToInteraction({ conversationId: conversationB.id, runId: run.id, interactionId: 'bogus', optionId: '1' })
+    ).rejects.toThrow(/does not belong/i)
+    expect(provider.respondToInteraction).not.toHaveBeenCalled()
+  })
+
+  it('forwards a valid interaction response to the provider', async () => {
+    const project = runtime.createProject('Interaction forward')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    const run = store.createRun({ projectId: project.id, conversationId: conversation.id })
+    store.updateRunState(run.id, 'waiting_for_interaction')
+    await runtime.respondToInteraction({ conversationId: conversation.id, runId: run.id, interactionId: 'int-1', optionId: '1' })
+    expect(provider.respondToInteraction).toHaveBeenCalledWith({ conversationId: conversation.id, runId: run.id, interactionId: 'int-1', optionId: '1' })
   })
 })

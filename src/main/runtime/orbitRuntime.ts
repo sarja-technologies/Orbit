@@ -114,12 +114,13 @@ export class OrbitRuntime extends EventEmitter {
           projectId: project.id,
           conversationId: conversation.id,
           runId: run.id,
-          prompt: buildPrompt(input.content, referencedArtifacts, attachments),
+          prompt: buildPrompt(input.content, referencedArtifacts, attachments, conversation.transport),
           nativeConversationId: conversation.nativeConversationId,
           workspacePath,
           saveDir,
           attachments,
-          referencedArtifacts
+          referencedArtifacts,
+          transport: conversation.transport
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -144,6 +145,22 @@ export class OrbitRuntime extends EventEmitter {
     const run = this.store.updateRunState(runId, 'cancelling')
     await this.provider.cancelRun(runId)
     return run
+  }
+
+  /** 'pty' is sticky by design (see ConversationTransport's doc comment) —
+   *  requesting 'structured' on an already-'pty' conversation is a no-op
+   *  rather than a silent downgrade of an interactive session. */
+  setConversationTransport(conversationId: ID, transport: Conversation['transport']): Conversation {
+    const conversation = this.store.requireConversation(conversationId)
+    if (conversation.transport === 'pty' && transport === 'structured') return conversation
+    return this.store.setConversationTransport(conversationId, transport)
+  }
+
+  async respondToInteraction(input: { conversationId: ID; runId: ID; interactionId: string; optionId: string }): Promise<void> {
+    const run = this.store.requireRun(input.runId)
+    if (run.conversationId !== input.conversationId) throw new Error('Interaction does not belong to this conversation.')
+    if (run.state !== 'waiting_for_interaction') throw new Error('This run has no pending interaction to respond to.')
+    await this.provider.respondToInteraction(input)
   }
 
   attachFiles(projectId: ID, paths: string[]): ProjectFile[] {
@@ -181,6 +198,10 @@ export class OrbitRuntime extends EventEmitter {
 
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
+    if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
+    if (event.type === 'interaction.resolved' && event.outcome !== 'cancelled' && run.state === 'waiting_for_interaction') {
+      this.store.updateRunState(event.runId, 'running')
+    }
     if (event.type === 'artifact.discovered') {
       try {
         const artifact = this.artifactService.registerProviderArtifact({
@@ -274,9 +295,30 @@ function normalizeError(error: unknown): RuntimeErrorInfo {
   return { code: 'provider.failed', message: 'Provider failed.', retryable: false }
 }
 
-function buildPrompt(content: string, artifacts: Array<{ id: ID; name: string; location: string }>, attachments: ProjectFile[]): string {
+// Kept in sync with AntigravityPtySession's identical isSupportedImage —
+// SVG is deliberately excluded (Electron's nativeImage can't rasterize it
+// for a native clipboard paste), even though it's an "image/*" mime type.
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp']
+function isImageFile(file: ProjectFile): boolean {
+  if (file.mimeType === 'image/svg+xml') return false
+  if (file.mimeType?.startsWith('image/')) return true
+  const lower = file.name.toLowerCase()
+  return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext))
+}
+
+function buildPrompt(
+  content: string,
+  artifacts: Array<{ id: ID; name: string; location: string }>,
+  attachments: ProjectFile[],
+  transport: Conversation['transport']
+): string {
   const sections = [content]
   if (artifacts.length) sections.push(`Referenced Orbit artifacts:\n${artifacts.map((artifact) => `- ${artifact.name} (${artifact.id}) at ${artifact.location}`).join('\n')}`)
-  if (attachments.length) sections.push(`Attached Orbit files (inspect these managed paths with view_file when relevant):\n${attachments.map((file) => `- ${file.name}: ${file.storedPath}`).join('\n')}`)
+  // PTY transport attaches images natively (clipboard paste, before this
+  // prompt is even sent) — the structured `view_file` fallback hint is
+  // only needed for non-image attachments there, and for every attachment
+  // under structured transport (which has no native attachment mechanism).
+  const needsViewFileHint = transport === 'structured' ? attachments : attachments.filter((file) => !isImageFile(file))
+  if (needsViewFileHint.length) sections.push(`Attached Orbit files (inspect these managed paths with view_file when relevant):\n${needsViewFileHint.map((file) => `- ${file.name}: ${file.storedPath}`).join('\n')}`)
   return sections.join('\n\n')
 }

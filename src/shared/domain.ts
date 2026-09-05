@@ -9,6 +9,15 @@ export interface Project {
   updatedAt: string
 }
 
+/** Which channel Orbit uses to talk to the provider for this conversation.
+ *  'structured' (the default) is `agy --print --output-format stream-json`
+ *  — headless, no live interaction channel. 'pty' is a persistent
+ *  interactive `agy` session that can surface and answer native
+ *  questions/permission prompts. A conversation's transport is sticky:
+ *  once 'pty', it never silently downgrades back to 'structured' (see
+ *  docs/antigravity-transports.md's transport-continuity section). */
+export type ConversationTransport = 'structured' | 'pty'
+
 export interface Conversation {
   id: ID
   projectId: ID
@@ -16,6 +25,7 @@ export interface Conversation {
   providerId: ProviderId
   nativeConversationId: string | null
   status: 'idle' | 'running' | 'failed'
+  transport: ConversationTransport
   createdAt: string
   updatedAt: string
 }
@@ -36,7 +46,7 @@ export interface Message {
   sequence: number
 }
 
-export type RunState = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
+export type RunState = 'queued' | 'running' | 'waiting_for_interaction' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
 
 export interface Run {
   id: ID

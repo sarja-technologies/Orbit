@@ -13,7 +13,7 @@ React renderer
   → existing signed-in Antigravity account/environment
 ```
 
-The implementation is adapted from AgentDock Pro's current structured Antigravity transport. AgentDock's older interactive PTY path remains the reference for future native approval/question and clipboard-image support; Orbit's normal path uses the structured transport because it delivers explicit, streamable JSON events without terminal-screen parsing.
+The implementation is adapted from AgentDock Pro's Antigravity transports — both the structured `stream-json` path and, more recently, the interactive PTY path (native questions, permission prompts, and clipboard image attachment). See `docs/antigravity-transports.md` for the full picture: transport selection, the PTY session's state machine, interaction handling, and exactly what has been live-verified vs. is Orbit policy vs. remains unknown upstream behavior.
 
 ## Provider behaviour
 
@@ -45,4 +45,4 @@ Runs are tracked by Orbit run ID. Cancelling a run terminates its single child p
 
 ## Current constraints
 
-Structured print mode does not expose a live approval/question response channel. Orbit intentionally reports only events that can be truthfully derived from its JSON protocol. A future enhancement can adapt AgentDock Pro's PTY fallback only for interactions that require it. Attachment directories are passed as explicit `--add-dir` roots; native clipboard image-paste support is not yet ported.
+Structured print mode does not expose a live approval/question response channel — Orbit reports only events truthfully derivable from its JSON protocol, and surfaces a skipped/denied native interaction as an honest, non-actionable `interaction.required` rather than a false success. Conversations that need live interaction or native image attachment opt into the `pty` transport instead (see `docs/antigravity-transports.md`); once opted in, a conversation never silently downgrades back to `structured`. PTY sessions do not currently capture a resumable native conversation id — see that document's "known limitation" for why and what it costs.

@@ -5,10 +5,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
-import type { ProviderStatus } from '@shared/domain'
+import type { ID, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
-import type { AgentProvider, ProviderSendInput } from '@main/runtime/provider'
+import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
+import { AntigravityPtySession } from './AntigravityPtySession'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -23,6 +24,10 @@ interface ActiveRun {
 
 export class AntigravityProvider implements AgentProvider {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  /** PTY-owned conversations get exactly one persistent session each —
+   *  the single point of transport ownership guaranteeing two PTY
+   *  transports never simultaneously own the same conversation. */
+  private readonly ptySessions = new Map<ID, AntigravityPtySession>()
   private executable: string | null | undefined
 
   async getStatus(): Promise<ProviderStatus> {
@@ -40,6 +45,15 @@ export class AntigravityProvider implements AgentProvider {
     const executable = await this.resolveExecutable()
     if (!executable) throw codedError('provider.not_installed', 'Antigravity is not installed. Install and sign in to the agy CLI.')
     mkdirSync(input.workspacePath, { recursive: true })
+    if (input.transport === 'pty') {
+      let session = this.ptySessions.get(input.conversationId)
+      if (!session) {
+        session = new AntigravityPtySession({ executable }, input.conversationId)
+        this.ptySessions.set(input.conversationId, session)
+      }
+      session.send(input, onEvent)
+      return
+    }
     const args = ['--print', input.prompt, '--output-format', 'stream-json', '--add-dir', input.workspacePath]
     // `--conversation` is the real Antigravity session-resume mechanism.
     if (input.nativeConversationId) args.push('--conversation', input.nativeConversationId)
@@ -60,12 +74,27 @@ export class AntigravityProvider implements AgentProvider {
 
   async cancelRun(runId: string): Promise<void> {
     const active = this.activeRuns.get(runId)
-    if (!active || active.settled) return
-    active.cancelled = true
-    active.child.kill('SIGTERM')
-    setTimeout(() => { if (!active.settled) this.cancelled(active) }, 250)
+    if (active && !active.settled) {
+      active.cancelled = true
+      active.child.kill('SIGTERM')
+      setTimeout(() => { if (!active.settled) this.cancelled(active) }, 250)
+      return
+    }
+    const session = [...this.ptySessions.values()].find((candidate) => candidate.currentRun === runId)
+    session?.cancel()
   }
-  async shutdown(): Promise<void> { await Promise.all([...this.activeRuns.keys()].map((runId) => this.cancelRun(runId))) }
+
+  async respondToInteraction(input: RespondToInteractionInput): Promise<void> {
+    const session = this.ptySessions.get(input.conversationId)
+    if (!session) throw codedError('interaction.not_pending', 'This conversation has no active interactive session.')
+    await session.respondToInteraction(input.runId, input.interactionId, input.optionId)
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.all([...this.activeRuns.keys()].map((runId) => this.cancelRun(runId)))
+    for (const session of this.ptySessions.values()) session.shutdown()
+    this.ptySessions.clear()
+  }
 
   private handleLine(active: ActiveRun, line: string): void {
     let raw: AgyEvent

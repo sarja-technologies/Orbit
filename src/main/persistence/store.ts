@@ -3,6 +3,7 @@ import type {
   ArtifactType,
   ArtifactVersion,
   Conversation,
+  ConversationTransport,
   ID,
   Message,
   MessageRole,
@@ -53,13 +54,14 @@ export class OrbitStore {
       providerId,
       nativeConversationId: null,
       status: 'idle',
+      transport: 'structured',
       createdAt: now,
       updatedAt: now
     }
     this.db.run(
       `INSERT INTO conversations
-       (id, project_id, title, provider_id, native_conversation_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, project_id, title, provider_id, native_conversation_id, status, transport, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversation.id,
         conversation.projectId,
@@ -67,12 +69,23 @@ export class OrbitStore {
         conversation.providerId,
         conversation.nativeConversationId,
         conversation.status,
+        conversation.transport,
         conversation.createdAt,
         conversation.updatedAt
       ]
     )
     this.touchProject(projectId)
     return conversation
+  }
+
+  /** Sticky by design — see ConversationTransport's doc comment. Callers
+   *  (OrbitRuntime) are responsible for only ever moving 'structured' ->
+   *  'pty', never the reverse. */
+  setConversationTransport(conversationId: ID, transport: ConversationTransport): Conversation {
+    const conversation = this.requireConversation(conversationId)
+    this.db.run('UPDATE conversations SET transport = ?, updated_at = ? WHERE id = ?', [transport, nowIso(), conversationId])
+    this.touchProject(conversation.projectId)
+    return this.requireConversation(conversationId)
   }
 
   renameConversation(conversationId: ID, title: string): Conversation {
@@ -449,6 +462,7 @@ function mapConversation(row: Record<string, unknown>): Conversation {
     providerId: text(row, 'provider_id') as ProviderId,
     nativeConversationId: nullableText(row, 'native_conversation_id'),
     status: text(row, 'status') as Conversation['status'],
+    transport: (nullableText(row, 'transport') ?? 'structured') as ConversationTransport,
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at')
   }

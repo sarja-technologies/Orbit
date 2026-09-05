@@ -2,6 +2,7 @@ import type {
   Artifact,
   ArtifactVersion,
   Conversation,
+  ConversationTransport,
   ID,
   Project,
   ProjectFile,
@@ -21,9 +22,11 @@ export const IPC_CHANNELS = {
   projectsOpen: 'orbit:projects:open',
   conversationsCreate: 'orbit:conversations:create',
   conversationsRename: 'orbit:conversations:rename',
+  conversationsSetTransport: 'orbit:conversations:set-transport',
   messagesSend: 'orbit:messages:send',
   runsCancel: 'orbit:runs:cancel',
   runsEvent: 'orbit:runs:event',
+  interactionsRespond: 'orbit:interactions:respond',
   filesAttach: 'orbit:files:attach',
   artifactsList: 'orbit:artifacts:list',
   artifactsImport: 'orbit:artifacts:import',
@@ -44,6 +47,18 @@ export interface CreateConversationInput {
 export interface RenameConversationInput {
   conversationId: ID
   title: string
+}
+
+export interface SetConversationTransportInput {
+  conversationId: ID
+  transport: ConversationTransport
+}
+
+export interface RespondToInteractionInput {
+  conversationId: ID
+  runId: ID
+  interactionId: string
+  optionId: string
 }
 
 export interface SendMessageInput {
@@ -99,6 +114,7 @@ export interface OrbitApi {
   conversations: {
     create(input: CreateConversationInput): Promise<Conversation>
     rename(input: RenameConversationInput): Promise<Conversation>
+    setTransport(input: SetConversationTransportInput): Promise<Conversation>
   }
   messages: {
     send(input: SendMessageInput): Promise<Run>
@@ -106,6 +122,9 @@ export interface OrbitApi {
   runs: {
     cancel(input: CancelRunInput): Promise<Run>
     onEvent(listener: (event: RuntimeEvent) => void): () => void
+  }
+  interactions: {
+    respond(input: RespondToInteractionInput): Promise<void>
   }
   files: {
     attach(input: AttachFilesInput): Promise<ProjectFile[]>
