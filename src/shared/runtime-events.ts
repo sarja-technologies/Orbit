@@ -5,6 +5,8 @@ export type RuntimeEvent =
   | TextDeltaEvent
   | StepStartedEvent
   | ToolActivityEvent
+  | InteractionRequiredEvent
+  | InteractionResolvedEvent
   | ArtifactDiscoveredEvent
   | ArtifactProducedEvent
   | RunCompletedEvent
@@ -42,6 +44,25 @@ export interface ToolActivityEvent extends RuntimeEventBase {
   label: string
   status: 'running' | 'completed' | 'failed'
   providerStepId?: string
+}
+
+/** A provider observed an interaction it cannot safely complete alone. */
+export interface InteractionRequiredEvent extends RuntimeEventBase {
+  type: 'interaction.required'
+  interactionId: string
+  kind: 'question' | 'permission' | 'authentication' | 'selection'
+  prompt: string
+  options: Array<{ id: string; label: string; destructive?: boolean }>
+  transport: 'pty' | 'structured-followup'
+  /** False means agy already skipped/denied the original operation. */
+  canRespond: boolean
+  sourceEvidence: 'native-prompt' | 'headless-denial'
+}
+
+export interface InteractionResolvedEvent extends RuntimeEventBase {
+  type: 'interaction.resolved'
+  interactionId: string
+  outcome: 'approved' | 'denied' | 'answered' | 'cancelled'
 }
 
 export interface ArtifactProducedEvent extends RuntimeEventBase {

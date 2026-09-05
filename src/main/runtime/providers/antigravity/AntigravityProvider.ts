@@ -13,12 +13,12 @@ import { nowIso } from '@main/util/ids'
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
   conversation_id?: string
-  step_update?: { step_index?: number; state?: string; step_type?: string; text_delta?: string; tool_name?: string; tool_info?: { parameters?: Record<string, unknown> } }
-  result?: { conversation_id?: string; status?: string; response?: string; error?: string; usage?: Record<string, unknown> }
+  step_update?: { step_index?: number; state?: string; step_type?: string; text_delta?: string; tool_name?: string; tool_info?: { parameters?: Record<string, unknown>; error?: { message?: string } } }
+  result?: { conversation_id?: string; status?: string; response?: string; error?: string; usage?: Record<string, unknown>; denied_actions?: Array<{ action?: string; display_name?: string }> }
 }
 interface ActiveRun {
   child: ChildProcessWithoutNullStreams; input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void
-  text: string; nativeConversationId: string | null; cancelled: boolean; settled: boolean; stderr: string[]
+  text: string; nativeConversationId: string | null; cancelled: boolean; settled: boolean; stderr: string[]; headlessDenials: string[]
 }
 
 export class AntigravityProvider implements AgentProvider {
@@ -46,7 +46,7 @@ export class AntigravityProvider implements AgentProvider {
     // Attachments are scoped additional roots, never arbitrary filesystem access.
     for (const dir of unique(input.attachments.map((file) => dirname(file.storedPath)))) args.push('--add-dir', dir)
     const child = spawn(executable, args, { cwd: input.workspacePath, stdio: 'pipe', shell: false })
-    const active: ActiveRun = { child, input, onEvent, text: '', nativeConversationId: input.nativeConversationId, cancelled: false, settled: false, stderr: [] }
+    const active: ActiveRun = { child, input, onEvent, text: '', nativeConversationId: input.nativeConversationId, cancelled: false, settled: false, stderr: [], headlessDenials: [] }
     this.activeRuns.set(input.runId, active)
     createInterface({ input: child.stdout }).on('line', (line) => this.handleLine(active, line))
     child.stderr.on('data', (chunk: Buffer) => { active.stderr.push(chunk.toString('utf8').trim()); if (active.stderr.length > 10) active.stderr.shift() })
@@ -82,10 +82,23 @@ export class AntigravityProvider implements AgentProvider {
         this.emit(active, { type: 'tool.activity', label, status, providerStepId: String(step.step_index ?? '') })
         this.discoverArtifact(active, label, step.tool_info?.parameters)
       }
+      // agy 1.1.27 represents headless ask_question/ask_permission as an
+      // opaque unknown step, then completes after skipping it. Record the
+      // evidence; do not falsely report that terminal SUCCESS as success.
+      if (step.step_type === 'unknown') active.headlessDenials.push('Antigravity requested an interaction that headless mode could not present.')
+      const toolError = (step as { tool_info?: { error?: { message?: unknown } } }).tool_info?.error?.message
+      if (typeof toolError === 'string' && /denied|permission/i.test(toolError)) active.headlessDenials.push(toolError)
     } else if (raw.event === 'result' && raw.result) {
       const result = raw.result
       active.nativeConversationId = result.conversation_id ?? active.nativeConversationId
-      if (result.status === 'SUCCESS') {
+      const deniedActions = result.denied_actions?.map((action) => action.display_name ?? action.action ?? 'Antigravity action') ?? []
+      if (deniedActions.length) active.headlessDenials.push(`Antigravity denied: ${deniedActions.join(', ')}.`)
+      if (active.headlessDenials.length > 0) {
+        const prompt = unique(active.headlessDenials).join('\n')
+        const interactionId = `${active.input.runId}:headless-denial`
+        this.emit(active, { type: 'interaction.required', interactionId, kind: 'permission', prompt, options: [], transport: 'structured-followup', canRespond: false, sourceEvidence: 'headless-denial' })
+        this.fail(active, 'provider.interaction_denied', prompt)
+      } else if (result.status === 'SUCCESS') {
         const finalText = result.response ?? active.text
         if (result.response && !active.text) this.emit(active, { type: 'text.delta', delta: result.response })
         this.complete(active, finalText, result.usage)
