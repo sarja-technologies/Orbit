@@ -114,7 +114,7 @@ export class OrbitRuntime extends EventEmitter {
           projectId: project.id,
           conversationId: conversation.id,
           runId: run.id,
-          prompt: buildPrompt(input.content, referencedArtifacts),
+          prompt: buildPrompt(input.content, referencedArtifacts, attachments),
           nativeConversationId: conversation.nativeConversationId,
           workspacePath,
           saveDir,
@@ -274,8 +274,9 @@ function normalizeError(error: unknown): RuntimeErrorInfo {
   return { code: 'provider.failed', message: 'Provider failed.', retryable: false }
 }
 
-function buildPrompt(content: string, artifacts: Array<{ id: ID; name: string; location: string }>): string {
-  if (artifacts.length === 0) return content
-  const refs = artifacts.map((artifact) => `- ${artifact.name} (${artifact.id}) at ${artifact.location}`).join('\n')
-  return `${content}\n\nReferenced Orbit artifacts:\n${refs}`
+function buildPrompt(content: string, artifacts: Array<{ id: ID; name: string; location: string }>, attachments: ProjectFile[]): string {
+  const sections = [content]
+  if (artifacts.length) sections.push(`Referenced Orbit artifacts:\n${artifacts.map((artifact) => `- ${artifact.name} (${artifact.id}) at ${artifact.location}`).join('\n')}`)
+  if (attachments.length) sections.push(`Attached Orbit files (inspect these managed paths with view_file when relevant):\n${attachments.map((file) => `- ${file.name}: ${file.storedPath}`).join('\n')}`)
+  return sections.join('\n\n')
 }

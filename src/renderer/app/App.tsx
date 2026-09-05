@@ -35,6 +35,7 @@ export function App(): JSX.Element {
   const [projectName, setProjectName] = useState('')
   const [conversationTitle, setConversationTitle] = useState('')
   const [composer, setComposer] = useState('')
+  const [attachmentFileIds, setAttachmentFileIds] = useState<ID[]>([])
   const [streamTextByRun, setStreamTextByRun] = useState<Record<string, string>>({})
   const [runningRunByConversation, setRunningRunByConversation] = useState<Record<string, string>>({})
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
@@ -143,9 +144,11 @@ export function App(): JSX.Element {
     const run = await requireOrbitApi().messages.send({
       projectId: workspace.activeProject.id,
       conversationId: activeConversation.id,
-      content
+      content,
+      attachmentFileIds
     })
     setRunningRunByConversation((current) => ({ ...current, [activeConversation.id]: run.id }))
+    setAttachmentFileIds([])
     await refreshProject()
   }
 
@@ -270,9 +273,9 @@ export function App(): JSX.Element {
               </button>
             </div>
             {workspace.projectFiles.map((file) => (
-              <div className="asset-row" key={file.id} title={file.originalPath}>
-                {file.name}
-              </div>
+              <button type="button" className={`asset-row ${attachmentFileIds.includes(file.id) ? 'selected' : ''}`} key={file.id} title={file.originalPath} onClick={() => setAttachmentFileIds((current) => current.includes(file.id) ? current.filter((id) => id !== file.id) : [...current, file.id])}>
+                {attachmentFileIds.includes(file.id) ? 'Attached: ' : ''}{file.name}
+              </button>
             ))}
           </div>
         </aside>
