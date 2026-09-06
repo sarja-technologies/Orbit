@@ -9,7 +9,7 @@ import type { ID, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
-import { AntigravityPtySession } from './AntigravityPtySession'
+import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -30,6 +30,10 @@ export class AntigravityProvider implements AgentProvider {
   private readonly ptySessions = new Map<ID, AntigravityPtySession>()
   private executable: string | null | undefined
 
+  /** `createPtySession` is overridable for tests — defaults to a real
+   *  AntigravityPtySession per conversation. */
+  constructor(private readonly createPtySession: (deps: PtySessionDeps, conversationId: ID) => AntigravityPtySession = (deps, conversationId) => new AntigravityPtySession(deps, conversationId)) {}
+
   async getStatus(): Promise<ProviderStatus> {
     const executable = await this.resolveExecutable()
     if (!executable) return { id: 'antigravity', state: 'unavailable', sdkAvailable: false, authConfigured: false, message: 'Antigravity is not installed. Install and sign in to the agy CLI, then restart Orbit.', details: {} }
@@ -48,7 +52,7 @@ export class AntigravityProvider implements AgentProvider {
     if (input.transport === 'pty') {
       let session = this.ptySessions.get(input.conversationId)
       if (!session) {
-        session = new AntigravityPtySession({ executable }, input.conversationId)
+        session = this.createPtySession({ executable }, input.conversationId)
         this.ptySessions.set(input.conversationId, session)
       }
       session.send(input, onEvent)

@@ -47,15 +47,37 @@ Orbit never auto-approves either shape — every permission/trust prompt is surf
 
 Cancel (Escape) is the verified in-turn cancel key; Ctrl+C is NOT used (it's reserved for exiting the whole session and needs a second press).
 
-## Removed: `/help` conversation-ID capture
+## Native conversation ID capture (via agy's own history file)
 
-An earlier version of this transport tried to capture agy's own conversation UUID via a scripted `/help` round trip (the approach AgentDock Pro's PTY adapter uses). **Live-tested against agy 1.1.27 and found to reliably hang the entire session** — after sending `/help`, no further screen activity was ever observed, and even a 6s bounded fallback timer never produced any effect (root cause not fully isolated; removed rather than shipped broken). See git history for the removed code if a future agent wants to re-investigate with a different mechanism.
+An earlier version of this transport tried to capture agy's own conversation UUID via a scripted `/help` round trip (the approach AgentDock Pro's PTY adapter still uses). **Live-tested against agy 1.1.27 and found to reliably hang the entire session** — after sending `/help`, no further screen activity was ever observed, and even a 6s bounded fallback timer never produced any effect (root cause not fully isolated; removed rather than shipped broken).
 
-**Consequence:** a PTY-owned conversation's `nativeConversationId` stays `null`. The live process itself carries the conversation for as long as it runs (full turn continuity, question continuity, and interaction handling all work); what's lost is resuming the *same* native conversation via `--conversation <id>` after Orbit itself restarts and the process is gone. This is an accepted, documented gap — not silently worked around.
+Replaced with a safer mechanism discovered during the hardening pass, implemented in `nativeConversationHistory.ts`: agy maintains its own local history file at `~/.gemini/antigravity-cli/history.jsonl`, one JSON line per prompt ever sent to it (across every tool on the machine, not just Orbit): `{"display": "<prompt>", "timestamp": <ms>, "workspace": "<cwd>"}`, gaining a `"conversationId"` field once agy has assigned one. Confirmed live:
+
+- The file is written as each prompt is *sent*, not on process exit — unlike `~/.gemini/antigravity-cli/conversation_summaries.db` (also investigated: a proper SQLite table keyed by `conversation_id` with a `workspace_uris` column, which looked promising but is **only populated for gracefully-exited sessions** — confirmed empty for every session this task killed abruptly, which is exactly how Orbit's own crash/shutdown paths behave, making it unusable here).
+- The **first** prompt of a brand-new conversation is logged *without* a `conversationId` (agy hasn't minted one yet at prompt-send time); the **second** and later prompts in the same conversation carry it.
+- Reading this file is a plain, bounded (last 512 KB) file read — it cannot hang or otherwise affect the live PTY session the way writing into its terminal can.
+
+`AntigravityPtySession` looks this up (matching on the exact `workspacePath`) once per turn, only when no id is already known, right before emitting `run.completed`.
+
+**Consequence:** a PTY-owned conversation's `nativeConversationId` stays `null` for exactly one turn — its first — and is captured from the second turn onward. **Live-verified**: a completely fresh `AntigravityProvider` (simulating an Orbit app restart, with the previous provider's process already killed) resumed a real prior conversation via `--conversation <id>` and correctly recalled a secret fact established two turns earlier in a now-dead process. This is a genuinely working resume path, not a documented gap — see the "resumes a real native conversation via --conversation after the PTY process is gone" live test in `test/main/antigravity-live.test.ts`.
+
+This mechanism (`history.jsonl`) was not found in — and is not used by — AgentDock Pro's current implementation, which still relies on `/help`-scraping. It may be worth upstreaming.
 
 ## Response text extraction
 
-PTY mode has no token-stream the way `stream-json` does. `extractResponseText` (in `TerminalInteractionDetector.ts`) reconstructs "what agy said" from the settled screen: everything after the last echoed prompt line (`> ...`), skipping every non-blank row immediately following it (a long prompt word-wraps across multiple physical rows with no blank line between them — confirmed live), then stripping borders, the empty compose box, footers, and tool-activity (`●`/`▸`) lines. This is a best-effort reconstruction of ordinary prose, not a pixel-perfect transcript of rich formatting (tables, code blocks with box-drawing, etc. are not specifically handled).
+PTY mode has no token-stream the way `stream-json` does. `extractResponseText` (in `TerminalInteractionDetector.ts`) reconstructs "what agy said" from the settled screen: everything after the last echoed prompt line (`> ...`), skipping every non-blank row immediately following it (a long prompt word-wraps across multiple physical rows with no blank line between them — confirmed live), then stripping borders, the empty compose box, footers, and tool-activity (`●`/`▸`) lines. Verified against real captured transcripts covering short answers, word-wrapped prompts, fenced code blocks, Unicode/emoji content, multi-paragraph answers, and a resolved-permission-menu-plus-tool-activity turn (live-confirmed: a resolved menu is fully erased/redrawn away before the turn settles, so a real screen never actually contains both the menu and the final text — the fixture covering that shape is a deliberate defense-in-depth test, not a literal capture). This is a best-effort reconstruction of ordinary prose, not a pixel-perfect transcript of rich formatting (box-drawing tables are not specifically handled).
+
+Considered and rejected alternatives (Objective 2 of the hardening pass): there is no evidence of a parallel structured channel available while a PTY session owns the terminal (Option A) — running one would risk the exact double-execution the task explicitly rules out. AgentDock Pro's own screen buffer (Option C) is architecturally the same `@xterm/headless` approach already adapted here; its "response text" isn't extracted as one string at all (it classifies the screen into typed events for a heavier system Orbit doesn't need). Identifiable markers (Option B) don't exist for the response body specifically — only for its edges (the echo line, the footer). Option D (harden the current heuristic) was the pragmatic choice.
+
+### Real bug found and fixed: numbered-list responses misread as a menu
+
+**Confirmed live, agy 1.1.27:** asking agy to answer with a plain numbered list (an extremely common shape for ordinary AI prose — steps, options, summaries) was misdetected by `detectGenericInteraction` as a real interactive menu. Orbit then treated the finished turn as `waiting_for_interaction`; the test harness's generic "pick the first option" auto-responder wrote `1\r` into what was actually completed prose, and agy — with no real menu to answer — interpreted that as a brand-new, nonsensical chat message, corrupting the conversation. In real (non-test) Orbit usage this would instead have surfaced a bogus interaction UI showing options like `<fruit>`, `<fruit>`, `<fruit>` and blocked the composer.
+
+Fixed with two layered guards in `detectGenericInteraction`, both confirmed live:
+1. **Ready-footer exclusion**: no real captured menu (trust prompt, command-permission prompt) ever coexists on screen with the `? for shortcuts` ready footer — only a genuinely settled, completed turn shows it. If present, nothing below is even checked.
+2. **Cursor-marker/permission-wording gate**: this alone doesn't cover a numbered list that happens to be on screen during a slow/paused *busy* period (footer still `esc to cancel` — the same footer text a real permission menu also uses, so it can't be excluded outright). Every real captured menu highlights one option with a cursor marker (`> 1. Yes`); ordinary prose never does. The numbered-menu branch now requires a cursor marker **or** explicit permission-shaped wording nearby before treating 2+ numbered lines as a real interaction.
+
+Regression tests for both the ready-footer and busy-footer cases (using the exact real captured shapes) are in `test/main/terminalInteractionDetector.test.ts`.
 
 ## Native image attachment
 
@@ -77,9 +99,20 @@ Implemented with Electron's own `clipboard`/`nativeImage` modules (`nativeClipbo
 
 **Real bug found and fixed during verification:** attaching an image via Ctrl+V does not itself start generation — the screen shows the "N media attached" marker and immediately returns to the same ready-for-input footer a genuinely completed turn uses. The PTY session tracks an explicit `deliveringImages` flag so a ready-for-input signal seen mid-attachment-sequence is not misread as turn completion (which previously caused the text prompt to never be sent at all).
 
-## Cross-platform clipboard notes
+## Cross-platform clipboard notes and capability detection
 
-On this Linux/Wayland environment, Electron's `clipboard.writeImage()` genuinely depends on an external clipboard helper (`wl-copy`/`wl-paste` for Wayland, or `xclip`/`xsel` for X11) being installed on the system — it is **not** self-contained the way one might assume from Electron's cross-platform clipboard API. Confirmed live: image attachment failed with `no supported clipboard tool found (install wl-clipboard or xclip)` printed by agy itself until `wl-clipboard` was installed. Orbit does not install or manage this dependency; it is a documented host-environment prerequisite for native image attachment on Linux. macOS/Windows clipboard behavior is not verified by this work (implemented via the same Electron API, but never tested on those platforms).
+On this Linux/Wayland environment, Electron's `clipboard.writeImage()` genuinely depends on an external clipboard helper (`wl-copy`/`wl-paste` for Wayland, or `xclip`/`xsel` for X11) being installed on the system — it is **not** self-contained the way one might assume from Electron's cross-platform clipboard API. Confirmed live: image attachment failed with `no supported clipboard tool found (install wl-clipboard or xclip)` printed by agy itself until `wl-clipboard` was installed. Orbit does not install or manage this dependency — it's a documented host-environment prerequisite.
+
+**Hardening pass fix:** this used to only be discoverable by attempting a real attachment and having it silently fail. `clipboardCapability.ts`'s `checkClipboardCapability()` now runs *before* the first attachment attempt on a session (memoized — checked at most once per `AntigravityPtySession`): it inspects `WAYLAND_DISPLAY`/`XDG_SESSION_TYPE`/`DISPLAY` to tell Wayland from X11, then checks `PATH` for the relevant helper (`wl-copy`+`wl-paste`, or `xclip`/`xsel`). If unavailable, Orbit never touches the clipboard — instead the images are routed the same way non-image/SVG attachments already are: a `view_file`-style path hint appended to the prompt text, with a concrete, actionable reason (e.g. `sudo apt install wl-clipboard`) logged. This keeps a missing dependency from wasting a full paste-confirmation timeout per image, and from ever landing a failed/garbled paste inside the live PTY session.
+
+| Platform | Assumption | Verified? |
+| --- | --- | --- |
+| Linux + Wayland | Needs `wl-clipboard` (`wl-copy`/`wl-paste`) on `PATH`. | **Verified** — reproduced the failure with it absent, then confirmed working after installing it. |
+| Linux + X11 | Needs `xclip` or `xsel` on `PATH`. | Implemented, matching the same Electron/Chromium clipboard backend as Wayland; not exercised on a real X11 session (this environment is Wayland). |
+| macOS | Electron talks to `NSPasteboard` directly — no external helper expected. | **Not verified** — no macOS machine available. |
+| Windows | Electron talks to the Win32 clipboard API directly — no external helper expected. | **Not verified** — no Windows machine available. |
+
+Unit-tested (`test/main/clipboardCapability.test.ts`): Wayland/X11 detection from environment variables (including an XWayland compatibility case where both `XDG_SESSION_TYPE=wayland` and a stray `DISPLAY` are set), helper presence/absence on `PATH`, the darwin/win32 short-circuit, and an unsupported-platform fallback.
 
 ## Build note: `@xterm/headless` packaging bug
 
@@ -90,16 +123,55 @@ On this Linux/Wayland environment, Electron's `clipboard.writeImage()` genuinely
 | From → To | Status |
 | --- | --- |
 | structured → structured | Unchanged, preserved (existing MVP behavior). |
-| pty → pty | Verified: the same live process serves every turn while it stays alive. If the process has exited, the next `send()` spawns a fresh bare process and resumes via `--conversation <id>` **when a native id is known** — since PTY sessions currently never capture one (see above), a PTY session that outlives the current Orbit process cannot actually resume the same native conversation; it starts a new one. This is a real, accepted limitation, not a silent failure — resuming still "works" in the sense that it starts a fresh, functional session with the same `--add-dir` scope. |
+| pty → pty (process still alive) | **Verified**: the same live process serves every turn while it stays alive. |
+| pty → pty (process died / Orbit restarted) | **Verified** (hardening pass): the next `send()` spawns a fresh bare process and resumes via `--conversation <id>` when a native id is known (captured from the conversation's second turn onward — see above). A completely fresh `AntigravityProvider` recalled a fact from a killed process's earlier turn. The one gap: a conversation that dies after exactly one turn has no id yet, so it starts a fresh native conversation instead of resuming — still functional, just not the same native thread. |
 | structured → pty | Not implemented, not tested. `setConversationTransport('pty')` starts the very next turn as a fresh PTY session (no native id to resume from). Whether a structured conversation's native id could safely seed a PTY resume was not investigated. |
 | pty → structured | Deliberately not allowed. `setConversationTransport('structured')` on an already-`pty` conversation is a no-op (see `OrbitRuntime.setConversationTransport`) — once a conversation is interactive, it stays interactive rather than silently downgrading and losing the live session. |
+
+## State-machine hardening (races and failure modes)
+
+Confirmed real bugs found and fixed via live testing, each now covered by a regression test:
+
+- **Stale `wasReady`**: if a turn's response streams continuously with no idle gap, the transport's ready/busy edge-detection could latch a stale `true` from the *previous* ready state, so the real completion was silently never reported and the run hung forever. Fixed by resetting the edge flag on every `write()` into the PTY.
+- **`handleSnapshot` assignment ordering**: the edge flag's "new value" assignment happened *after* calling the handler, so a handler that itself wrote into the PTY synchronously (e.g. sending the next prompt) had its own reset immediately clobbered by the stale post-handler assignment. Fixed by latching the edge value before invoking the handler.
+- **`deliveringImages` / completion-during-image-paste race**: attaching an image via Ctrl+V returns to the same ready footer a real completed turn uses (pasting doesn't itself start generation) — without an explicit guard, this settled the run and left the text prompt unsent.
+- **Cancellation during image attachment did not stop the sequence**: `cancel()` didn't change `this.state` when there was no pending interaction to resume into (only the image loop's *own* state check gated continued pasting), so a mid-sequence cancel would send Escape but the loop kept pasting further images and then still sent the original text prompt anyway. Fixed by checking `cancelRequested` explicitly in the image loop and before the final prompt send.
+
+Also stress-tested (`test/main/antigravityPtySession.test.ts`, `test/main/antigravityProvider.test.ts`): a redrawn/re-scanned identical interaction is deduplicated; a stale, duplicate, wrong-run, or invalid-option interaction response is rejected; a second, genuinely different interaction appearing later in the same turn gets its own stable id and the first one's id stops working; a process crash with a pending interaction resolves it as cancelled and fails the run; a process crash with *no* pending interaction still fails the run cleanly (no false completion/cancellation); repeated ready-for-input signals after a turn has already settled never emit a duplicate `run.completed`; two different Orbit conversations get fully independent PTY sessions with no cross-talk, and `cancelRun`/`shutdown` operate on the correct session(s) only. Renderer-reload safety is by construction rather than a dedicated test: pending-interaction state lives only in the renderer's in-memory React state, so a reload clears it — there is no persisted "resend on reload" path to guard against.
+
+## AgentDock Pro parity matrix
+
+Compared against `AntigravityAdapter.ts`, `TerminalSessionController.ts`, `TerminalScreenBuffer.ts`, `TerminalInteractionDetector.ts`, `AntigravityStructuredTransport.ts`, and `AntigravityStructuredEventMapper.ts` in the local AgentDock Pro checkout.
+
+| Behavior | Orbit | Notes |
+| --- | --- | --- |
+| PTY startup | Equivalent | Bare-spawned, no `-i`, real prompt written once ready. |
+| Process ownership | Equivalent | One process per conversation, single owner (`AntigravityPtySession` ↔ AgentDock's `TerminalSessionController`). |
+| Screen parser | Equivalent | Same `@xterm/headless`-based real VT model, idle-debounced snapshots. |
+| Native conversation ID capture | **Superior** | `history.jsonl`-based (this hardening pass's discovery) vs. AgentDock's `/help`-scrape, which this project found to reliably hang agy 1.1.27's session. AgentDock's own mechanism was not adopted. |
+| Native conversation resume | **Superior** (as a consequence) | Live-verified working end to end; AgentDock's `/help`-based id capture is the same mechanism Orbit tried first and removed. |
+| Approval/permission detection | Equivalent, hardened further | Same generic detector, adapted; this pass found and fixed a false-positive (numbered-list prose misread as a menu) that AgentDock's version does not appear to guard against (no ready/busy-footer exclusion in its `detectGenericInteraction`). |
+| Question flow | Equivalent | Neither has a dedicated question modal for agy; both rely on composer continuity. |
+| Cancellation | Equivalent | Escape, not Ctrl+C, in both. |
+| Image attachment mechanism | Equivalent | Same Electron `clipboard`/`nativeImage` + Ctrl+V + "N media attached" polling choreography. |
+| Attachment confirmation | Equivalent | Same on-screen marker regex. |
+| Clipboard capability detection | **Superior** | Orbit checks Wayland/X11 + helper presence *before* attempting a paste; no equivalent found in AgentDock's adapter (it discovers failure at paste time). |
+| Auto-approval of trusted commands | Intentionally simpler | AgentDock auto-approves certain workspace-trust/command patterns under an explicit "workspace trust" setting Orbit does not have; Orbit never auto-approves anything, by design (task requirement). |
+| Timeout handling | Equivalent | Same bounded polling pattern for paste confirmation; same "give up and report honestly" shape. |
+| Crash recovery | Equivalent | Both resume via `--conversation` on next send after an unexpected exit. |
+| Terminal resize | **Missing** | AgentDock wires live resize events from a visible terminal-drawer UI into the adapter. Orbit deliberately shows no raw terminal to the user (task requirement: "do not expose a raw full terminal"), so nothing ever calls `AntigravityPtyTransport.resize()` after spawn — the PTY stays fixed at 120×32. Not a functional gap for Orbit's UI, but worth knowing if a future feature needs it. |
+| Cross-platform handling | **Missing/unverified** | AgentDock ships and is presumably tested on macOS/Windows; Orbit's equivalent code is written the same way but has only ever run on this Linux/Wayland machine. |
+| Cleanup | Equivalent | `shutdown()` kills every owned process; clipboard is saved/restored around every attachment sequence regardless of outcome. |
+| Diagnostics/logging | Intentionally simpler | AgentDock has a dedicated `AGENTDOCK_DEBUG_RAW_PTY` flag with structured per-classification logging. Orbit's `ORBIT_PTY_DEBUG` is coarser (raw snapshot dumps) — see the diagnostics section below. |
 
 ## Verified / Orbit policy / Unknown upstream behavior
 
 **Verified** (live, against the installed signed-in `agy 1.1.27`, this session, Linux/Wayland):
 - Structured transport: plain messaging, streaming, conversation continuation, cancellation, headless-denial honesty (pre-existing, re-confirmed).
-- PTY: workspace-trust/permission menu detection and approval; native free-text question asked and answered via composer continuity in the same live session; a second permission prompt approved and the command actually ran; a third permission prompt denied and the command did **not** run, and the session continued normally afterward; a stale/duplicate interaction response rejected.
-- Native image attachment: one image attached and correctly described by agy; two images attached sequentially and both correctly distinguished in order.
+- PTY: workspace-trust/permission menu detection and approval; native free-text question asked and answered via composer continuity in the same live session; a second permission prompt approved and the command actually ran; a third permission prompt denied and the command did **not** run, and the session continued normally afterward; a stale/duplicate interaction response rejected; a numbered-list response no longer falsely triggers an interaction.
+- **Native conversation resume across a simulated Orbit restart**: a completely fresh `AntigravityProvider` (previous process killed) recalled a secret fact from an earlier, separate process's conversation via `--conversation <id>`. **Observed flake rate**: passed 3 of 4 runs across this hardening pass; one run returned an empty extracted final-text (the resumed process still logged a native conversation id and completed the turn, so the resume itself likely still worked — no diagnostic capture was enabled for that specific run to confirm root cause). Two immediate retries with identical code both passed. Treated as live-system/timing flakiness (a real network call to a hosted model, not a deterministic local process) rather than a reproducible code defect — no code change was made in response, since there was nothing reproducible to fix.
+- Native image attachment: one image attached and correctly described by agy; two images attached sequentially and both correctly distinguished in order; a resolved permission menu's text does not leak into the following turn's extracted response.
+- Clipboard capability detection correctly reports `wl-clipboard` present on this machine and does not regress the working attachment path.
 - The production Electron build actually launches without crashing (previously would have crashed on the `@xterm/headless` import).
 
 **Orbit policy** (our own choices, not agy behavior):
@@ -107,9 +179,15 @@ On this Linux/Wayland environment, Electron's `clipboard.writeImage()` genuinely
 - 15 MB native-image size cap.
 - PNG/JPEG/GIF/WebP only for native attachment; SVG routed to the `view_file` fallback instead.
 - Never auto-approve any permission/trust prompt.
+- Never install clipboard system packages automatically; report a concrete, actionable error instead.
 
 **Unknown / not verified:**
-- macOS and Windows clipboard behavior for native image attachment.
-- Whether a PTY session can safely resume a native conversation across an Orbit restart (no id is ever captured, so this has never actually been exercised).
+- macOS and Windows clipboard behavior for native image attachment, and Linux X11 (this environment is Wayland).
+- Whether resuming a conversation that died after exactly one turn (no captured id yet) has any safe alternative to starting fresh.
 - Behavior of permission menus beyond the two captured shapes above (e.g. a plan-mode-specific prompt, or a menu with more than 4 options).
 - Structured → PTY continuation safety.
+- `node-pty`/ConPTY behavior, shell/executable invocation, and PTY resize on macOS or Windows — reviewed for obvious platform-specific bugs (none found: paths are resolved via `node:path` and `os.homedir()`, no POSIX-only assumptions in the PTY spawn/write/resize/kill calls) but **not live-verified** on either platform.
+
+## Diagnostics (`ORBIT_PTY_DEBUG`)
+
+Set to any truthy value to log one line per idle screen snapshot (session startup, transport-selection-adjacent state, interaction detection, image-attach confirmation progress, crash, and resume attempts are all observable from the resulting sequence of snapshots and the session's own `console.warn` calls). Reviewed for safety: it logs only the visible terminal *text* (already stripped of control bytes by the VT parser) — never clipboard contents, image bytes, or raw environment variables. It is not gated to development builds; a user enabling it in production would see plain conversation text in their own logs (the same text already visible in the Orbit UI), never anything Orbit doesn't already show them.

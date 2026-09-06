@@ -90,19 +90,40 @@ export function detectGenericInteraction(lines: string[]): GenericInteractionGue
   const tail = lines.slice(-TAIL_WINDOW)
   const joined = tail.join('\n')
 
+  // CRITICAL (real bug, confirmed live against agy 1.1.27): an ordinary
+  // assistant response that happens to end in a numbered list ("1. ...",
+  // "2. ...") — an extremely common shape for AI output — was matching
+  // the numbered-menu branch below and getting treated as a real
+  // interaction requiring a response, corrupting the conversation (the
+  // "menu" had no real options, and writing a keystroke into what was
+  // actually finished prose sent it as garbage chat input instead). Every
+  // real captured menu (trust prompt, command-permission prompt) never
+  // coexists on screen with the ready-for-input footer — only a genuinely
+  // settled, completed turn shows that footer — so its presence rules out
+  // every interaction shape below, not just the numbered one.
+  if (READY_FOOTER.test(joined)) return null
+
   const numberedIndexed = tail
     .map((l, i) => ({ m: l.match(NUMBERED_OPTION), i }))
     .filter((e): e is { m: RegExpMatchArray; i: number } => e.m !== null)
   if (numberedIndexed.length >= 2) {
     const seen = new Set<string>()
     const options: InteractionOption[] = []
+    let hasCursorMarker = false
     for (const { m } of numberedIndexed) {
+      if (/^\s*[›❯>]/.test(m[0])) hasCursorMarker = true
       if (seen.has(m[1]!)) continue
       seen.add(m[1]!)
       options.push({ id: m[1]!, label: m[2]!.trim() })
     }
-    if (options.length >= 2) {
-      const isPermissionShaped = /permission required|do you want to|do you trust|would you like to/i.test(joined)
+    const isPermissionShaped = /permission required|do you want to|do you trust|would you like to/i.test(joined)
+    // Real captured menus always highlight one option with a cursor marker
+    // (`> 1. Yes`) — a plain numbered list in ordinary assistant prose
+    // (e.g. summarizing steps) never does. Requiring one of these two
+    // signals, on top of the ready-footer exclusion above, is what closes
+    // the false-positive gap during a busy/mid-stream pause, when the
+    // ready footer isn't there yet to rule it out on its own.
+    if (options.length >= 2 && (hasCursorMarker || isPermissionShaped)) {
       return {
         kind: isPermissionShaped ? 'permission' : 'choice',
         prompt: findPromptLine(tail, 'Choose an option'),

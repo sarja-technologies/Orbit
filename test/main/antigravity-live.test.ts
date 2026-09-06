@@ -47,6 +47,7 @@ describe('AntigravityProvider live PTY integration', () => {
           const onEvent = (event: RuntimeEvent) => {
             turnEvents.push(event)
             if (event.type === 'run.started' && event.nativeConversationId) nativeConversationId = event.nativeConversationId
+            if (event.type === 'run.completed' && event.nativeConversationId) nativeConversationId = event.nativeConversationId
             if (event.type === 'interaction.required' && event.canRespond) {
               const optionId = decide(event)
               if (optionId === null) return // this test wants to observe it without responding
@@ -78,10 +79,9 @@ describe('AntigravityProvider live PTY integration', () => {
       expect(turn1.some((e) => e.type === 'run.completed')).toBe(true)
       const questionCompletion = turn1.find((e) => e.type === 'run.completed') as { finalText?: string } | undefined
       expect(questionCompletion?.finalText, 'expected the native question text to be captured from the screen').toMatch(/\?/)
-      // KNOWN LIMITATION (see AntigravityPtySession's nativeConversationId
-      // doc comment): PTY sessions do not currently capture a resumable
-      // native conversation id, so this intentionally stays null — the
-      // live process itself is still what carries the conversation.
+      // agy's own history.jsonl (see nativeConversationHistory.ts) does not
+      // gain a conversationId for a workspace until its SECOND prompt —
+      // confirmed live — so turn 1 alone is not expected to capture one.
       expect(nativeConversationId).toBeNull()
 
       // Turn 2 (SAME session): answers the question from turn 1 and asks
@@ -98,6 +98,10 @@ describe('AntigravityProvider live PTY integration', () => {
       expect(approval?.transport).toBe('pty')
       expect(turn2.some((e) => e.type === 'run.completed')).toBe(true)
       expect(fs.existsSync(path.join(dir, 'permission-approved.txt')), 'approved command should have actually run').toBe(true)
+      // From the second prompt of a conversation onward, agy's own
+      // history.jsonl carries the real native conversation id (confirmed
+      // live) — Orbit's PTY session captures it opportunistically here.
+      expect(nativeConversationId).toMatch(/^[0-9a-f-]{20,}$/i)
 
       // Turn 3 (SAME session): denies a second permission prompt — proves
       // Test C (the command must NOT run) and that a denial doesn't kill
@@ -120,6 +124,63 @@ describe('AntigravityProvider live PTY integration', () => {
       await provider.shutdown()
     },
     600_000
+  )
+
+  // Proves real native PTY resume across a simulated app restart: a fresh
+  // AntigravityProvider (standing in for a new Orbit process) with only the
+  // native conversation id captured from a previous provider's live
+  // session — no in-memory state, no prompt replay — must still recall
+  // real context from that earlier session via `--conversation <id>`.
+  it.runIf(live)(
+    'resumes a real native conversation via --conversation after the PTY process is gone',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-pty-resume-'))
+      dirs.push(dir)
+      const secretWord = 'ZEBRA-QUASAR-42'
+      let capturedNativeId: string | null = null
+
+      const providerA = new AntigravityProvider()
+      const conversationId = 'pty-resume-conversation'
+
+      const driveTurn = (provider: AntigravityProvider, runId: string, nativeConversationId: string | null, prompt: string) =>
+        new Promise<RuntimeEvent[]>((resolve, reject) => {
+          const events: RuntimeEvent[] = []
+          const onEvent = (event: RuntimeEvent) => {
+            events.push(event)
+            if (event.type === 'interaction.required' && event.canRespond) {
+              void provider.respondToInteraction({ conversationId, runId, interactionId: event.interactionId, optionId: event.options[0]!.id }).catch(reject)
+            }
+            if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') resolve(events)
+          }
+          void provider
+            .sendMessage({ ...input(dir, prompt), conversationId, runId, nativeConversationId, transport: 'pty' }, onEvent)
+            .catch(reject)
+        })
+
+      // Turn 1 establishes a fact only visible to this native conversation.
+      await driveTurn(providerA, 'resume-run-1', null, `Remember this secret word for later: ${secretWord}. Do not run any shell commands. Just acknowledge you noted it.`)
+      // Turn 2 is required for agy's history.jsonl to gain a conversationId
+      // for this workspace (confirmed live — see nativeConversationHistory.ts).
+      const turn2 = await driveTurn(providerA, 'resume-run-2', null, 'Just reply with the word "noted", nothing else.')
+      const completed2 = turn2.find((e) => e.type === 'run.completed') as { nativeConversationId?: string | null } | undefined
+      capturedNativeId = completed2?.nativeConversationId ?? null
+      expect(capturedNativeId, 'expected a native conversation id to be captured by the second turn').toMatch(/^[0-9a-f-]{20,}$/i)
+
+      // Simulate the PTY process being gone (crash or Orbit restart): kill
+      // everything providerA owns, then build a completely fresh provider
+      // with NO in-memory session state — only the persisted native id, the
+      // same way OrbitRuntime would pass it back from the stored Conversation.
+      await providerA.shutdown()
+
+      const providerB = new AntigravityProvider()
+      const turn3 = await driveTurn(providerB, 'resume-run-3', capturedNativeId, 'What secret word did I ask you to remember earlier in this conversation? Reply with only that word.')
+      const completed3 = turn3.find((e) => e.type === 'run.completed') as { finalText?: string } | undefined
+      expect(turn3.some((e) => e.type === 'run.completed')).toBe(true)
+      expect(completed3?.finalText ?? '').toContain(secretWord)
+
+      await providerB.shutdown()
+    },
+    300_000
   )
 })
 

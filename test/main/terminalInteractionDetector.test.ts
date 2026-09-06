@@ -33,7 +33,10 @@ const COMMAND_PERMISSION_LINES = [
   '',
   'Do you want to proceed?',
   '> 1. Yes',
-  '  2. No'
+  '  2. No',
+  '',
+  '  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command',
+  'esc to cancel                                                                                  Gemini 3.8 Flash · medium'
 ]
 
 describe('detectGenericInteraction', () => {
@@ -71,11 +74,54 @@ describe('detectGenericInteraction', () => {
     expect(result).toBeNull()
   })
 
-  it('does not misread a plain numbered list in prose as a menu without permission wording', () => {
-    // Two numbered lines alone are 'choice', not 'permission' — only real
-    // question/trust/permission wording should ever classify as approval-shaped.
+  it('does not treat a plain numbered list in prose as a menu at all (no cursor marker, no permission wording)', () => {
+    // Real bug, confirmed live: a numbered list is an extremely common
+    // shape for ordinary AI prose (steps, options, summaries). Without a
+    // cursor marker or permission-shaped wording, it must never be treated
+    // as an interaction — see the two regression tests below for the
+    // exact real captured failure and its footer-based fix.
     const result = detectGenericInteraction(['Steps to reproduce:', '1. Open the app', '2. Click submit'])
-    expect(result?.kind).toBe('choice')
+    expect(result).toBeNull()
+  })
+
+  it('regression: the exact real captured false-positive (agy 1.1.27) — a numbered-list answer at the ready footer', () => {
+    // Real captured screen from a live run: asked agy for a numbered list
+    // of 3 items; it settled to the ready footer with a numbered-looking
+    // answer on screen. This used to be misdetected as a live menu,
+    // corrupting the conversation when something answered it.
+    const lines = [
+      '> Just reply with a numbered list of 3 made-up fruit names.',
+      '',
+      '1. <fruit>',
+      '2. <fruit>',
+      '3. <fruit>',
+      '',
+      '────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+      '>',
+      '────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+      '? for shortcuts                                                                                Gemini 3.8 Flash · medium'
+    ]
+    expect(detectGenericInteraction(lines)).toBeNull()
+    expect(isReadyForInput(lines)).toBe(true)
+  })
+
+  it('regression: a numbered-list answer mid-stream (busy footer, no cursor marker, no permission wording) is still not a menu', () => {
+    // Closes the narrower gap the ready-footer check alone doesn't cover:
+    // a slow/paused stream could settle an idle snapshot on a numbered
+    // list before the turn is fully done, while the footer still reads
+    // "esc to cancel" — the exact same footer text a real permission menu
+    // also uses, so the ready-footer exclusion above can't help here.
+    const lines = ['1. First made-up item', '2. Second made-up item', 'esc to cancel                    Gemini 3.8 Flash · medium']
+    expect(detectGenericInteraction(lines)).toBeNull()
+    expect(isBusy(lines)).toBe(true)
+  })
+
+  it('still detects a real permission menu even while the busy footer is technically also present', () => {
+    // The busy/menu footer overlap (both read "esc to cancel") is exactly
+    // why the cursor-marker/permission-wording gate exists instead of a
+    // blanket busy-footer exclusion — a real menu must still be detected.
+    expect(detectGenericInteraction(COMMAND_PERMISSION_LINES)?.kind).toBe('permission')
+    expect(isBusy(COMMAND_PERMISSION_LINES)).toBe(true)
   })
 })
 
@@ -122,6 +168,63 @@ describe('extractResponseText', () => {
 
   it('returns the whole screen when there is no recognizable prompt echo', () => {
     expect(extractResponseText(['Just some text', '? for shortcuts'])).toBe('Just some text')
+  })
+
+  it('preserves a fenced code block and its indentation', () => {
+    const lines = [
+      '> show me a hello world function',
+      '',
+      'Here you go:',
+      '',
+      '```js',
+      'function hello() {',
+      '  console.log("hi")',
+      '}',
+      '```',
+      '',
+      '? for shortcuts'
+    ]
+    expect(extractResponseText(lines)).toBe('Here you go:\n\n```js\nfunction hello() {\n  console.log("hi")\n}\n```')
+  })
+
+  it('preserves unicode and emoji content', () => {
+    const lines = ['> 你好', '', 'こんにちは 👋 — café résumé', '', '? for shortcuts']
+    expect(extractResponseText(lines)).toBe('こんにちは 👋 — café résumé')
+  })
+
+  it('preserves multiple paragraph breaks', () => {
+    const lines = ['> explain in two paragraphs', '', 'First paragraph.', '', 'Second paragraph.', '', '? for shortcuts']
+    expect(extractResponseText(lines)).toBe('First paragraph.\n\nSecond paragraph.')
+  })
+
+  it('does not leak permission-menu text into the final response even if menu lines were still present', () => {
+    // Live-verified (real agy 1.1.27) that a resolved menu is actually
+    // fully erased/redrawn away before the turn settles — a real snapshot
+    // never contains both the menu and the final text together. This
+    // fixture is deliberately the harder, hypothetical case (menu lines
+    // still present alongside tool activity and the real final prose) as
+    // a defense-in-depth check: extraction must stay safe even if that
+    // assumption ever turns out to be wrong on a future agy version.
+    const lines = [
+      '> run the build and tell me if it passed',
+      '',
+      'Requesting permission for:',
+      '   npm run build',
+      '',
+      'Do you want to proceed?',
+      '> 1. Yes',
+      '  2. No',
+      '',
+      '● Bash(npm run build) (ctrl+o to expand)',
+      '',
+      'Build succeeded with no errors.',
+      '',
+      '? for shortcuts'
+    ]
+    const result = extractResponseText(lines)
+    expect(result).toBe('Build succeeded with no errors.')
+    expect(result).not.toContain('Requesting permission')
+    expect(result).not.toContain('1. Yes')
   })
 })
 

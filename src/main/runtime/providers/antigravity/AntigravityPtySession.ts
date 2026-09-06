@@ -20,7 +20,9 @@ import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { extractResponseText } from '@main/terminal/TerminalInteractionDetector'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
+import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
+import { findRecentConversationId } from './nativeConversationHistory'
 
 type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'waiting_for_interaction'
 
@@ -37,10 +39,28 @@ interface PendingInteraction {
   ptyInteraction: PtyInteraction
 }
 
+interface ImageAttachment {
+  storedPath: string
+  name: string
+}
+
 export interface PtySessionDeps {
   executable: string
   /** Overridable for tests — defaults to spawning a real AntigravityPtyTransport. */
   createTransport?: (executable: string, cwd: string, args: string[]) => IAntigravityPtyTransport
+  /** Overridable for tests — defaults to the real findRecentConversationId,
+   *  which reads agy's own history file and would otherwise make unit
+   *  tests depend on the real machine's home directory. */
+  findConversationId?: (workspacePath: string) => string | null
+  /** Overridable for tests — defaults to the real checkClipboardCapability,
+   *  which would otherwise make unit tests depend on the real machine's
+   *  installed clipboard helpers. */
+  checkClipboardCapability?: () => ClipboardCapability
+  /** Overridable for tests — defaults to the real writeImageToClipboard,
+   *  which talks to Electron's real clipboard and always fails under
+   *  plain Node/vitest, making the "successfully loaded, awaiting paste
+   *  confirmation" path otherwise impossible to exercise in a unit test. */
+  writeImageToClipboard?: (imagePath: string) => boolean
 }
 
 export class AntigravityPtySession {
@@ -51,24 +71,29 @@ export class AntigravityPtySession {
   private currentInput: ProviderSendInput | null = null
   private onEvent: ((event: RuntimeEvent) => void) | null = null
   private text = ''
-  /** KNOWN LIMITATION: agy's interactive TUI never prints its conversation
-   *  id anywhere in the normal chat flow, and there is currently no safe,
-   *  verified way to capture it (an earlier `/help`-scrape approach,
-   *  modeled on AgentDock Pro's, was tried and reliably hung the whole
-   *  session live against agy 1.1.27 — see docs/antigravity-transports.md).
-   *  This stays null for a PTY-originated session unless the caller already
-   *  had one (e.g. resuming across an Orbit restart via a value captured by
-   *  structured transport earlier in the same conversation). Practical
-   *  effect: a PTY session is fully resumable within one Orbit process
-   *  lifetime (the live `agy` process just stays open across turns), but
-   *  NOT resumable via `--conversation` after Orbit itself restarts. */
+  /** agy's interactive TUI never prints its conversation id anywhere in the
+   *  normal chat flow (an earlier `/help`-scrape approach, modeled on
+   *  AgentDock Pro's, was tried and reliably hung the whole session live
+   *  against agy 1.1.27 — removed, see docs/antigravity-transports.md).
+   *  Captured instead, opportunistically and safely, from agy's own local
+   *  history file after each turn settles — see
+   *  nativeConversationHistory.ts. KNOWN LIMITATION: that file only gains
+   *  a conversationId for a workspace from the conversation's SECOND
+   *  prompt onward (confirmed live), so a PTY session that dies after
+   *  exactly one turn has no id to resume with — the next send() starts a
+   *  fresh native conversation instead of resuming. From the second turn
+   *  onward, resume across an Orbit restart is expected to work (see
+   *  docs/antigravity-transports.md for the live verification). */
   private nativeConversationId: string | null = null
   private pending: PendingInteraction | null = null
   private interactionCounter = 0
   private cancelRequested = false
   private queuedPrompt: string | null = null
-  private queuedImages: string[] = []
+  private queuedImages: ImageAttachment[] = []
   private lastScreenLines: string[] = []
+  /** Checked once per session (the answer can't meaningfully change while
+   *  Orbit is running) rather than on every attachment attempt. */
+  private clipboardCapability: ClipboardCapability | null = null
   /** True for the whole clipboard-paste sequence in deliverPrompt below.
    *  CRITICAL (real bug, confirmed live): attaching an image via Ctrl+V
    *  does NOT start generation — the screen shows "N media attached" and
@@ -101,7 +126,7 @@ export class AntigravityPtySession {
     this.text = ''
     this.cancelRequested = false
     this.nativeConversationId = input.nativeConversationId ?? this.nativeConversationId
-    const images = (input.attachments ?? [])
+    const images: ImageAttachment[] = (input.attachments ?? [])
       .filter((file) => {
         if (!isSupportedImage(file)) return false
         if (file.byteSize > MAX_NATIVE_IMAGE_BYTES) {
@@ -110,7 +135,7 @@ export class AntigravityPtySession {
         }
         return true
       })
-      .map((file) => file.storedPath)
+      .map((file) => ({ storedPath: file.storedPath, name: file.name }))
 
     if (this.transport?.isRunning && this.state === 'ready') {
       this.state = 'running'
@@ -183,34 +208,54 @@ export class AntigravityPtySession {
    *  attachment has been attempted, never before. The user's real
    *  clipboard content is saved once and restored afterward regardless of
    *  how many attachments succeeded. */
-  private async deliverPrompt(prompt: string, images: string[]): Promise<void> {
+  private async deliverPrompt(prompt: string, images: ImageAttachment[]): Promise<void> {
     if (images.length === 0) {
       this.transport?.sendPrompt(prompt)
       return
     }
+
+    // Checked once, before ever touching the clipboard — not discovered
+    // only after a paste silently fails inside the live PTY session (see
+    // clipboardCapability.ts's module comment for the real evidence this
+    // was built from).
+    if (!this.clipboardCapability) this.clipboardCapability = (this.deps.checkClipboardCapability ?? checkClipboardCapability)()
+    if (!this.clipboardCapability.available) {
+      console.warn(`[antigravity-pty] native image attachment unavailable (${this.clipboardCapability.reason}) — falling back to a text hint for ${images.length} image(s).`)
+      this.transport?.sendPrompt(appendSkippedImageHint(prompt, images, this.clipboardCapability))
+      return
+    }
+
     let saved: SavedClipboard | null = null
     this.deliveringImages = true
     try {
       saved = saveCurrentClipboard()
-      for (const imagePath of images) {
-        if (this.state !== 'running' || !this.transport?.isRunning) break // cancelled/crashed mid-sequence
+      for (const image of images) {
+        // CRITICAL: cancel() during image delivery does not itself change
+        // `this.state` (there is no pending interaction for it to resume
+        // into), so `cancelRequested` must be checked explicitly here —
+        // without it, a mid-sequence cancellation would send Escape into
+        // agy but this loop would keep pasting further images regardless.
+        if (this.cancelRequested || this.state !== 'running' || !this.transport?.isRunning) break
         const expected = (this.transport.mediaAttachedCount ?? 0) + 1
-        const loaded = writeImageToClipboard(imagePath)
+        const loaded = (this.deps.writeImageToClipboard ?? writeImageToClipboard)(image.storedPath)
         if (!loaded) {
-          console.warn(`[antigravity-pty] could not load "${imagePath}" as an image — skipped`)
+          console.warn(`[antigravity-pty] could not load "${image.storedPath}" as an image — skipped`)
           continue
         }
         this.transport.pasteClipboardImage()
         const confirmed = await this.waitForMediaAttachedAtLeast(expected, MEDIA_PASTE_CONFIRM_TIMEOUT_MS)
         if (!confirmed) {
-          console.warn(`[antigravity-pty] paste confirmation for "${imagePath}" never appeared within ${MEDIA_PASTE_CONFIRM_TIMEOUT_MS}ms`)
+          console.warn(`[antigravity-pty] paste confirmation for "${image.storedPath}" never appeared within ${MEDIA_PASTE_CONFIRM_TIMEOUT_MS}ms`)
         }
       }
     } finally {
       if (saved) restoreClipboard(saved)
       this.deliveringImages = false
     }
-    if (this.state === 'running' && this.transport?.isRunning) this.transport.sendPrompt(prompt)
+    // A cancellation mid-attachment-sequence must not still deliver the
+    // original text prompt afterward — that would silently ignore the
+    // user's cancel and start the very turn they just cancelled.
+    if (!this.cancelRequested && this.state === 'running' && this.transport?.isRunning) this.transport.sendPrompt(prompt)
   }
 
   private async waitForMediaAttachedAtLeast(count: number, timeoutMs: number): Promise<boolean> {
@@ -271,6 +316,10 @@ export class AntigravityPtySession {
     }
     this.state = 'ready'
     this.text = extractResponseText(this.lastScreenLines)
+    if (!this.nativeConversationId && this.currentInput) {
+      const lookup = this.deps.findConversationId ?? findRecentConversationId
+      this.nativeConversationId = lookup(this.currentInput.workspacePath)
+    }
     this.emit({ type: 'run.completed', finalText: this.text, nativeConversationId: this.nativeConversationId })
   }
 
@@ -309,6 +358,15 @@ export class AntigravityPtySession {
 
 // Electron's nativeImage cannot rasterize SVG for a clipboard paste (it
 // only reads raster bitmap formats), so SVG is deliberately excluded even
+/** Orbit policy, not silent failure: when native paste genuinely can't
+ *  work on this machine, the assistant still learns the attachments exist
+ *  and where to find them (mirroring the structured transport's
+ *  `view_file` hint) instead of the images just vanishing from the turn. */
+function appendSkippedImageHint(prompt: string, images: ImageAttachment[], capability: ClipboardCapability): string {
+  const list = images.map((image) => `- ${image.name}: ${image.storedPath}`).join('\n')
+  return `${prompt}\n\n(${images.length} image attachment(s) could not be natively attached on this machine — ${capability.reason} Inspect these managed paths with view_file if relevant:\n${list})`
+}
+
 // though it's an "image/*" mime type — it falls back to the structured
 // view_file hint instead, exactly like a non-image attachment.
 function isSupportedImage(file: ProjectFile): boolean {
