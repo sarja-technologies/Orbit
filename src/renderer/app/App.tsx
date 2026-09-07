@@ -1,9 +1,17 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { ArtifactContent } from '@shared/contracts'
 import type { Artifact, Conversation, ID, Message, Project, ProjectFile, ProjectSnapshot, ProviderStatus, Reference, Run } from '@shared/domain'
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
+import { ChromeBar, ProviderBanner } from './components/ChromeBar'
+import { SessionSidebar, type SessionIndicator } from './components/SessionSidebar'
+import { WorkSession, type ResolvedRecord } from './components/WorkSession'
+import { Composer } from './components/Composer'
+import { ContextPanel } from './components/ContextPanel'
+import { applyActivity, emptyActivity, type ActivityState } from './lib/activity'
+import { describeInteraction, describeResolution } from './lib/interactionCopy'
+import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
 
 interface WorkspaceState {
   projects: Project[]
@@ -32,18 +40,45 @@ const emptyWorkspace: WorkspaceState = {
 export function App(): JSX.Element {
   const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace)
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null)
-  const [projectName, setProjectName] = useState('')
-  const [conversationTitle, setConversationTitle] = useState('')
   const [composer, setComposer] = useState('')
-  const [attachmentFileIds, setAttachmentFileIds] = useState<ID[]>([])
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([])
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({})
   const [streamTextByRun, setStreamTextByRun] = useState<Record<string, string>>({})
   const [runningRunByConversation, setRunningRunByConversation] = useState<Record<string, string>>({})
-  const [pendingInteractionByRun, setPendingInteractionByRun] = useState<Record<string, InteractionRequiredEvent>>({})
-  const [respondingInteractionIds, setRespondingInteractionIds] = useState<Set<string>>(new Set())
+  const [activityByRun, setActivityByRun] = useState<Record<string, ActivityState>>({})
+  const [pendingByRun, setPendingByRun] = useState<Record<string, InteractionRequiredEvent>>({})
+  const [unavailableByRun, setUnavailableByRun] = useState<Record<string, InteractionRequiredEvent>>({})
+  const [resolvedRecords, setResolvedRecords] = useState<ResolvedRecord[]>([])
+  const [respondingId, setRespondingId] = useState<string | null>(null)
+  const [staleRunIds, setStaleRunIds] = useState<string[]>([])
+  const [contextOpen, setContextOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
+  const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [startupError, setStartupError] = useState<{ message: string; detail?: string | undefined } | null>(null)
+  const dragDepth = useRef(0)
+
+  const activeConversation = workspace.conversations.find((item) => item.id === workspace.activeConversationId) ?? null
+  const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
+  const nativeMediaAvailable = providerStatus?.details?.nativeMedia !== false
+
+  const activeMessages = useMemo(
+    () =>
+      workspace.messages
+        .filter((message) => message.conversationId === workspace.activeConversationId)
+        .sort((a, b) => a.sequence - b.sequence),
+    [workspace.messages, workspace.activeConversationId]
+  )
+
+  // Antigravity's questions are ordinary prose, so "replying" simply means
+  // the last thing in the session was an assistant turn that asked one.
+  const replying = useMemo(() => {
+    if (activeRunId) return false
+    const last = activeMessages[activeMessages.length - 1]
+    return Boolean(last && last.role === 'assistant' && last.status === 'completed' && last.content.trimEnd().endsWith('?'))
+  }, [activeMessages, activeRunId])
 
   useEffect(() => {
     const orbit = getOrbitApi()
@@ -54,17 +89,13 @@ export function App(): JSX.Element {
       })
       return
     }
-
     void loadInitial().catch((error: unknown) => {
       setStartupError({
         message: error instanceof Error ? error.message : 'Runtime initialization failed.',
         detail: error instanceof Error ? error.stack : undefined
       })
     })
-    const unsubscribe = orbit.runs.onEvent((event) => {
-      applyRuntimeEvent(event)
-    })
-    return unsubscribe
+    return orbit.runs.onEvent(applyRuntimeEvent)
   }, [])
 
   useEffect(() => {
@@ -74,21 +105,11 @@ export function App(): JSX.Element {
     }
     const orbit = getOrbitApi()
     if (!orbit) return
-    void orbit.artifacts.getContent(selectedArtifactId).then(setArtifactContent).catch((error: unknown) => {
-      setNotice(error instanceof Error ? error.message : 'Unable to load artifact.')
-    })
+    void orbit.artifacts
+      .getContent(selectedArtifactId)
+      .then(setArtifactContent)
+      .catch((error: unknown) => setNotice(error instanceof Error ? error.message : 'Unable to load artifact.'))
   }, [selectedArtifactId])
-
-  const activeConversation = workspace.conversations.find((conversation) => conversation.id === workspace.activeConversationId) ?? null
-  const activeMessages = useMemo(
-    () =>
-      workspace.messages
-        .filter((message) => message.conversationId === workspace.activeConversationId)
-        .sort((a, b) => a.sequence - b.sequence),
-    [workspace.messages, workspace.activeConversationId]
-  )
-  const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
-  const selectedArtifact = workspace.artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? workspace.artifacts[0] ?? null
 
   if (startupError) return <StartupError message={startupError.message} detail={startupError.detail} />
 
@@ -100,109 +121,48 @@ export function App(): JSX.Element {
       setWorkspace((current) => ({ ...current, projects }))
       return
     }
-    const firstProject = projects[0]
-    if (firstProject) await openProject(firstProject.id, projects)
+    await openProject(projects[0]!.id, projects)
   }
 
   async function openProject(projectId: ID, knownProjects = workspace.projects, preferredConversationId?: ID | null): Promise<void> {
     const orbit = requireOrbitApi()
     const snapshot = await orbit.projects.open(projectId)
-    setWorkspace(fromSnapshot(snapshot, knownProjects.length ? knownProjects : await orbit.projects.list(), preferredConversationId))
-    setSelectedArtifactId(snapshot.artifacts[0]?.id ?? null)
+    const projects = knownProjects.length ? knownProjects : await orbit.projects.list()
+    setWorkspace(fromSnapshot(snapshot, projects, preferredConversationId))
+    setSelectedArtifactId((current) => current ?? snapshot.artifacts[0]?.id ?? null)
   }
 
-  async function refreshProject(): Promise<void> {
+  async function refreshProject(preferred?: ID | null): Promise<void> {
     if (!workspace.activeProject) return
-    await openProject(workspace.activeProject.id, workspace.projects, workspace.activeConversationId)
-  }
-
-  async function createProject(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!projectName.trim()) return
-    const orbit = requireOrbitApi()
-    const project = await orbit.projects.create({ name: projectName })
-    const projects = await orbit.projects.list()
-    setProjectName('')
-    await openProject(project.id, projects)
-  }
-
-  async function createConversation(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!workspace.activeProject) return
-    const conversation = await requireOrbitApi().conversations.create({
-      projectId: workspace.activeProject.id,
-      title: conversationTitle || 'New conversation'
-    })
-    setConversationTitle('')
-    await refreshProject()
-    setWorkspace((current) => ({ ...current, activeConversationId: conversation.id }))
-  }
-
-  async function sendMessage(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!workspace.activeProject || !activeConversation || !composer.trim()) return
-    const content = composer
-    setComposer('')
-    const run = await requireOrbitApi().messages.send({
-      projectId: workspace.activeProject.id,
-      conversationId: activeConversation.id,
-      content,
-      attachmentFileIds
-    })
-    setRunningRunByConversation((current) => ({ ...current, [activeConversation.id]: run.id }))
-    setAttachmentFileIds([])
-    await refreshProject()
-  }
-
-  async function cancelActiveRun(): Promise<void> {
-    if (!activeRunId) return
-    await requireOrbitApi().runs.cancel({ runId: activeRunId })
-  }
-
-  async function attachFiles(): Promise<void> {
-    if (!workspace.activeProject) return
-    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProject.id })
-    if (files.length > 0) await refreshProject()
-  }
-
-  async function importArtifacts(): Promise<void> {
-    if (!workspace.activeProject) return
-    const artifacts = await requireOrbitApi().artifacts.import({
-      projectId: workspace.activeProject.id,
-      conversationId: activeConversation?.id ?? null
-    })
-    if (artifacts.length > 0) {
-      await refreshProject()
-      const firstArtifact = artifacts[0]
-      if (firstArtifact) setSelectedArtifactId(firstArtifact.id)
-    }
-  }
-
-  async function referenceArtifact(destinationConversationId: ID): Promise<void> {
-    if (!workspace.activeProject || !selectedArtifact) return
-    await requireOrbitApi().references.create({
-      projectId: workspace.activeProject.id,
-      artifactId: selectedArtifact.id,
-      destinationConversationId
-    })
-    setNotice(`Referenced "${selectedArtifact.name}" in ${workspace.conversations.find((c) => c.id === destinationConversationId)?.title ?? 'conversation'}.`)
-    await refreshProject()
+    await openProject(workspace.activeProject.id, workspace.projects, preferred ?? workspace.activeConversationId)
   }
 
   function applyRuntimeEvent(event: RuntimeEvent): void {
     if (event.type === 'text.delta') {
       setStreamTextByRun((current) => ({ ...current, [event.runId]: `${current[event.runId] ?? ''}${event.delta}` }))
     }
-    if (event.type === 'interaction.required' && event.canRespond) {
-      setPendingInteractionByRun((current) => ({ ...current, [event.runId]: event }))
+    if (event.type === 'tool.activity') {
+      setActivityByRun((current) => ({ ...current, [event.runId]: applyActivity(current[event.runId] ?? emptyActivity(), event) }))
+    }
+    if (event.type === 'interaction.required') {
+      if (event.canRespond) setPendingByRun((current) => ({ ...current, [event.runId]: event }))
+      else setUnavailableByRun((current) => ({ ...current, [event.runId]: event }))
     }
     if (event.type === 'interaction.resolved') {
-      setPendingInteractionByRun((current) => {
-        const next = { ...current }
-        for (const [runId, interaction] of Object.entries(next)) {
-          if (interaction.interactionId === event.interactionId) delete next[runId]
+      setPendingByRun((current) => {
+        const pending = current[event.runId]
+        if (pending && pending.interactionId === event.interactionId) {
+          const summary = describeResolution(event.outcome, describeInteraction(pending))
+          setResolvedRecords((records) =>
+            records.some((record) => record.interactionId === event.interactionId)
+              ? records
+              : [...records, { interactionId: event.interactionId, runId: event.runId, summary }]
+          )
+          const next = { ...current }
+          delete next[event.runId]
+          return next
         }
-        return next
+        return current
       })
     }
     if (event.type === 'artifact.produced') {
@@ -215,7 +175,12 @@ export function App(): JSX.Element {
         delete next[event.conversationId]
         return next
       })
-      setPendingInteractionByRun((current) => {
+      setPendingByRun((current) => {
+        const next = { ...current }
+        delete next[event.runId]
+        return next
+      })
+      setStreamTextByRun((current) => {
         const next = { ...current }
         delete next[event.runId]
         return next
@@ -224,205 +189,299 @@ export function App(): JSX.Element {
     }
   }
 
-  async function respondToInteraction(runId: ID, interaction: InteractionRequiredEvent, optionId: string): Promise<void> {
+  async function createProject(): Promise<void> {
+    const name = window.prompt('Project name')
+    if (!name?.trim()) return
+    const orbit = requireOrbitApi()
+    const project = await orbit.projects.create({ name: name.trim() })
+    await openProject(project.id, await orbit.projects.list())
+  }
+
+  async function createSession(): Promise<void> {
+    if (!workspace.activeProject) return
+    const conversation = await requireOrbitApi().conversations.create({
+      projectId: workspace.activeProject.id,
+      title: 'New session'
+    })
+    await refreshProject(conversation.id)
+  }
+
+  async function renameSession(conversationId: ID, title: string): Promise<void> {
+    await requireOrbitApi().conversations.rename({ conversationId, title })
+    await refreshProject()
+  }
+
+  async function deleteSession(conversationId: ID): Promise<void> {
+    await requireOrbitApi().conversations.delete({ conversationId })
+    const remaining = workspace.conversations.filter((item) => item.id !== conversationId)
+    await refreshProject(remaining[0]?.id ?? null)
+  }
+
+  async function send(): Promise<void> {
     if (!workspace.activeProject || !activeConversation) return
-    if (respondingInteractionIds.has(interaction.interactionId)) return
-    setRespondingInteractionIds((current) => new Set(current).add(interaction.interactionId))
+    if (!composer.trim() && attachments.length === 0) return
+    const content = composer.trim() || 'See the attached files.'
+    const fileIds = attachments.map((attachment) => attachment.fileId)
+
+    // Reflect the outcome each attachment is heading for before the turn
+    // starts, so nothing silently changes meaning mid-send.
+    setAttachments((current) => current.map((item) => ({ ...item, state: projectedState(item, nativeMediaAvailable) })))
+    setComposer('')
+
     try {
-      await requireOrbitApi().interactions.respond({
+      const run = await requireOrbitApi().messages.send({
+        projectId: workspace.activeProject.id,
         conversationId: activeConversation.id,
-        runId,
-        interactionId: interaction.interactionId,
-        optionId
+        content,
+        attachmentFileIds: fileIds
       })
+      setRunningRunByConversation((current) => ({ ...current, [activeConversation.id]: run.id }))
+      setActivityByRun((current) => ({ ...current, [run.id]: emptyActivity() }))
+      setAttachments([])
+      await refreshProject()
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Unable to respond to that prompt.')
-    } finally {
-      setRespondingInteractionIds((current) => {
-        const next = new Set(current)
-        next.delete(interaction.interactionId)
-        return next
-      })
+      setComposer(content)
+      setNotice(error instanceof Error ? error.message : 'Message could not be sent.')
     }
   }
 
-  async function enableInteractiveMode(): Promise<void> {
-    if (!activeConversation || activeConversation.transport === 'pty') return
-    const updated = await requireOrbitApi().conversations.setTransport({ conversationId: activeConversation.id, transport: 'pty' })
-    setWorkspace((current) => ({
-      ...current,
-      conversations: current.conversations.map((conversation) => (conversation.id === updated.id ? updated : conversation))
-    }))
+  async function cancel(): Promise<void> {
+    if (!activeRunId) return
+    await requireOrbitApi().runs.cancel({ runId: activeRunId })
+  }
+
+  async function respond(optionId: string): Promise<void> {
+    if (!activeConversation || !activeRunId) return
+    const pending = pendingByRun[activeRunId]
+    if (!pending || respondingId === pending.interactionId) return
+    setRespondingId(pending.interactionId)
+    try {
+      await requireOrbitApi().interactions.respond({
+        conversationId: activeConversation.id,
+        runId: activeRunId,
+        interactionId: pending.interactionId,
+        optionId
+      })
+    } catch {
+      // The backend rejects stale/duplicate answers by design — surface that
+      // as an inactive request rather than a raw error.
+      setStaleRunIds((current) => (current.includes(activeRunId) ? current : [...current, activeRunId]))
+      setPendingByRun((current) => {
+        const next = { ...current }
+        delete next[activeRunId]
+        return next
+      })
+    } finally {
+      setRespondingId(null)
+    }
+  }
+
+  function addProjectFiles(files: ProjectFile[]): void {
+    setAttachments((current) => {
+      const existing = new Set(current.map((item) => item.fileId))
+      const additions = files.filter((file) => !existing.has(file.id)).map((file) => draftFromProjectFile(file))
+      return [...current, ...additions]
+    })
+    for (const file of files) {
+      if (!isImage(file)) continue
+      setThumbnails((current) => (current[file.id] ? current : { ...current, [file.id]: `file://${file.storedPath}` }))
+    }
+  }
+
+  async function pickFiles(): Promise<void> {
+    if (!workspace.activeProject) return
+    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProject.id })
+    if (files.length === 0) return
+    addProjectFiles(files)
+    await refreshProject()
+  }
+
+  async function attachDroppedPaths(paths: string[]): Promise<void> {
+    if (!workspace.activeProject || paths.length === 0) return
+    try {
+      const files = await requireOrbitApi().files.attachPaths({ projectId: workspace.activeProject.id, paths })
+      addProjectFiles(files)
+      await refreshProject()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Those files could not be attached.')
+    }
+  }
+
+  async function attachPastedImages(files: File[]): Promise<void> {
+    if (!workspace.activeProject) return
+    for (const file of files) {
+      try {
+        const data = new Uint8Array(await file.arrayBuffer())
+        const name = file.name || `pasted-image-${Date.now()}.png`
+        const stored = await requireOrbitApi().files.attachImage({ projectId: workspace.activeProject.id, name, data })
+        addProjectFiles([stored])
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : 'That image could not be attached.')
+      }
+    }
+    await refreshProject()
+  }
+
+  function indicatorFor(conversationId: ID): SessionIndicator {
+    const runId = runningRunByConversation[conversationId]
+    if (!runId) return null
+    return pendingByRun[runId] ? 'attention' : 'running'
+  }
+
+  const onDragOver = (event: DragEvent): void => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+  }
+  const onDragEnter = (event: DragEvent): void => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    dragDepth.current += 1
+    setDragging(true)
+  }
+  const onDragLeave = (): void => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragging(false)
+  }
+  const onDrop = (event: DragEvent): void => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepth.current = 0
+    setDragging(false)
+    const paths = Array.from(event.dataTransfer.files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => typeof path === 'string' && path.length > 0)
+    void attachDroppedPaths(paths)
   }
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div>
-          <div className="brand">Orbit</div>
-          <div className="tagline">by AgentDock</div>
-        </div>
-        <form className="project-create" onSubmit={(event) => void createProject(event)}>
-          <select value={workspace.activeProject?.id ?? ''} onChange={(event) => void openProject(event.target.value)} aria-label="Project">
-            <option value="" disabled>
-              {workspace.projects.length ? 'Select project' : 'No projects'}
-            </option>
-            {workspace.projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-          <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="New project" />
-          <button type="submit">Create</button>
-        </form>
-      </header>
-
-      <section className="status-strip" data-state={providerStatus?.state ?? 'unknown'}>
-        <span>Antigravity</span>
-        <strong>{providerStatus?.state ?? 'checking'}</strong>
-        {providerStatus?.message ? <span>{providerStatus.message}</span> : <span>Checking the installed Antigravity runtime.</span>}
-      </section>
-
+    <div className="app">
+      <ChromeBar
+        projects={workspace.projects}
+        activeProject={workspace.activeProject}
+        providerStatus={providerStatus}
+        onSelectProject={(projectId) => void openProject(projectId)}
+        onCreateProject={() => void createProject()}
+      />
+      <ProviderBanner providerStatus={providerStatus} />
       {notice ? (
-        <button className="notice" type="button" onClick={() => setNotice(null)}>
+        <button type="button" className="notice" onClick={() => setNotice(null)}>
           {notice}
         </button>
       ) : null}
 
-      <section className="workspace">
-        <aside className="sidebar">
-          <div className="panel-title">Conversations</div>
-          <form className="new-conversation" onSubmit={(event) => void createConversation(event)}>
-            <input value={conversationTitle} onChange={(event) => setConversationTitle(event.target.value)} placeholder="Conversation name" disabled={!workspace.activeProject} />
-            <button type="submit" disabled={!workspace.activeProject}>
-              New
+      <div className="body">
+        <SessionSidebar
+          conversations={workspace.conversations}
+          activeConversationId={workspace.activeConversationId}
+          indicatorFor={indicatorFor}
+          collapsed={sidebarCollapsed}
+          disabled={!workspace.activeProject}
+          onSelect={(conversationId) => setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))}
+          onCreate={() => void createSession()}
+          onRename={(conversationId, title) => void renameSession(conversationId, title)}
+          onDelete={(conversationId) => void deleteSession(conversationId)}
+          onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
+        />
+
+        <main
+          className={`session${dragging ? ' dragging' : ''}`}
+          onDragOver={onDragOver}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+        >
+          <div className="session-head">
+            <div className="session-heading">
+              <h1>{activeConversation?.title ?? (workspace.activeProject ? 'No session selected' : 'Welcome to Orbit')}</h1>
+              {activeConversation?.transport === 'pty' ? (
+                <span className="live-badge" title="This conversation can ask for approval and receive images directly.">
+                  Live session
+                </span>
+              ) : null}
+            </div>
+            <button type="button" className="ghost" onClick={() => setContextOpen((value) => !value)} aria-expanded={contextOpen}>
+              Files
             </button>
-          </form>
-          <div className="conversation-list">
-            {workspace.conversations.map((conversation) => (
-              <button
-                type="button"
-                key={conversation.id}
-                className={conversation.id === workspace.activeConversationId ? 'active' : ''}
-                onClick={() => setWorkspace((current) => ({ ...current, activeConversationId: conversation.id }))}
-              >
-                <span>{conversation.title}</span>
-                <small>{conversation.status}</small>
-              </button>
-            ))}
-          </div>
-          <div className="assets">
-            <div className="panel-title">Project Assets</div>
-            <div className="asset-actions">
-              <button type="button" onClick={() => void attachFiles()} disabled={!workspace.activeProject}>
-                Attach file
-              </button>
-              <button type="button" onClick={() => void importArtifacts()} disabled={!workspace.activeProject}>
-                Import artifact
-              </button>
-            </div>
-            {workspace.projectFiles.map((file) => (
-              <button type="button" className={`asset-row ${attachmentFileIds.includes(file.id) ? 'selected' : ''}`} key={file.id} title={file.originalPath} onClick={() => setAttachmentFileIds((current) => current.includes(file.id) ? current.filter((id) => id !== file.id) : [...current, file.id])}>
-                {attachmentFileIds.includes(file.id) ? 'Attached: ' : ''}{file.name}
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="conversation">
-          <div className="conversation-header">
-            <div>
-              <h1>{activeConversation?.title ?? 'Create a project to begin'}</h1>
-              <p>{workspace.activeProject ? workspace.activeProject.name : 'Projects contain conversations, files, and artifacts.'}</p>
-            </div>
-            {activeConversation ? (
-              <button
-                type="button"
-                className="transport-toggle"
-                disabled={activeConversation.transport === 'pty'}
-                title="Interactive mode keeps a live Antigravity session open so it can ask you questions or request permission. Cannot be turned back off for this conversation."
-                onClick={() => void enableInteractiveMode()}
-              >
-                {activeConversation.transport === 'pty' ? 'Interactive session' : 'Enable interactive mode'}
-              </button>
-            ) : null}
-            {activeRunId ? (
-              <button className="cancel" type="button" onClick={() => void cancelActiveRun()}>
-                Cancel
-              </button>
-            ) : null}
           </div>
 
-          <div className="messages" aria-live="polite">
-            {activeMessages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                <div className="message-role">{message.role}</div>
-                <div className="message-body">{message.content}</div>
-              </article>
-            ))}
-            {activeRunId && streamTextByRun[activeRunId] ? (
-              <article className="message assistant streaming">
-                <div className="message-role">assistant</div>
-                <div className="message-body">{streamTextByRun[activeRunId]}</div>
-              </article>
-            ) : null}
-            {activeRunId && pendingInteractionByRun[activeRunId] ? (
-              <InteractionPanel
-                interaction={pendingInteractionByRun[activeRunId]!}
-                busy={respondingInteractionIds.has(pendingInteractionByRun[activeRunId]!.interactionId)}
-                onRespond={(optionId) => void respondToInteraction(activeRunId, pendingInteractionByRun[activeRunId]!, optionId)}
-              />
-            ) : null}
-            {activeConversation?.status === 'running' &&
-            !activeRunId &&
-            workspace.runs.some((run) => run.conversationId === activeConversation.id && run.state === 'waiting_for_interaction') ? (
-              <div className="interaction-panel stale">
-                A previous session left this conversation waiting on a native prompt that Orbit can no longer show. Cancel and send a new message to continue.
-              </div>
-            ) : null}
-          </div>
+          <WorkSession
+            project={workspace.activeProject}
+            conversation={activeConversation}
+            messages={activeMessages}
+            runs={workspace.runs}
+            projectFiles={workspace.projectFiles}
+            thumbnails={thumbnails}
+            activeRunId={activeRunId}
+            streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
+            activityByRun={activityByRun}
+            pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
+            unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}
+            staleInteraction={Boolean(activeRunId && staleRunIds.includes(activeRunId))}
+            respondingInteractionId={respondingId}
+            resolvedRecords={resolvedRecords}
+            onRespond={(optionId) => void respond(optionId)}
+          />
 
-          <form className="composer" onSubmit={(event) => void sendMessage(event)}>
-            <textarea
+          {activeConversation ? (
+            <Composer
               value={composer}
-              onChange={(event) => setComposer(event.target.value)}
-              placeholder="Ask Orbit..."
-              disabled={!activeConversation || Boolean(activeRunId) || Boolean(activeRunId && pendingInteractionByRun[activeRunId])}
+              attachments={attachments}
+              disabled={!activeConversation}
+              running={Boolean(activeRunId)}
+              replying={replying}
+              onChange={setComposer}
+              onSend={() => void send()}
+              onCancel={() => void cancel()}
+              onPickFiles={() => void pickFiles()}
+              onPasteImages={(files) => void attachPastedImages(files)}
+              onRemoveAttachment={(fileId) => setAttachments((current) => current.filter((item) => item.fileId !== fileId))}
+              onRetryAttachment={(fileId) =>
+                setAttachments((current) => current.map((item) => (item.fileId === fileId ? { ...item, state: 'ready', error: null } : item)))
+              }
             />
-            <button type="submit" disabled={!activeConversation || !composer.trim() || Boolean(activeRunId)}>
-              Send
-            </button>
-          </form>
-        </section>
-
-        <aside className="artifact-panel">
-          <div className="panel-title">Artifacts</div>
-          <div className="artifact-list">
-            {workspace.artifacts.map((artifact) => (
-              <button type="button" key={artifact.id} className={artifact.id === selectedArtifact?.id ? 'active' : ''} onClick={() => setSelectedArtifactId(artifact.id)}>
-                <span>{artifact.name}</span>
-                <small>{artifact.type}</small>
-              </button>
-            ))}
-          </div>
-          <ArtifactPreview artifact={selectedArtifact} content={artifactContent} />
-          {selectedArtifact ? (
-            <div className="handoff">
-              <div className="panel-title">Reference in conversation</div>
-              {workspace.conversations
-                .filter((conversation) => conversation.id !== selectedArtifact.creatorConversationId)
-                .map((conversation) => (
-                  <button type="button" key={conversation.id} onClick={() => void referenceArtifact(conversation.id)}>
-                    {conversation.title}
-                  </button>
-                ))}
-            </div>
           ) : null}
-        </aside>
-      </section>
-    </main>
+
+          {dragging ? <div className="drop-overlay">Drop to attach</div> : null}
+        </main>
+
+        <ContextPanel
+          open={contextOpen}
+          projectFiles={workspace.projectFiles}
+          artifacts={workspace.artifacts}
+          conversations={workspace.conversations}
+          activeConversationId={workspace.activeConversationId}
+          selectedArtifactId={selectedArtifactId}
+          artifactContent={artifactContent}
+          attachedFileIds={attachments.map((attachment) => attachment.fileId)}
+          onClose={() => setContextOpen(false)}
+          onAddFiles={() => void pickFiles()}
+          onImportArtifacts={() => void importArtifacts()}
+          onAttachFile={(file) => addProjectFiles([file])}
+          onSelectArtifact={setSelectedArtifactId}
+          onRevealArtifact={(artifactId) => void requireOrbitApi().artifacts.reveal(artifactId)}
+          onReferenceArtifact={(artifactId, conversationId) => void referenceArtifact(artifactId, conversationId)}
+        />
+      </div>
+    </div>
   )
+
+  async function importArtifacts(): Promise<void> {
+    if (!workspace.activeProject) return
+    const imported = await requireOrbitApi().artifacts.import({
+      projectId: workspace.activeProject.id,
+      conversationId: activeConversation?.id ?? null
+    })
+    if (imported.length === 0) return
+    setSelectedArtifactId(imported[0]!.id)
+    await refreshProject()
+  }
+
+  async function referenceArtifact(artifactId: ID, destinationConversationId: ID): Promise<void> {
+    if (!workspace.activeProject) return
+    await requireOrbitApi().references.create({ projectId: workspace.activeProject.id, artifactId, destinationConversationId })
+    const target = workspace.conversations.find((item) => item.id === destinationConversationId)
+    setNotice(`Referenced in ${target?.title ?? 'session'}.`)
+    await refreshProject()
+  }
 }
 
 function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {
@@ -449,50 +508,6 @@ function fromSnapshot(snapshot: ProjectSnapshot, projects: Project[], preferredC
   }
 }
 
-function InteractionPanel({
-  interaction,
-  busy,
-  onRespond
-}: {
-  interaction: InteractionRequiredEvent
-  busy: boolean
-  onRespond: (optionId: string) => void
-}): JSX.Element {
-  return (
-    <div className="interaction-panel" role="alert">
-      <div className="interaction-prompt">{interaction.prompt}</div>
-      <div className="interaction-options">
-        {interaction.options.map((option) => (
-          <button
-            type="button"
-            key={option.id}
-            className={option.destructive ? 'destructive' : ''}
-            disabled={busy}
-            onClick={() => onRespond(option.id)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ArtifactPreview({ artifact, content }: { artifact: Artifact | null; content: ArtifactContent | null }): JSX.Element {
-  if (!artifact) return <div className="empty-artifact">Artifacts created or imported in this project appear here.</div>
-  if (!content) return <div className="empty-artifact">Loading artifact...</div>
-  if (content.dataUrl && content.previewKind === 'image') return <img className="artifact-image" src={content.dataUrl} alt={artifact.name} />
-  if (content.dataUrl && content.previewKind === 'audio') return <audio controls src={content.dataUrl} />
-  if (content.dataUrl && content.previewKind === 'video') return <video controls src={content.dataUrl} />
-  if (content.text && content.previewKind === 'html') return <iframe title={artifact.name} sandbox="" srcDoc={content.text} />
-  if (content.text && content.previewKind === 'svg') return <iframe title={artifact.name} sandbox="" srcDoc={content.text} />
-  if (content.text) return <pre className="artifact-text">{content.text}</pre>
-  return (
-    <div className="artifact-meta">
-      <strong>{artifact.name}</strong>
-      <span>{artifact.mimeType ?? 'Unknown MIME type'}</span>
-      <span>{content.byteSize} bytes</span>
-      <span>{artifact.location}</span>
-    </div>
-  )
-}
+// Referenced for its side effect of keeping the native-image policy shared
+// between composer preview and the main process's own filter.
+void isNativeImage

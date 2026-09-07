@@ -30,5 +30,8 @@ export interface AgentProvider {
   sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void>
   cancelRun(runId: ID): Promise<void>
   respondToInteraction(input: RespondToInteractionInput): Promise<void>
+  /** Releases any live process a conversation owns. Called when the
+   *  conversation is deleted so an interactive session is never orphaned. */
+  releaseConversation(conversationId: ID): Promise<void>
   shutdown(): Promise<void>
 }

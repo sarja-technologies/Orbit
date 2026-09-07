@@ -17,6 +17,7 @@ const orbitApi: OrbitApi = {
   conversations: {
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsCreate, input),
     rename: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsRename, input),
+    delete: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsDelete, input),
     setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input)
   },
   messages: {
@@ -34,7 +35,9 @@ const orbitApi: OrbitApi = {
     respond: (input) => ipcRenderer.invoke(IPC_CHANNELS.interactionsRespond, input)
   },
   files: {
-    attach: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttach, input)
+    attach: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttach, input),
+    attachPaths: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttachPaths, input),
+    attachImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttachImage, input)
   },
   artifacts: {
     list: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsList, projectId),

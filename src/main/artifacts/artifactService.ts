@@ -32,6 +32,21 @@ export class ArtifactService {
     })
   }
 
+  /** Companion to attachProjectFiles for content that has no source path
+   *  (a pasted clipboard image). */
+  attachProjectBytes(projectId: ID, name: string, bytes: Uint8Array): ProjectFile {
+    const stored = this.storage.storeProjectBytes(projectId, name, bytes)
+    return this.store.createProjectFile({
+      projectId,
+      originalPath: stored.originalPath,
+      storedPath: stored.storedPath,
+      name: stored.name,
+      mimeType: inferMimeType(stored.name),
+      byteSize: stored.byteSize,
+      contentHash: stored.contentHash
+    })
+  }
+
   importUserArtifacts(projectId: ID, paths: string[], creatorConversationId: ID | null = null): Artifact[] {
     return paths.map((sourcePath) =>
       this.registerArtifactFromPath({

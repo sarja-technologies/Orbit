@@ -66,6 +66,7 @@ describe('App', () => {
       conversations: {
         create: vi.fn(),
         rename: vi.fn(),
+        delete: vi.fn(),
         setTransport: vi.fn()
       },
       messages: {
@@ -76,7 +77,7 @@ describe('App', () => {
         onEvent: vi.fn(() => () => undefined)
       },
       interactions: { respond: vi.fn() },
-      files: { attach: vi.fn() },
+      files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn() },
       artifacts: {
         list: vi.fn(),
         import: vi.fn(),
@@ -88,24 +89,40 @@ describe('App', () => {
     Object.defineProperty(window, 'orbit', { value: api, configurable: true })
   })
 
-  it('mounts the startup shell without an existing project', async () => {
+  it('mounts the product shell with sessions and a compact provider status', async () => {
     render(<App />)
 
     expect(await screen.findByText('Orbit')).toBeInTheDocument()
-    expect(screen.getByText('by AgentDock')).toBeInTheDocument()
-    expect(screen.getByText('Conversations')).toBeInTheDocument()
-    expect(screen.getByText('Project Assets')).toBeInTheDocument()
-    expect(screen.getByText('Artifacts')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Ask Orbit...')).toBeInTheDocument()
-    expect(screen.getByText('Create a project to begin')).toBeInTheDocument()
+    expect(screen.getByText('Sessions')).toBeInTheDocument()
+    // Provider identity is a compact status, never a permanent success banner.
+    expect(screen.getByText('Antigravity')).toBeInTheDocument()
   })
 
-  it('creates a project and shows its main conversation', async () => {
+  it('shows the composer once a session is open', async () => {
+    vi.mocked(api.projects.list).mockResolvedValue([{ id: 'project_1', name: 'Launch', createdAt: 'now', updatedAt: 'now' }])
     render(<App />)
-    await userEvent.type(screen.getByPlaceholderText('New project'), 'Launch')
-    await userEvent.click(screen.getByRole('button', { name: 'Create' }))
-    await waitFor(() => expect(screen.getAllByText('Main').length).toBeGreaterThan(0))
-    expect(screen.getAllByText('Launch').length).toBeGreaterThan(0)
+
+    expect(await screen.findByLabelText('Message Antigravity')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+  })
+
+  it('does not render a permanent artifact column — files open on request', async () => {
+    render(<App />)
+    await screen.findByText('Sessions')
+
+    expect(screen.queryByLabelText('Project files and artifacts')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Files' }))
+    expect(await screen.findByLabelText('Project files and artifacts')).toBeInTheDocument()
+  })
+
+  it('does not expose a manual transport control', async () => {
+    vi.mocked(api.projects.list).mockResolvedValue([{ id: 'project_1', name: 'Launch', createdAt: 'now', updatedAt: 'now' }])
+    render(<App />)
+    await screen.findByLabelText('Message Antigravity')
+
+    // Transport is escalated automatically; users never choose one.
+    expect(screen.queryByText(/interactive mode/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/PTY/i)).not.toBeInTheDocument()
   })
 
   it('shows a startup diagnostic when the preload API is missing', async () => {
@@ -115,7 +132,7 @@ describe('App', () => {
 
     expect(await screen.findByText('Orbit failed to start')).toBeInTheDocument()
     expect(screen.getByText(/preload API is unavailable/i)).toBeInTheDocument()
-    expect(screen.queryByText('Conversations')).not.toBeInTheDocument()
+    expect(screen.queryByText('Sessions')).not.toBeInTheDocument()
   })
 
   it('shows a startup diagnostic when runtime initialization fails', async () => {

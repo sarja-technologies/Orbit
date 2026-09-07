@@ -78,6 +78,15 @@ export class OrbitStore {
     return conversation
   }
 
+  /** Removes a conversation and everything scoped to it. Messages, runs and
+   *  run_events all declare ON DELETE CASCADE against conversations/runs, so
+   *  this single delete is sufficient — see schema.ts. */
+  deleteConversation(conversationId: ID): void {
+    const conversation = this.requireConversation(conversationId)
+    this.db.run('DELETE FROM conversations WHERE id = ?', [conversationId])
+    this.touchProject(conversation.projectId)
+  }
+
   /** Sticky by design — see ConversationTransport's doc comment. Callers
    *  (OrbitRuntime) are responsible for only ever moving 'structured' ->
    *  'pty', never the reverse. */

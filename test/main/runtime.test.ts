@@ -16,6 +16,7 @@ class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
   cancelRun = vi.fn(async () => undefined)
   respondToInteraction = vi.fn(async () => undefined)
+  releaseConversation = vi.fn(async () => undefined)
   shutdown = vi.fn(async () => undefined)
 
   async getStatus(): Promise<ProviderStatus> {
@@ -58,6 +59,32 @@ class FakeProvider implements AgentProvider {
 class FailingProvider extends FakeProvider {
   override async sendMessage(): Promise<void> {
     throw Object.assign(new Error('Antigravity unavailable - authentication required'), { code: 'provider.auth_required' })
+  }
+}
+
+/** Mirrors what the structured transport really does when agy skips an
+ *  interaction it could not present headlessly. */
+class HeadlessDenialProvider extends FakeProvider {
+  override async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    const base = {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+    onEvent({
+      ...base,
+      type: 'interaction.required',
+      interactionId: `${input.runId}:headless-denial`,
+      kind: 'permission',
+      prompt: 'Antigravity requested an interaction that headless mode could not present.',
+      options: [],
+      transport: 'structured-followup',
+      canRespond: false,
+      sourceEvidence: 'headless-denial'
+    })
+    onEvent({ ...base, type: 'run.failed', error: { code: 'provider.interaction_denied', message: 'Interaction denied.', retryable: false } })
   }
 }
 
@@ -197,6 +224,54 @@ describe('OrbitRuntime', () => {
       runtime.respondToInteraction({ conversationId: conversationB.id, runId: run.id, interactionId: 'bogus', optionId: '1' })
     ).rejects.toThrow(/does not belong/i)
     expect(provider.respondToInteraction).not.toHaveBeenCalled()
+  })
+
+  it('escalates a conversation to the live transport automatically when an image is attached', async () => {
+    const project = runtime.createProject('Auto escalate')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    expect(conversation.transport).toBe('structured')
+
+    const imagePath = path.join(dir, 'shot.png')
+    fs.writeFileSync(imagePath, Buffer.from('89504e470d0a1a0a', 'hex'))
+    const [file] = runtime.attachFiles(project.id, [imagePath])
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'What is this?', attachmentFileIds: [file!.id] })
+
+    // The user never chose a transport — attaching media escalated it.
+    expect(provider.lastInput?.transport).toBe('pty')
+    expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('pty')
+  })
+
+  it('leaves a text-only conversation on the default transport', async () => {
+    const project = runtime.createProject('No escalation')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Just text' })
+    expect(provider.lastInput?.transport).toBe('structured')
+    expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('structured')
+  })
+
+  it('escalates after a headless denial so the next turn can ask directly', async () => {
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new HeadlessDenialProvider(), dir, '0.1.0')
+    const project = runtime.createProject('Denial escalation')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Run something' })
+    await vi.waitFor(() => expect(store.requireRun(run.id).state).toBe('failed'))
+
+    // The user is never asked to pick a transport — the denial escalates it.
+    expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('pty')
+  })
+
+  it('deletes a conversation, releasing any live provider session first', async () => {
+    const project = runtime.createProject('Delete')
+    const first = runtime.openProject(project.id).conversations[0]!
+    const second = runtime.createConversation(project.id, 'Second')
+
+    await runtime.deleteConversation(second.id)
+
+    expect(provider.releaseConversation).toHaveBeenCalledWith(second.id)
+    const remaining = runtime.openProject(project.id).conversations
+    expect(remaining.map((conversation) => conversation.id)).toEqual([first.id])
   })
 
   it('forwards a valid interaction response to the provider', async () => {

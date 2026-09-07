@@ -16,9 +16,31 @@ export const renameConversationSchema = z.object({
   title: z.string().trim().min(1).max(120)
 })
 
+export const deleteConversationSchema = z.object({
+  conversationId: idSchema
+})
+
 export const setConversationTransportSchema = z.object({
   conversationId: idSchema,
   transport: z.enum(['structured', 'pty'])
+})
+
+/** Drag-and-drop paths originate from a real OS drag the user performed,
+ *  but they are still renderer-supplied: require absolute paths and cap the
+ *  batch. Existence/regular-file/size checks remain in FileStorage. */
+export const attachPathsSchema = z.object({
+  projectId: idSchema,
+  paths: z.array(z.string().trim().min(1).max(4096)).min(1).max(20)
+})
+
+/** Pasted image bytes. The name is sanitized again in FileStorage; the
+ *  size cap here is a cheap first gate before anything is written. */
+export const attachImageSchema = z.object({
+  projectId: idSchema,
+  name: z.string().trim().min(1).max(200),
+  data: z.instanceof(Uint8Array).refine((value) => value.byteLength > 0 && value.byteLength <= 100 * 1024 * 1024, {
+    message: 'Pasted images must be between 1 byte and 100 MB.'
+  })
 })
 
 export const respondToInteractionSchema = z.object({

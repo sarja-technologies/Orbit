@@ -166,8 +166,33 @@ describe('extractResponseText', () => {
     expect(extractResponseText(lines)).toBe('Done, created test.txt.')
   })
 
-  it('returns the whole screen when there is no recognizable prompt echo', () => {
-    expect(extractResponseText(['Just some text', '? for shortcuts'])).toBe('Just some text')
+  it('returns nothing when there is no prompt echo to anchor against', () => {
+    // Previously returned the whole screen. Changed deliberately: without an
+    // echo the response boundary is unknown, and the fallback leaked agy's
+    // startup banner into the transcript (see the regression below).
+    expect(extractResponseText(['Just some text', '? for shortcuts'])).toBe('')
+  })
+
+  it('regression: never reports agy’s startup banner as an assistant response', () => {
+    // Real captured first-paint screen of a freshly spawned session — it
+    // contains the signed-in account's email and the workspace path, and
+    // has no prompt echo because nothing has been sent yet.
+    const banner = [
+      '      ▄▀▀▄        Antigravity CLI 1.1.27',
+      '     ▀▀▀▀▀▀       billymillena@gmail.com',
+      '    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Medium)',
+      '   ▄▀▀    ▀▀▄     /tmp/orbit-ui/projects/project_abc/workspace',
+      '  ▄▀▀      ▀▀▄',
+      '',
+      '────────────────────────────────────────────',
+      '>',
+      '────────────────────────────────────────────',
+      '? for shortcuts                     Gemini 3.8 Flash · medium'
+    ]
+    const result = extractResponseText(banner)
+    expect(result).toBe('')
+    expect(result).not.toContain('@')
+    expect(result).not.toContain('Antigravity CLI')
   })
 
   it('preserves a fenced code block and its indentation', () => {

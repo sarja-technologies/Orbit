@@ -217,18 +217,26 @@ const TOOL_ACTIVITY_LINE = /^\s*[●▸]/
  *  screen: everything after the last echoed prompt line ("> ..."), minus
  *  UI chrome (borders, the empty compose box, the footer, tool-activity
  *  lines). Good enough for ordinary prose; not a pixel-perfect transcript
- *  of complex formatting — see docs/antigravity-transports.md. */
+ *  of complex formatting — see docs/antigravity-transports.md.
+ *
+ *  Returns '' when the screen contains no prompt echo to anchor against.
+ *  CRITICAL (real bug, caught by inspecting the running app): this used to
+ *  fall back to returning the WHOLE screen, which on a freshly spawned
+ *  session is agy's startup banner — its ASCII logo, version, the signed-in
+ *  account's email address, and the workspace path — all of which were then
+ *  persisted and displayed as if Antigravity had said them. Without an echo
+ *  anchor the response boundary is genuinely unknown, so reporting nothing
+ *  is both honest and the only way to avoid leaking that banner. */
 export function extractResponseText(lines: string[]): string {
   const echoIdx = findLastIndex(lines, (l) => PROMPT_ECHO_LINE.test(l))
+  if (echoIdx === -1) return ''
   // A long prompt word-wraps across multiple physical rows with no blank
   // line between them (confirmed live) — the real response always starts
   // only after the next blank line, so skip every non-blank row right
   // after the echo rather than assuming the echo is exactly one row tall.
   let bodyStart = echoIdx + 1
-  if (echoIdx !== -1) {
-    while (bodyStart < lines.length && lines[bodyStart]!.trim() !== '') bodyStart++
-  }
-  const body = echoIdx === -1 ? lines : lines.slice(bodyStart)
+  while (bodyStart < lines.length && lines[bodyStart]!.trim() !== '') bodyStart++
+  const body = lines.slice(bodyStart)
   const kept = body.filter((line) => {
     const trimmed = line.trim()
     if (!trimmed) return true // preserve paragraph breaks

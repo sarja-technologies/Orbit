@@ -73,6 +73,15 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.renameConversation(conversationId, title)
   }
 
+  /** Releases any live provider session the conversation owns before
+   *  removing it, so deleting an interactive session never orphans a
+   *  running process. */
+  async deleteConversation(conversationId: ID): Promise<void> {
+    const conversation = this.store.requireConversation(conversationId)
+    await this.provider.releaseConversation(conversationId)
+    this.store.deleteConversation(conversation.id)
+  }
+
   async sendMessage(input: SendMessageInput): Promise<Run> {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new Error('Project not found.')
@@ -108,19 +117,27 @@ export class OrbitRuntime extends EventEmitter {
       .filter((artifact): artifact is Artifact => artifact !== null && artifact.projectId === project.id)
       .map((artifact) => ({ id: artifact.id, name: artifact.name, location: artifact.location, mimeType: artifact.mimeType }))
 
+    // Automatic capability escalation, decided BEFORE delivery: attaching an
+    // image needs the live session, so the conversation moves itself there
+    // rather than making the user understand transports. Still one-way — see
+    // setConversationTransport.
+    const transport = attachments.some(isImageFile)
+      ? this.setConversationTransport(conversation.id, 'pty').transport
+      : conversation.transport
+
     void this.provider
       .sendMessage(
         {
           projectId: project.id,
           conversationId: conversation.id,
           runId: run.id,
-          prompt: buildPrompt(input.content, referencedArtifacts, attachments, conversation.transport),
+          prompt: buildPrompt(input.content, referencedArtifacts, attachments, transport),
           nativeConversationId: conversation.nativeConversationId,
           workspacePath,
           saveDir,
           attachments,
           referencedArtifacts,
-          transport: conversation.transport
+          transport
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -167,6 +184,12 @@ export class OrbitRuntime extends EventEmitter {
     return this.artifactService.attachProjectFiles(projectId, paths)
   }
 
+  /** Used by clipboard paste, which supplies bytes rather than a path. */
+  attachFileBytes(projectId: ID, name: string, bytes: Uint8Array): ProjectFile {
+    if (!this.store.getProject(projectId)) throw new Error('Project not found.')
+    return this.artifactService.attachProjectBytes(projectId, name, bytes)
+  }
+
   importArtifacts(projectId: ID, paths: string[], conversationId: ID | null = null): Artifact[] {
     return this.artifactService.importUserArtifacts(projectId, paths, conversationId)
   }
@@ -199,6 +222,12 @@ export class OrbitRuntime extends EventEmitter {
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
     if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
+    // Antigravity needed to ask something the headless path cannot present.
+    // Escalate the conversation so the next turn can ask the user directly,
+    // without ever asking the user to pick a transport themselves.
+    if (event.type === 'interaction.required' && !event.canRespond) {
+      this.setConversationTransport(event.conversationId, 'pty')
+    }
     if (event.type === 'interaction.resolved' && event.outcome !== 'cancelled' && run.state === 'waiting_for_interaction') {
       this.store.updateRunState(event.runId, 'running')
     }

@@ -22,12 +22,15 @@ export const IPC_CHANNELS = {
   projectsOpen: 'orbit:projects:open',
   conversationsCreate: 'orbit:conversations:create',
   conversationsRename: 'orbit:conversations:rename',
+  conversationsDelete: 'orbit:conversations:delete',
   conversationsSetTransport: 'orbit:conversations:set-transport',
   messagesSend: 'orbit:messages:send',
   runsCancel: 'orbit:runs:cancel',
   runsEvent: 'orbit:runs:event',
   interactionsRespond: 'orbit:interactions:respond',
   filesAttach: 'orbit:files:attach',
+  filesAttachPaths: 'orbit:files:attach-paths',
+  filesAttachImage: 'orbit:files:attach-image',
   artifactsList: 'orbit:artifacts:list',
   artifactsImport: 'orbit:artifacts:import',
   artifactsContent: 'orbit:artifacts:content',
@@ -49,9 +52,27 @@ export interface RenameConversationInput {
   title: string
 }
 
+export interface DeleteConversationInput {
+  conversationId: ID
+}
+
 export interface SetConversationTransportInput {
   conversationId: ID
   transport: ConversationTransport
+}
+
+/** Drag-and-drop attachment: the OS supplies real paths for files the user
+ *  dragged onto the window. */
+export interface AttachPathsInput {
+  projectId: ID
+  paths: string[]
+}
+
+/** Clipboard-paste attachment: raw image bytes with no source path. */
+export interface AttachImageInput {
+  projectId: ID
+  name: string
+  data: Uint8Array
 }
 
 export interface RespondToInteractionInput {
@@ -114,6 +135,7 @@ export interface OrbitApi {
   conversations: {
     create(input: CreateConversationInput): Promise<Conversation>
     rename(input: RenameConversationInput): Promise<Conversation>
+    delete(input: DeleteConversationInput): Promise<void>
     setTransport(input: SetConversationTransportInput): Promise<Conversation>
   }
   messages: {
@@ -128,6 +150,8 @@ export interface OrbitApi {
   }
   files: {
     attach(input: AttachFilesInput): Promise<ProjectFile[]>
+    attachPaths(input: AttachPathsInput): Promise<ProjectFile[]>
+    attachImage(input: AttachImageInput): Promise<ProjectFile>
   }
   artifacts: {
     list(projectId: ID): Promise<Artifact[]>

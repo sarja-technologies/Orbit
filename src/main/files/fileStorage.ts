@@ -22,6 +22,23 @@ export class FileStorage {
     return this.copyInto(projectId, 'artifacts', sourcePath)
   }
 
+  /** Stores bytes that never existed as a file on disk — specifically a
+   *  pasted clipboard image, which has no source path to copy from. */
+  storeProjectBytes(projectId: string, name: string, bytes: Uint8Array): StoredFile {
+    if (bytes.byteLength > 100 * 1024 * 1024) throw new Error('Orbit imports are capped at 100 MB per file.')
+    const destDir = path.join(this.dataDir, 'projects', projectId, 'files')
+    fs.mkdirSync(destDir, { recursive: true })
+    const storedPath = path.join(destDir, `${createId('file')}-${sanitizeName(name)}`)
+    fs.writeFileSync(storedPath, bytes)
+    return {
+      originalPath: storedPath,
+      storedPath,
+      name,
+      byteSize: bytes.byteLength,
+      contentHash: hashFile(storedPath)
+    }
+  }
+
   private copyInto(projectId: string, kind: 'files' | 'artifacts', sourcePath: string): StoredFile {
     const stat = fs.statSync(sourcePath)
     if (!stat.isFile()) throw new Error('Only regular files can be imported into Orbit.')

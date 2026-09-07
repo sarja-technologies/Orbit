@@ -10,6 +10,7 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
+import { checkClipboardCapability } from './clipboardCapability'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -39,7 +40,18 @@ export class AntigravityProvider implements AgentProvider {
     if (!executable) return { id: 'antigravity', state: 'unavailable', sdkAvailable: false, authConfigured: false, message: 'Antigravity is not installed. Install and sign in to the agy CLI, then restart Orbit.', details: {} }
     try {
       await probe(executable, ['--version'])
-      return { id: 'antigravity', state: 'ready', sdkAvailable: true, authConfigured: true, message: 'Antigravity · Ready', details: { executable } }
+      // `nativeMedia` lets the composer explain up front that an image will
+      // be shared as a workspace reference on this machine, instead of the
+      // user discovering it only after a failed attach.
+      const clipboard = checkClipboardCapability()
+      return {
+        id: 'antigravity',
+        state: 'ready',
+        sdkAvailable: true,
+        authConfigured: true,
+        message: 'Antigravity · Ready',
+        details: { executable, nativeMedia: clipboard.available, nativeMediaReason: clipboard.reason }
+      }
     } catch (error) {
       return { id: 'antigravity', state: 'failed', sdkAvailable: false, authConfigured: false, message: `Antigravity failed to start: ${messageOf(error)}`, details: { executable } }
     }
@@ -92,6 +104,13 @@ export class AntigravityProvider implements AgentProvider {
     const session = this.ptySessions.get(input.conversationId)
     if (!session) throw codedError('interaction.not_pending', 'This conversation has no active interactive session.')
     await session.respondToInteraction(input.runId, input.interactionId, input.optionId)
+  }
+
+  async releaseConversation(conversationId: ID): Promise<void> {
+    const session = this.ptySessions.get(conversationId)
+    if (!session) return
+    session.shutdown()
+    this.ptySessions.delete(conversationId)
   }
 
   async shutdown(): Promise<void> {

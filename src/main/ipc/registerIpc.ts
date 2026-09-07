@@ -2,12 +2,16 @@ import { BrowserWindow, dialog, ipcMain } from 'electron'
 import { IPC_CHANNELS } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { OrbitRuntime } from '@main/runtime/orbitRuntime'
+import { isAbsolute } from 'node:path'
 import {
   attachFilesSchema,
+  attachImageSchema,
+  attachPathsSchema,
   cancelRunSchema,
   createConversationSchema,
   createProjectSchema,
   createReferenceSchema,
+  deleteConversationSchema,
   idSchema,
   importArtifactSchema,
   renameConversationSchema,
@@ -40,6 +44,9 @@ export function registerIpc(runtime: OrbitRuntime): void {
       referencedArtifactIds: parsed.referencedArtifactIds ?? []
     })
   })
+  ipcMain.handle(IPC_CHANNELS.conversationsDelete, (_event, input: unknown) =>
+    runtime.deleteConversation(deleteConversationSchema.parse(input).conversationId)
+  )
   ipcMain.handle(IPC_CHANNELS.conversationsSetTransport, (_event, input: unknown) => {
     const parsed = setConversationTransportSchema.parse(input)
     return runtime.setConversationTransport(parsed.conversationId, parsed.transport)
@@ -51,6 +58,18 @@ export function registerIpc(runtime: OrbitRuntime): void {
     const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] })
     if (result.canceled || result.filePaths.length === 0) return []
     return runtime.attachFiles(parsed.projectId, result.filePaths)
+  })
+  ipcMain.handle(IPC_CHANNELS.filesAttachPaths, (_event, input: unknown) => {
+    const parsed = attachPathsSchema.parse(input)
+    // A dragged file always resolves to an absolute OS path; anything else
+    // did not come from a real drag and is refused.
+    const paths = parsed.paths.filter((candidate) => isAbsolute(candidate))
+    if (paths.length === 0) return []
+    return runtime.attachFiles(parsed.projectId, paths)
+  })
+  ipcMain.handle(IPC_CHANNELS.filesAttachImage, (_event, input: unknown) => {
+    const parsed = attachImageSchema.parse(input)
+    return runtime.attachFileBytes(parsed.projectId, parsed.name, parsed.data)
   })
   ipcMain.handle(IPC_CHANNELS.artifactsList, (_event, projectId: unknown) => runtime.listArtifacts(idSchema.parse(projectId)))
   ipcMain.handle(IPC_CHANNELS.artifactsImport, async (_event, input: unknown) => {
