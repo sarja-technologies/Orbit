@@ -20,6 +20,14 @@ export const deleteConversationSchema = z.object({
   conversationId: idSchema
 })
 
+export const setConversationModelSchema = z.object({
+  conversationId: idSchema,
+  // Both nullable on purpose: null means "Antigravity's own default", which
+  // is a real, valid choice — not a missing value to be filled in.
+  model: z.string().trim().min(1).max(200).nullable(),
+  reasoningEffort: z.enum(['low', 'medium', 'high']).nullable()
+})
+
 export const setConversationTransportSchema = z.object({
   conversationId: idSchema,
   transport: z.enum(['structured', 'pty'])

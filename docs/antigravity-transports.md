@@ -6,6 +6,24 @@ Orbit talks to the installed, signed-in `agy` CLI through one of two transports,
 renderer → preload → validated IPC → OrbitRuntime → AntigravityProvider → transport
 ```
 
+## Model and reasoning effort
+
+Both transports append the same `--model`/`--effort` flags, resolved in one place (`modelCatalog.resolveInvocation`) from the **real** `agy models` catalogue — Orbit never ships a hard-coded model list.
+
+The catalogue encodes reasoning in the model id itself, with uneven coverage (verified against agy 1.1.27): `gemini-3.8-flash-{low,medium,high}`, `gemini-3.1-pro-{low,high}` (no medium), `claude-sonnet-4-6` and `claude-opus-4-6-thinking` (no tiers at all), `gpt-oss-120b-medium` (one tier). `normalizeModels` collapses variants into one base model carrying exactly the tiers that exist, so the UI's reasoning control only appears when the selected model genuinely has one.
+
+`resolveInvocation` never guesses:
+
+| selection | flags sent |
+| --- | --- |
+| nothing | none |
+| a real catalogue id (`claude-sonnet-4-6`) | `--model <id>` only — never a redundant `--effort` |
+| base id + a tier it publishes | `--model <base> --effort <tier>` |
+| multi-tier base with no/invalid tier | **nothing** — agy's own default is used rather than a combination it would reject |
+| unrecognized id (catalogue drift) | passed through, so agy's own error surfaces |
+
+The choice is persisted per conversation (`conversations.model`, `conversations.reasoning_effort`). A live PTY process is bound to the flags it was launched with, so changing the selection retires that process and spawns a replacement, resuming the same native conversation via `--conversation`. Orbit waits for the retired process to actually exit first — two agy processes must never hold the same native conversation at once — and every transport callback is scoped to the transport that raised it, so a late exit from the retired process cannot fail the new run.
+
 ## structured (default)
 
 `agy --print <prompt> --output-format stream-json --add-dir <workspace>`. Headless, one process per run, no live interaction channel. Native `init`/`step_update`/`result` events map to Orbit's `RuntimeEvent`s (see `AntigravityProvider.ts`). If the underlying turn hits a native `ask_question`/`ask_permission`, agy skips/denies it and still reports `SUCCESS` — Orbit detects this (`headlessDenials`) and reports an honest, non-actionable `interaction.required` with `canRespond: false` instead of a false success.

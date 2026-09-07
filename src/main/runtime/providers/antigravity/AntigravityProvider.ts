@@ -5,12 +5,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
-import type { ID, ProviderStatus } from '@shared/domain'
+import type { ID, ModelOption, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
 import { checkClipboardCapability } from './clipboardCapability'
+import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -30,10 +31,21 @@ export class AntigravityProvider implements AgentProvider {
    *  transports never simultaneously own the same conversation. */
   private readonly ptySessions = new Map<ID, AntigravityPtySession>()
   private executable: string | null | undefined
+  /** The raw (un-normalized) `agy models` catalogue. resolveInvocation needs
+   *  the raw combined ids to tell a real id from a normalized base id, so
+   *  this is cached rather than the normalized view. */
+  private rawModels: ModelOption[] = []
+  private modelsLoaded = false
 
   /** `createPtySession` is overridable for tests — defaults to a real
    *  AntigravityPtySession per conversation. */
-  constructor(private readonly createPtySession: (deps: PtySessionDeps, conversationId: ID) => AntigravityPtySession = (deps, conversationId) => new AntigravityPtySession(deps, conversationId)) {}
+  constructor(
+    private readonly createPtySession: (deps: PtySessionDeps, conversationId: ID) => AntigravityPtySession = (deps, conversationId) =>
+      new AntigravityPtySession(deps, conversationId),
+    /** Overridable for tests — the default spawns the real `agy models`,
+     *  which unit tests must not do. */
+    private readonly fetchModelCatalog: (executable: string) => Promise<ModelOption[]> = fetchModels
+  ) {}
 
   async getStatus(): Promise<ProviderStatus> {
     const executable = await this.resolveExecutable()
@@ -57,20 +69,40 @@ export class AntigravityProvider implements AgentProvider {
     }
   }
 
+  /** Normalized catalogue for the UI: one entry per base model carrying
+   *  exactly the reasoning tiers Antigravity genuinely lists for it. */
+  async listModels(): Promise<ModelOption[]> {
+    await this.loadModels()
+    return normalizeModels(this.rawModels)
+  }
+
+  private async loadModels(): Promise<void> {
+    if (this.modelsLoaded) return
+    const executable = await this.resolveExecutable()
+    if (!executable) return
+    this.rawModels = await this.fetchModelCatalog(executable)
+    // Only latch once a real catalogue was read, so a transient failure is
+    // retried rather than caching an empty list forever.
+    if (this.rawModels.length > 0) this.modelsLoaded = true
+  }
+
   async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
     const executable = await this.resolveExecutable()
     if (!executable) throw codedError('provider.not_installed', 'Antigravity is not installed. Install and sign in to the agy CLI.')
     mkdirSync(input.workspacePath, { recursive: true })
+    // Resolve the model/effort choice against the real catalogue before
+    // either transport spawns, so both launch paths agree.
+    await this.loadModels()
     if (input.transport === 'pty') {
       let session = this.ptySessions.get(input.conversationId)
       if (!session) {
-        session = this.createPtySession({ executable }, input.conversationId)
+        session = this.createPtySession({ executable, invocationArgs: (send) => this.invocationArgs(send) }, input.conversationId)
         this.ptySessions.set(input.conversationId, session)
       }
       session.send(input, onEvent)
       return
     }
-    const args = ['--print', input.prompt, '--output-format', 'stream-json', '--add-dir', input.workspacePath]
+    const args = ['--print', input.prompt, '--output-format', 'stream-json', '--add-dir', input.workspacePath, ...this.invocationArgs(input)]
     // `--conversation` is the real Antigravity session-resume mechanism.
     if (input.nativeConversationId) args.push('--conversation', input.nativeConversationId)
     // Attachments are scoped additional roots, never arbitrary filesystem access.
@@ -86,6 +118,17 @@ export class AntigravityProvider implements AgentProvider {
       if (active.cancelled) return this.cancelled(active)
       this.fail(active, 'provider.exited', `Antigravity exited before returning a result (${code ?? signal ?? 'unknown'}). ${active.stderr.join(' ').trim()}`.trim())
     })
+  }
+
+  /** Real `--model`/`--effort` flags for this turn, or none. Never emits a
+   *  combination agy would reject, and never guesses a tier — see
+   *  modelCatalog.resolveInvocation. */
+  private invocationArgs(input: ProviderSendInput): string[] {
+    const invocation = resolveInvocation(input.model, input.reasoningEffort, this.rawModels)
+    const args: string[] = []
+    if (invocation.model) args.push('--model', invocation.model)
+    if (invocation.effort) args.push('--effort', invocation.effort)
+    return args
   }
 
   async cancelRun(runId: string): Promise<void> {

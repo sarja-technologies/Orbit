@@ -195,7 +195,9 @@ function input(workspacePath: string, prompt: string): ProviderSendInput {
     saveDir: workspacePath,
     attachments: [],
     referencedArtifacts: [],
-    transport: 'structured'
+    transport: 'structured',
+    model: null,
+    reasoningEffort: null
   }
 }
 function run(provider: AntigravityProvider, value: ProviderSendInput): Promise<{ text: string; nativeConversationId: string | null }> {

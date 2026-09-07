@@ -41,8 +41,13 @@
   --space-8: 32px;
   --space-12: 48px;
 
+  /* Roundness carries meaning: 4px for dense inline chrome, 8px for
+     grouped surfaces, 14px for the composer and the things that sit at the
+     same conversational level, pill only for genuinely pill-shaped controls. */
   --radius-sm: 4px;
   --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
 
   --text-meta: 13px;
   --text-ui: 14px;
@@ -207,21 +212,52 @@ textarea {
 .chrome-project {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
   flex: 1;
   min-width: 0;
 }
 
-.project-select {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text-primary);
-  max-width: 280px;
-  padding: var(--space-1) var(--space-2);
+.chrome-sep {
+  color: var(--text-muted);
 }
 
-.project-select:hover {
+.project-menu {
+  position: relative;
+  min-width: 0;
+}
+
+.project-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 320px;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-primary);
+}
+
+.project-trigger:hover {
   background: var(--bg-hover);
+}
+
+.project-trigger svg:last-of-type {
+  color: var(--text-muted);
+}
+
+.project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-name-input {
+  width: 100%;
+  background: var(--bg-inset);
+}
+
+.project-menu .menu {
+  left: 0;
+  right: auto;
+  min-width: 200px;
 }
 
 .chrome-status {
@@ -441,6 +477,7 @@ textarea {
 .menu button {
   text-align: left;
   color: var(--text-primary);
+  border-radius: var(--radius-sm);
 }
 
 .menu button:hover {
@@ -449,6 +486,42 @@ textarea {
 
 .menu .menu-danger {
   color: var(--danger);
+}
+
+/* Menus that open above their trigger (composer footer). */
+.menu-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: auto;
+}
+
+.menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.menu-item.selected {
+  background: var(--accent-soft);
+}
+
+.menu-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item-hint {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
+.menu-divider {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--border);
 }
 
 .session-rename-input,
@@ -487,8 +560,35 @@ textarea {
   justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-6);
-  border-bottom: 1px solid var(--border);
   flex: none;
+}
+
+.files-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  color: var(--text-secondary);
+  border-color: var(--border);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+}
+
+.files-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.files-toggle.active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.files-count {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .session-heading {
@@ -921,12 +1021,86 @@ textarea {
   line-height: 1.55;
 }
 
+/* ---------- empty session ---------- */
+
+/* Sits between transcript and composer so the composer stays the anchor:
+   the invitation leads to it rather than competing with it. */
+.empty-session {
+  flex: none;
+  padding: 0 var(--space-6) var(--space-4);
+}
+
+/* With nothing to read yet, the transcript stops claiming the window and
+   the invitation + composer settle into the optical centre. */
+.session-blank .transcript {
+  flex: 0 1 auto;
+  padding-bottom: 0;
+}
+
+.session-blank .empty-session {
+  margin-top: auto;
+}
+
+.session-blank .composer {
+  margin-bottom: auto;
+}
+
+.empty-inner {
+  max-width: 74ch;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: var(--text-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.empty-sub {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-meta);
+}
+
+.starters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.starter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+.starter:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.starter-hint {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
 /* ---------- composer ---------- */
 
+/* The composer is the primary anchor of the window: one soft surface that
+   carries input, attachments, model context and the send action. It has no
+   rule above it — the surface itself is the boundary. */
 .composer {
   flex: none;
-  border-top: 1px solid var(--border);
-  padding: var(--space-3) var(--space-6) var(--space-4);
+  padding: var(--space-2) var(--space-6) var(--space-4);
   background: var(--bg-content);
   display: flex;
   flex-direction: column;
@@ -950,36 +1124,31 @@ textarea {
   color: var(--accent);
 }
 
-.composer-row {
+.composer-surface {
   display: flex;
-  align-items: flex-end;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1);
   max-width: 74ch;
   width: 100%;
   margin: 0 auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated);
-  padding: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  transition: border-color 120ms ease;
 }
 
-.composer-row:focus-within {
-  border-color: var(--accent);
-}
-
-.composer-attach {
-  flex: none;
+.composer-surface:focus-within {
+  border-color: var(--border-strong);
 }
 
 .composer-input {
-  flex: 1;
-  min-width: 0;
   border: 0;
   background: transparent;
-  padding: var(--space-1) var(--space-1);
+  padding: 0 var(--space-1);
   resize: none;
   max-height: 260px;
-  line-height: 1.55;
+  line-height: 1.6;
   font-size: var(--text-body);
 }
 
@@ -987,11 +1156,88 @@ textarea {
   outline: none;
 }
 
+/* Attachment, model, reasoning and send share one slot, so the controls
+   that govern the next message all read as part of the same object. */
+.composer-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.composer-spacer {
+  flex: 1;
+  min-width: var(--space-2);
+}
+
+.composer-attach {
+  flex: none;
+  border-radius: var(--radius-pill);
+}
+
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
+.composer-provider {
+  padding-left: var(--space-1);
+  white-space: nowrap;
+}
+
+.composer-sep {
+  color: var(--border-strong);
+}
+
+.meta-menu {
+  position: relative;
+  min-width: 0;
+}
+
+.meta-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 26ch;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+}
+
+.meta-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.meta-trigger[aria-expanded='true'] {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.meta-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-menu .menu {
+  min-width: 240px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
 .composer-send {
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 600;
@@ -1150,18 +1396,36 @@ textarea {
 
 /* ---------- context panel ---------- */
 
+/* A contextual panel, not a permanent third column: it is only in the tree
+   while open. Above 1180px it takes its own space so it can never cover the
+   composer's send action; below that it overlays, because there is no room
+   left to give. */
 .context-panel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  flex: none;
   width: 340px;
-  z-index: 25;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated);
-  border-left: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-float);
+  background: var(--bg-chrome);
+  border-left: 1px solid var(--border);
+}
+
+/* Focused programmatically so screen readers land inside it — that must not
+   paint a focus ring around the whole panel. */
+.context-panel:focus {
+  outline: none;
+}
+
+@media (max-width: 1180px) {
+  .context-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    border-left: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-float);
+  }
 }
 
 .context-head {
@@ -1358,9 +1622,13 @@ textarea {
     width: 190px;
   }
   .transcript,
-  .composer {
+  .composer,
+  .empty-session {
     padding-left: var(--space-4);
     padding-right: var(--space-4);
+  }
+  .starters {
+    grid-template-columns: minmax(0, 1fr);
   }
   .context-panel {
     width: 300px;

@@ -54,6 +54,8 @@ function baseInput(overrides: Partial<ProviderSendInput> = {}): ProviderSendInpu
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
+    model: null,
+    reasoningEffort: null,
     ...overrides
   }
 }

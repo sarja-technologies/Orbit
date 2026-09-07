@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   native_conversation_id TEXT,
   status TEXT NOT NULL,
   transport TEXT NOT NULL DEFAULT 'structured',
+  model TEXT,
+  reasoning_effort TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

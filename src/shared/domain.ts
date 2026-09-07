@@ -18,6 +18,19 @@ export interface Project {
  *  docs/antigravity-transports.md's transport-continuity section). */
 export type ConversationTransport = 'structured' | 'pty'
 
+/** The real reasoning tiers Antigravity's own catalogue exposes. Which of
+ *  these a given model supports is model-dependent and never assumed — see
+ *  modelCatalog.ts. */
+export type ReasoningEffort = 'low' | 'medium' | 'high'
+
+export interface ModelOption {
+  id: string
+  label: string
+  /** Present only when the catalogue genuinely lists tier variants for this
+   *  model. Absent means the model has no reasoning control at all. */
+  supportedReasoningEfforts?: readonly ReasoningEffort[]
+}
+
 export interface Conversation {
   id: ID
   projectId: ID
@@ -26,6 +39,11 @@ export interface Conversation {
   nativeConversationId: string | null
   status: 'idle' | 'running' | 'failed'
   transport: ConversationTransport
+  /** null means "whatever Antigravity's own default is" — never a guess. */
+  model: string | null
+  /** null means no explicit tier chosen; a multi-tier model without one
+   *  falls back to Antigravity's default rather than a manufactured tier. */
+  reasoningEffort: ReasoningEffort | null
   createdAt: string
   updatedAt: string
 }

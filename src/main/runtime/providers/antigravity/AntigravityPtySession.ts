@@ -32,6 +32,9 @@ const SUPPORTED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.w
 /** Orbit application policy, not a proven `agy`/clipboard limit — see
  *  docs/antigravity-transports.md. Reused from AgentDock Pro's identical
  *  application-level cap. */
+const RETIRE_POLL_MS = 50
+const RETIRE_TIMEOUT_MS = 4_000
+
 const MAX_NATIVE_IMAGE_BYTES = 15 * 1024 * 1024
 
 interface PendingInteraction {
@@ -46,6 +49,10 @@ interface ImageAttachment {
 
 export interface PtySessionDeps {
   executable: string
+  /** Real `--model`/`--effort` args for this conversation's persisted
+   *  choice, supplied by the provider so both transports resolve
+   *  identically. */
+  invocationArgs?: (input: ProviderSendInput) => string[]
   /** Overridable for tests — defaults to spawning a real AntigravityPtyTransport. */
   createTransport?: (executable: string, cwd: string, args: string[]) => IAntigravityPtyTransport
   /** Overridable for tests — defaults to the real findRecentConversationId,
@@ -113,6 +120,10 @@ export class AntigravityPtySession {
     return this.currentRunId
   }
 
+  /** The `--model`/`--effort` flags the live transport was launched with, so
+   *  a later selection change is detectable. */
+  private spawnedInvocation = ''
+
   send(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): void {
     if (this.isBusy) {
       const error = Object.assign(new Error('This conversation already has an Antigravity turn in progress.'), {
@@ -137,6 +148,27 @@ export class AntigravityPtySession {
       })
       .map((file) => ({ storedPath: file.storedPath, name: file.name }))
 
+    // A live agy process is bound to the model/effort it was launched with,
+    // so a selection change has to retire it. The conversation itself is not
+    // lost: the replacement resumes with `--conversation`.
+    const invocation = (this.deps.invocationArgs?.(input) ?? []).join(' ')
+    if (this.transport?.isRunning && this.state === 'ready' && this.spawnedInvocation !== invocation) {
+      const retired = this.transport
+      // Detach first: its exit callback must not be read as this session
+      // dying, and the screen it leaves behind must not be mistaken for the
+      // next turn's answer.
+      this.transport = null
+      this.state = 'idle'
+      this.lastScreenLines = []
+      retired.kill()
+      // Two agy processes must never hold the same native conversation at
+      // once — the replacement resumes it, and a still-exiting predecessor
+      // makes that resume replay into a screen the extractor then reads as
+      // the answer. Wait for the old process to actually be gone.
+      void this.awaitExit(retired).then(() => this.spawn(input, images, invocation))
+      return
+    }
+
     if (this.transport?.isRunning && this.state === 'ready') {
       this.state = 'running'
       this.emit({ type: 'run.started', nativeConversationId: this.nativeConversationId })
@@ -144,24 +176,44 @@ export class AntigravityPtySession {
       return
     }
 
+    this.spawn(input, images, invocation)
+  }
+
+  /** Polls rather than listening: the retired transport's callbacks are
+   *  deliberately detached by then. Bounded so a wedged process can never
+   *  strand the conversation. */
+  private async awaitExit(transport: IAntigravityPtyTransport): Promise<void> {
+    for (let waited = 0; waited < RETIRE_TIMEOUT_MS && transport.isRunning; waited += RETIRE_POLL_MS) {
+      await wait(RETIRE_POLL_MS)
+    }
+  }
+
+  private spawn(input: ProviderSendInput, images: ImageAttachment[], invocation: string): void {
     // Fresh spawn — bare (no `-i`), so images and long/multi-line prompts
     // never hit an argv length limit; the real prompt is written once the
     // process reaches its first ready-for-input transition (bootstrap).
-    const args = ['--add-dir', input.workspacePath]
+    const args = ['--add-dir', input.workspacePath, ...(this.deps.invocationArgs?.(input) ?? [])]
+    this.spawnedInvocation = invocation
     if (this.nativeConversationId) args.push('--conversation', this.nativeConversationId)
     for (const dir of unique(input.attachments.map((file) => dirname(file.storedPath)))) args.push('--add-dir', dir)
 
     const createTransport = this.deps.createTransport ?? ((executable, cwd, transportArgs) => new AntigravityPtyTransport(executable, cwd, transportArgs))
-    this.transport = createTransport(this.deps.executable, input.workspacePath, args)
+    const spawned = createTransport(this.deps.executable, input.workspacePath, args)
+    this.transport = spawned
     this.state = 'bootstrapping'
     this.queuedPrompt = input.prompt
     this.queuedImages = images
-    this.transport.start({
-      onInteraction: (interaction) => this.handleInteraction(interaction),
-      onReadyForInput: () => this.handleReady(),
-      onBusy: () => this.handleBusy(),
-      onExit: (code, signal) => this.handleExit(code, signal),
-      onScreenText: (lines) => { this.lastScreenLines = lines }
+    // Every callback is scoped to the transport that raised it. A retired
+    // process exits asynchronously, and without this guard its exit would
+    // arrive after the replacement had already spawned — failing the new
+    // run and tearing down a session that is perfectly healthy.
+    const isCurrent = (): boolean => this.transport === spawned
+    spawned.start({
+      onInteraction: (interaction) => { if (isCurrent()) this.handleInteraction(interaction) },
+      onReadyForInput: () => { if (isCurrent()) this.handleReady() },
+      onBusy: () => { if (isCurrent()) this.handleBusy() },
+      onExit: (code, signal) => { if (isCurrent()) this.handleExit(code, signal) },
+      onScreenText: (lines) => { if (isCurrent()) this.lastScreenLines = lines }
     })
   }
 

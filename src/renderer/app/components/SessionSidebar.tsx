@@ -53,7 +53,7 @@ export function SessionSidebar({
         </button>
       </div>
 
-      <button type="button" className="new-session" onClick={onCreate} disabled={disabled}>
+      <button type="button" className="new-session" onClick={onCreate} disabled={disabled} aria-label="New session">
         <PlusGlyph />
         <span>New</span>
       </button>

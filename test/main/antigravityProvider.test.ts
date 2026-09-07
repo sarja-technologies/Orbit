@@ -42,6 +42,8 @@ function baseInput(conversationId: ID, runId: string, overrides: Partial<Provide
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
+    model: null,
+    reasoningEffort: null,
     ...overrides
   }
 }
@@ -60,7 +62,9 @@ function harness() {
         findConversationId: () => null
       },
       conversationId
-    )
+    ),
+    // Never spawn the real `agy models` from a unit test.
+    async () => []
   )
   return { provider, transportsByConversation }
 }

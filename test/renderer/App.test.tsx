@@ -29,6 +29,8 @@ describe('App', () => {
           nativeConversationId: null,
           status: 'idle',
           transport: 'structured',
+          model: null,
+          reasoningEffort: null,
           createdAt: 'now',
           updatedAt: 'now'
         }
@@ -67,7 +69,11 @@ describe('App', () => {
         create: vi.fn(),
         rename: vi.fn(),
         delete: vi.fn(),
-        setTransport: vi.fn()
+        setTransport: vi.fn(),
+        setModel: vi.fn()
+      },
+      models: {
+        list: vi.fn(async () => [])
       },
       messages: {
         send: vi.fn(async () => run)
@@ -110,6 +116,74 @@ describe('App', () => {
 
     expect(await screen.findByLabelText('Message Antigravity')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+  })
+
+  it('invites the user into an empty session and fills the composer from a starter', async () => {
+    vi.mocked(api.projects.list).mockResolvedValue([{ id: 'project_1', name: 'Launch', createdAt: 'now', updatedAt: 'now' }])
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'What should we work on?' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Review my work/ }))
+
+    const composer = screen.getByLabelText('Message Antigravity')
+    expect(composer).toHaveValue('Review my recent changes and tell me what you would fix before I ship this.')
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled()
+  })
+
+  it('drops the empty-session invitation once the session has messages', async () => {
+    vi.mocked(api.projects.list).mockResolvedValue([{ id: 'project_1', name: 'Launch', createdAt: 'now', updatedAt: 'now' }])
+    vi.mocked(api.projects.open).mockResolvedValue({
+      ...(await vi.mocked(api.projects.open).getMockImplementation()!('project_1')),
+      messages: [
+        {
+          id: 'message_1',
+          projectId: 'project_1',
+          conversationId: 'conversation_1',
+          runId: null,
+          role: 'user',
+          content: 'Already talking',
+          status: 'completed',
+          sequence: 1,
+          createdAt: 'now',
+          updatedAt: 'now'
+        }
+      ]
+    })
+    render(<App />)
+
+    await screen.findByLabelText('Message Antigravity')
+    expect(screen.queryByRole('heading', { name: 'What should we work on?' })).not.toBeInTheDocument()
+  })
+
+  it('shows the real model catalogue and persists a selection to the conversation', async () => {
+    vi.mocked(api.projects.list).mockResolvedValue([{ id: 'project_1', name: 'Launch', createdAt: 'now', updatedAt: 'now' }])
+    vi.mocked(api.models.list).mockResolvedValue([
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Thinking)' }
+    ])
+    render(<App />)
+
+    const trigger = await screen.findByLabelText('Model')
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await userEvent.click(trigger)
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ }))
+
+    expect(api.conversations.setModel).toHaveBeenCalledWith({
+      conversationId: 'conversation_1',
+      model: 'claude-sonnet-4-6',
+      reasoningEffort: null
+    })
+  })
+
+  it('creates a project from an in-app field, because Electron has no window.prompt', async () => {
+    render(<App />)
+    await screen.findByText('Sessions')
+
+    await userEvent.click(screen.getByLabelText('Project'))
+    await userEvent.click(screen.getByRole('menuitem', { name: /New project/ }))
+    await userEvent.type(screen.getByLabelText('New project name'), 'Renderer Check{Enter}')
+
+    expect(api.projects.create).toHaveBeenCalledWith({ name: 'Renderer Check' })
   })
 
   it('does not render a permanent artifact column — files open on request', async () => {

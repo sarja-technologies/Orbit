@@ -12,6 +12,7 @@ import type {
   ProjectFile,
   ProjectSnapshot,
   ProviderId,
+  ReasoningEffort,
   Reference,
   Run,
   RunState,
@@ -55,13 +56,15 @@ export class OrbitStore {
       nativeConversationId: null,
       status: 'idle',
       transport: 'structured',
+      model: null,
+      reasoningEffort: null,
       createdAt: now,
       updatedAt: now
     }
     this.db.run(
       `INSERT INTO conversations
-       (id, project_id, title, provider_id, native_conversation_id, status, transport, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversation.id,
         conversation.projectId,
@@ -70,6 +73,8 @@ export class OrbitStore {
         conversation.nativeConversationId,
         conversation.status,
         conversation.transport,
+        conversation.model,
+        conversation.reasoningEffort,
         conversation.createdAt,
         conversation.updatedAt
       ]
@@ -85,6 +90,20 @@ export class OrbitStore {
     const conversation = this.requireConversation(conversationId)
     this.db.run('DELETE FROM conversations WHERE id = ?', [conversationId])
     this.touchProject(conversation.projectId)
+  }
+
+  /** Persists the model/effort choice for one conversation. Either may be
+   *  null, meaning "use Antigravity's own default" — never a guessed value. */
+  setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
+    const conversation = this.requireConversation(conversationId)
+    this.db.run('UPDATE conversations SET model = ?, reasoning_effort = ?, updated_at = ? WHERE id = ?', [
+      model,
+      reasoningEffort,
+      nowIso(),
+      conversationId
+    ])
+    this.touchProject(conversation.projectId)
+    return this.requireConversation(conversationId)
   }
 
   /** Sticky by design — see ConversationTransport's doc comment. Callers
@@ -472,6 +491,8 @@ function mapConversation(row: Record<string, unknown>): Conversation {
     nativeConversationId: nullableText(row, 'native_conversation_id'),
     status: text(row, 'status') as Conversation['status'],
     transport: (nullableText(row, 'transport') ?? 'structured') as ConversationTransport,
+    model: nullableText(row, 'model'),
+    reasoningEffort: nullableText(row, 'reasoning_effort') as Conversation['reasoningEffort'],
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at')
   }

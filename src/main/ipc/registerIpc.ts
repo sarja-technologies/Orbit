@@ -17,6 +17,7 @@ import {
   renameConversationSchema,
   respondToInteractionSchema,
   sendMessageSchema,
+  setConversationModelSchema,
   setConversationTransportSchema
 } from './validation'
 
@@ -47,6 +48,11 @@ export function registerIpc(runtime: OrbitRuntime): void {
   ipcMain.handle(IPC_CHANNELS.conversationsDelete, (_event, input: unknown) =>
     runtime.deleteConversation(deleteConversationSchema.parse(input).conversationId)
   )
+  ipcMain.handle(IPC_CHANNELS.modelsList, () => runtime.listModels())
+  ipcMain.handle(IPC_CHANNELS.conversationsSetModel, (_event, input: unknown) => {
+    const parsed = setConversationModelSchema.parse(input)
+    return runtime.setConversationModel(parsed.conversationId, parsed.model, parsed.reasoningEffort)
+  })
   ipcMain.handle(IPC_CHANNELS.conversationsSetTransport, (_event, input: unknown) => {
     const parsed = setConversationTransportSchema.parse(input)
     return runtime.setConversationTransport(parsed.conversationId, parsed.transport)

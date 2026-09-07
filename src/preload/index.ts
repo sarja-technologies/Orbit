@@ -18,7 +18,11 @@ const orbitApi: OrbitApi = {
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsCreate, input),
     rename: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsRename, input),
     delete: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsDelete, input),
-    setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input)
+    setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input),
+    setModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetModel, input)
+  },
+  models: {
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.modelsList)
   },
   messages: {
     send: (input) => ipcRenderer.invoke(IPC_CHANNELS.messagesSend, input)

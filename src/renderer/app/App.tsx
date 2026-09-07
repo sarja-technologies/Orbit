@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { ArtifactContent } from '@shared/contracts'
-import type { Artifact, Conversation, ID, Message, Project, ProjectFile, ProjectSnapshot, ProviderStatus, Reference, Run } from '@shared/domain'
+import type {
+  Artifact,
+  Conversation,
+  ID,
+  Message,
+  ModelOption,
+  Project,
+  ProjectFile,
+  ProjectSnapshot,
+  ProviderStatus,
+  ReasoningEffort,
+  Reference,
+  Run
+} from '@shared/domain'
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
@@ -8,6 +21,7 @@ import { ChromeBar, ProviderBanner } from './components/ChromeBar'
 import { SessionSidebar, type SessionIndicator } from './components/SessionSidebar'
 import { WorkSession, type ResolvedRecord } from './components/WorkSession'
 import { Composer } from './components/Composer'
+import { EmptySession, type Starter } from './components/EmptySession'
 import { ContextPanel } from './components/ContextPanel'
 import { applyActivity, emptyActivity, type ActivityState } from './lib/activity'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
@@ -40,6 +54,7 @@ const emptyWorkspace: WorkspaceState = {
 export function App(): JSX.Element {
   const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace)
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null)
+  const [models, setModels] = useState<ModelOption[]>([])
   const [composer, setComposer] = useState('')
   const [attachments, setAttachments] = useState<DraftAttachment[]>([])
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({})
@@ -59,6 +74,7 @@ export function App(): JSX.Element {
   const [notice, setNotice] = useState<string | null>(null)
   const [startupError, setStartupError] = useState<{ message: string; detail?: string | undefined } | null>(null)
   const dragDepth = useRef(0)
+  const composerFocusRef = useRef<(() => void) | null>(null)
 
   const activeConversation = workspace.conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
@@ -84,6 +100,10 @@ export function App(): JSX.Element {
         .sort((a, b) => a.sequence - b.sequence),
     [workspace.messages, workspace.activeConversationId]
   )
+
+  // A session with nothing in it yet: the invitation and the composer sit
+  // together in the middle rather than clinging to the bottom of a void.
+  const blankSession = Boolean(activeConversation) && activeMessages.length === 0 && !activeRunId
 
   // Antigravity's questions are ordinary prose, so "replying" simply means
   // the last thing in the session was an assistant turn that asked one.
@@ -130,6 +150,12 @@ export function App(): JSX.Element {
     const orbit = requireOrbitApi()
     const [projects, status] = await Promise.all([orbit.projects.list(), orbit.providers.status()])
     setProviderStatus(status)
+    // The catalogue comes from Antigravity itself. If it cannot be read we
+    // show no models at all rather than inventing plausible-looking ones.
+    void orbit.models
+      .list()
+      .then(setModels)
+      .catch(() => setModels([]))
     if (projects.length === 0) {
       setWorkspace((current) => ({ ...current, projects }))
       return
@@ -202,11 +228,9 @@ export function App(): JSX.Element {
     }
   }
 
-  async function createProject(): Promise<void> {
-    const name = window.prompt('Project name')
-    if (!name?.trim()) return
+  async function createProject(name: string): Promise<void> {
     const orbit = requireOrbitApi()
-    const project = await orbit.projects.create({ name: name.trim() })
+    const project = await orbit.projects.create({ name })
     await openProject(project.id, await orbit.projects.list())
   }
 
@@ -255,6 +279,23 @@ export function App(): JSX.Element {
     } catch (error) {
       setComposer(content)
       setNotice(error instanceof Error ? error.message : 'Message could not be sent.')
+    }
+  }
+
+  /** Persisted per conversation, so a session keeps the model it was
+   *  started with instead of silently drifting to whatever was picked last. */
+  async function changeModel(model: string | null, reasoningEffort: ReasoningEffort | null): Promise<void> {
+    if (!activeConversation) return
+    const conversationId = activeConversation.id
+    setWorkspace((current) => ({
+      ...current,
+      conversations: current.conversations.map((item) => (item.id === conversationId ? { ...item, model, reasoningEffort } : item))
+    }))
+    try {
+      await requireOrbitApi().conversations.setModel({ conversationId, model, reasoningEffort })
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That model could not be selected.')
+      await refreshProject()
     }
   }
 
@@ -387,7 +428,7 @@ export function App(): JSX.Element {
         activeProject={workspace.activeProject}
         providerStatus={providerStatus}
         onSelectProject={(projectId) => void openProject(projectId)}
-        onCreateProject={() => void createProject()}
+        onCreateProject={(name) => void createProject(name)}
       />
       <ProviderBanner providerStatus={providerStatus} />
       {notice ? (
@@ -411,7 +452,7 @@ export function App(): JSX.Element {
         />
 
         <main
-          className={`session${dragging ? ' dragging' : ''}`}
+          className={`session${dragging ? ' dragging' : ''}${blankSession ? ' session-blank' : ''}`}
           onDragOver={onDragOver}
           onDragEnter={onDragEnter}
           onDragLeave={onDragLeave}
@@ -426,8 +467,15 @@ export function App(): JSX.Element {
                 </span>
               ) : null}
             </div>
-            <button type="button" className="ghost" onClick={() => setContextOpen((value) => !value)} aria-expanded={contextOpen}>
-              Files
+            <button
+              type="button"
+              className={contextOpen ? 'files-toggle active' : 'files-toggle'}
+              onClick={() => setContextOpen((value) => !value)}
+              aria-expanded={contextOpen}
+            >
+              <FilesGlyph />
+              <span>Files</span>
+              {workspace.projectFiles.length > 0 ? <span className="files-count">{workspace.projectFiles.length}</span> : null}
             </button>
           </div>
 
@@ -449,8 +497,25 @@ export function App(): JSX.Element {
             onRespond={(optionId) => void respond(optionId)}
           />
 
+          {blankSession ? (
+            <EmptySession
+              projectName={workspace.activeProject?.name ?? null}
+              onPick={(starter: Starter) => {
+                setComposer(starter.prompt)
+                composerFocusRef.current?.()
+              }}
+            />
+          ) : null}
+
           {activeConversation ? (
             <Composer
+              models={models}
+              selectedModel={activeConversation.model}
+              selectedEffort={activeConversation.reasoningEffort}
+              onModelChange={(model, effort) => void changeModel(model, effort)}
+              registerFocus={(focus) => {
+                composerFocusRef.current = focus
+              }}
               value={composer}
               attachments={displayAttachments}
               disabled={!activeConversation}
@@ -510,6 +575,21 @@ export function App(): JSX.Element {
     setNotice(`Referenced in ${target?.title ?? 'session'}.`)
     await refreshProject()
   }
+}
+
+function FilesGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path
+        d="M4 2h4l3 3v9H4z"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        fill="none"
+        strokeLinejoin="round"
+      />
+      <path d="M8 2v3h3" stroke="currentColor" strokeWidth="1.25" fill="none" strokeLinejoin="round" />
+    </svg>
+  )
 }
 
 function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {

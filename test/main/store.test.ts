@@ -22,6 +22,33 @@ afterEach(() => {
 })
 
 describe('OrbitStore', () => {
+  it('persists a model and reasoning effort per conversation', () => {
+    const project = store.createProject('Launch')
+    const conversation = store.createConversation(project.id, 'Website')
+
+    // A brand-new conversation carries no selection at all — Orbit must not
+    // start one on a model the user never picked.
+    expect(conversation.model).toBeNull()
+    expect(conversation.reasoningEffort).toBeNull()
+
+    store.setConversationModel(conversation.id, 'gemini-3.8-flash', 'medium')
+    const saved = store.getConversation(conversation.id)
+    expect(saved?.model).toBe('gemini-3.8-flash')
+    expect(saved?.reasoningEffort).toBe('medium')
+
+    // Selecting a model with no reasoning tiers must clear a stale effort
+    // rather than leaving one behind that the model cannot honour.
+    store.setConversationModel(conversation.id, 'claude-sonnet-4-6', null)
+    const cleared = store.getConversation(conversation.id)
+    expect(cleared?.model).toBe('claude-sonnet-4-6')
+    expect(cleared?.reasoningEffort).toBeNull()
+
+    // And returning to the default is a real, persisted state.
+    store.setConversationModel(conversation.id, null, null)
+    const reset = store.getConversation(conversation.id)
+    expect(reset?.model).toBeNull()
+  })
+
   it('round trips projects, conversations, messages, runs, and artifacts', () => {
     const project = store.createProject('Launch')
     const conversation = store.createConversation(project.id, 'Website')

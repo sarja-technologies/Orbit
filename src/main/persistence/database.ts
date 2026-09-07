@@ -36,7 +36,11 @@ export class OrbitDatabase {
    *  (SQLite has no `ADD COLUMN IF NOT EXISTS`, so a "duplicate column"
    *  failure is expected and ignored on every run after the first). */
   private runMigrations(): void {
-    const migrations = ["ALTER TABLE conversations ADD COLUMN transport TEXT NOT NULL DEFAULT 'structured'"]
+    const migrations = [
+      "ALTER TABLE conversations ADD COLUMN transport TEXT NOT NULL DEFAULT 'structured'",
+      'ALTER TABLE conversations ADD COLUMN model TEXT',
+      'ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT'
+    ]
     for (const migration of migrations) {
       try {
         this.exec(migration)

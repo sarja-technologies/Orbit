@@ -4,6 +4,8 @@ import type {
   Conversation,
   ConversationTransport,
   ID,
+  ModelOption,
+  ReasoningEffort,
   Project,
   ProjectFile,
   ProjectSnapshot,
@@ -24,6 +26,8 @@ export const IPC_CHANNELS = {
   conversationsRename: 'orbit:conversations:rename',
   conversationsDelete: 'orbit:conversations:delete',
   conversationsSetTransport: 'orbit:conversations:set-transport',
+  conversationsSetModel: 'orbit:conversations:set-model',
+  modelsList: 'orbit:models:list',
   messagesSend: 'orbit:messages:send',
   runsCancel: 'orbit:runs:cancel',
   runsEvent: 'orbit:runs:event',
@@ -55,6 +59,14 @@ export interface RenameConversationInput {
 
 export interface DeleteConversationInput {
   conversationId: ID
+}
+
+export interface SetConversationModelInput {
+  conversationId: ID
+  /** null = use Antigravity's own default model. */
+  model: string | null
+  /** null = no explicit tier; never a manufactured default. */
+  reasoningEffort: ReasoningEffort | null
 }
 
 export interface SetConversationTransportInput {
@@ -138,6 +150,12 @@ export interface OrbitApi {
     rename(input: RenameConversationInput): Promise<Conversation>
     delete(input: DeleteConversationInput): Promise<void>
     setTransport(input: SetConversationTransportInput): Promise<Conversation>
+    setModel(input: SetConversationModelInput): Promise<Conversation>
+  }
+  models: {
+    /** The real, normalized Antigravity catalogue. Empty when it could not
+     *  be read — the UI must show that honestly, never a fallback list. */
+    list(): Promise<ModelOption[]>
   }
   messages: {
     send(input: SendMessageInput): Promise<Run>

@@ -1,4 +1,4 @@
-import type { ConversationTransport, ID, ProjectFile, ProviderStatus } from '@shared/domain'
+import type { ConversationTransport, ID, ModelOption, ProjectFile, ProviderStatus, ReasoningEffort } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 
 export interface ProviderSendInput {
@@ -16,6 +16,10 @@ export interface ProviderSendInput {
    *  that can surface and answer native questions/permission prompts and
    *  attach images natively; 'structured' is the default headless path. */
   transport: ConversationTransport
+  /** The conversation's persisted model choice; null means Antigravity's
+   *  own default. Resolved into real --model/--effort args by the provider. */
+  model: string | null
+  reasoningEffort: ReasoningEffort | null
 }
 
 export interface RespondToInteractionInput {
@@ -27,6 +31,9 @@ export interface RespondToInteractionInput {
 
 export interface AgentProvider {
   getStatus(): Promise<ProviderStatus>
+  /** The real, normalized model catalogue. Empty when it cannot be read —
+   *  callers must not substitute a fabricated list. */
+  listModels(): Promise<ModelOption[]>
   sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void>
   cancelRun(runId: ID): Promise<void>
   respondToInteraction(input: RespondToInteractionInput): Promise<void>

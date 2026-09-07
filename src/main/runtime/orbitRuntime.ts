@@ -7,7 +7,9 @@ import type {
   Project,
   ProjectFile,
   ProjectSnapshot,
+  ModelOption,
   ProviderStatus,
+  ReasoningEffort,
   Reference,
   Run,
   RuntimeErrorInfo,
@@ -137,7 +139,9 @@ export class OrbitRuntime extends EventEmitter {
           saveDir,
           attachments,
           referencedArtifacts,
-          transport
+          transport,
+          model: conversation.model,
+          reasoningEffort: conversation.reasoningEffort
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -171,6 +175,17 @@ export class OrbitRuntime extends EventEmitter {
     const conversation = this.store.requireConversation(conversationId)
     if (conversation.transport === 'pty' && transport === 'structured') return conversation
     return this.store.setConversationTransport(conversationId, transport)
+  }
+
+  listModels(): Promise<ModelOption[]> {
+    return this.provider.listModels()
+  }
+
+  /** Persists a conversation's model/effort choice. The provider decides
+   *  what that means at launch (see modelCatalog.resolveInvocation); Orbit
+   *  never manufactures a tier the catalogue does not list. */
+  setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
+    return this.store.setConversationModel(conversationId, model, reasoningEffort)
   }
 
   async respondToInteraction(input: { conversationId: ID; runId: ID; interactionId: string; optionId: string }): Promise<void> {

@@ -14,6 +14,7 @@ import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
+  listModels = vi.fn(async () => [])
   cancelRun = vi.fn(async () => undefined)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
