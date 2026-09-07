@@ -39,6 +39,25 @@ export function EmptySession({ projectName, onPick }: { projectName: string | nu
   )
 }
 
+/** Sits under the composer in a new session only. Every line is a shortcut
+ *  Orbit genuinely implements, so the empty state teaches the app instead of
+ *  decorating it — and the pair of blocks reads as one composed unit rather
+ *  than a lone box in a large canvas. */
+export function ComposerHints(): JSX.Element {
+  return (
+    <p className="composer-hints">
+      <span>
+        <kbd>Enter</kbd> to send
+      </span>
+      <span>
+        <kbd>Shift</kbd>
+        <kbd>Enter</kbd> for a new line
+      </span>
+      <span>Drop files anywhere to attach</span>
+    </p>
+  )
+}
+
 /** Small, literal icons — a magnifier for exploring, a pencil for building.
  *  They aid recognition at a glance; nothing decorative. */
 function StarterGlyph({ id }: { id: string }): JSX.Element {

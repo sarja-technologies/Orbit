@@ -5,6 +5,10 @@ export type ProviderId = 'antigravity'
 export interface Project {
   id: ID
   name: string
+  /** The real folder Antigravity runs in for this project's sessions.
+   *  null means the project has no folder of its own and falls back to the
+   *  Orbit-managed workspace directory — never a guessed path. */
+  rootPath: string | null
   createdAt: string
   updatedAt: string
 }
@@ -44,6 +48,9 @@ export interface Conversation {
   /** null means no explicit tier chosen; a multi-tier model without one
    *  falls back to Antigravity's default rather than a manufactured tier. */
   reasoningEffort: ReasoningEffort | null
+  /** Per-session override of the project's root folder. null means "use the
+   *  project's folder", which is what almost every session wants. */
+  workingDirectory: string | null
   createdAt: string
   updatedAt: string
 }
@@ -150,6 +157,27 @@ export interface RuntimeErrorInfo {
   message: string
   retryable: boolean
   details?: Record<string, unknown>
+}
+
+/** One project plus the sessions that belong to it — the shape the
+ *  project-first sidebar renders directly, without needing every project's
+ *  full snapshot in memory. */
+export interface ProjectGroup {
+  project: Project
+  conversations: Conversation[]
+}
+
+/** Cross-session user preferences. Persisted in the Orbit database rather
+ *  than the renderer, so they survive a reinstall of the window state and
+ *  are readable by the runtime when it seeds a new session. */
+export interface OrbitPreferences {
+  /** The last reasoning tier the user explicitly chose, on any model. null
+   *  until they have ever chosen one — see reasoningPolicy.ts, which
+   *  defaults that case to medium. */
+  lastReasoningEffort: ReasoningEffort | null
+  /** Explicit per-model choices, so switching away from a model and back
+   *  returns the tier that model was left on. Keyed by normalized model id. */
+  modelReasoningEfforts: Record<string, ReasoningEffort>
 }
 
 export interface ProjectSnapshot {

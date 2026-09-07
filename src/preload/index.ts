@@ -11,15 +11,25 @@ const orbitApi: OrbitApi = {
   },
   projects: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.projectsList),
+    tree: () => ipcRenderer.invoke(IPC_CHANNELS.projectsTree),
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.projectsCreate, input),
-    open: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.projectsOpen, projectId)
+    open: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.projectsOpen, projectId),
+    setRoot: (input) => ipcRenderer.invoke(IPC_CHANNELS.projectsSetRoot, input)
+  },
+  dialog: {
+    pickFolder: (input) => ipcRenderer.invoke(IPC_CHANNELS.dialogPickFolder, input ?? null)
+  },
+  preferences: {
+    get: () => ipcRenderer.invoke(IPC_CHANNELS.preferencesGet),
+    set: (preferences) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSet, preferences)
   },
   conversations: {
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsCreate, input),
     rename: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsRename, input),
     delete: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsDelete, input),
     setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input),
-    setModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetModel, input)
+    setModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetModel, input),
+    setWorkingDirectory: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetWorkingDirectory, input)
   },
   models: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.modelsList)

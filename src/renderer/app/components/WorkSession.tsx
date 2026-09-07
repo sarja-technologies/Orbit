@@ -109,6 +109,7 @@ export function WorkSession({
                 showRole={showRole}
                 attachments={message.role === 'user' ? attachmentsFor(runId) : []}
                 thumbnails={thumbnails}
+                error={message.runId ? runs.find((run) => run.id === message.runId)?.error ?? null : null}
               />
             </div>
           )

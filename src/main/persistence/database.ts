@@ -39,7 +39,12 @@ export class OrbitDatabase {
     const migrations = [
       "ALTER TABLE conversations ADD COLUMN transport TEXT NOT NULL DEFAULT 'structured'",
       'ALTER TABLE conversations ADD COLUMN model TEXT',
-      'ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT'
+      'ALTER TABLE conversations ADD COLUMN reasoning_effort TEXT',
+      // Project/session working folders. Existing rows keep NULL, which
+      // means "the Orbit-managed workspace" — the same folder they have
+      // always run in — so no session loses its history or its location.
+      'ALTER TABLE projects ADD COLUMN root_path TEXT',
+      'ALTER TABLE conversations ADD COLUMN working_directory TEXT'
     ]
     for (const migration of migrations) {
       try {

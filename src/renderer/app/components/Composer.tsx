@@ -15,9 +15,8 @@ interface ComposerProps {
   models: ModelOption[]
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
-  fastMode: boolean
-  onModelChange: (model: string | null, effort: ReasoningEffort | null) => void
-  onFastModeChange: (fastMode: boolean) => void
+  onSelectModel: (model: string | null) => void
+  onSelectEffort: (effort: ReasoningEffort) => void
   /** Lets the empty-state starters hand focus back to the composer after
    *  they fill it, so the user can keep typing without reaching for it. */
   registerFocus?: (focus: () => void) => void
@@ -52,9 +51,8 @@ export function Composer({
   models,
   selectedModel,
   selectedEffort,
-  fastMode,
-  onModelChange,
-  onFastModeChange,
+  onSelectModel,
+  onSelectEffort,
   registerFocus
 }: ComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -138,10 +136,9 @@ export function Composer({
             models={models}
             selectedModel={selectedModel}
             selectedEffort={selectedEffort}
-            fastMode={fastMode}
             disabled={disabled}
-            onChange={onModelChange}
-            onFastModeChange={onFastModeChange}
+            onSelectModel={onSelectModel}
+            onSelectEffort={onSelectEffort}
           />
 
           {running ? (

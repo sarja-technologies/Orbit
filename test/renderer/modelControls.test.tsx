@@ -4,8 +4,9 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ModelControls } from '../../src/renderer/app/components/ModelControls'
 import { EmptySession, STARTERS } from '../../src/renderer/app/components/EmptySession'
-import { compactModelLabel, descendingEfforts, isReasoningAdjustable } from '../../src/renderer/app/lib/modelDisplay'
-import { animationTempo, reasoningTheme, tierAtFraction, trackFill } from '../../src/renderer/app/lib/reasoningVisual'
+import { compactModelLabel, descendingEfforts, isReasoningAdjustable, reasoningSummary } from '../../src/renderer/app/lib/modelDisplay'
+import { reasoningTheme, stopOffset, tierAtFraction, trackFill } from '../../src/renderer/app/lib/reasoningVisual'
+import { groupByProvider, matchesQuery, providerForModel } from '../../src/renderer/app/lib/providers'
 import type { ModelOption, ReasoningEffort } from '../../src/shared/domain'
 
 /** Normalized exactly as Antigravity publishes it: uneven tier coverage, a
@@ -17,30 +18,28 @@ const MODELS: ModelOption[] = [
   { id: 'gpt-oss-120b', label: 'GPT-OSS 120B', supportedReasoningEfforts: ['medium'] }
 ]
 
-function renderControls(
-  selectedModel: string | null,
-  selectedEffort: ReasoningEffort | null = null,
-  fastMode = false,
-  models: ModelOption[] = MODELS
-) {
-  const onChange = vi.fn()
-  const onFastModeChange = vi.fn()
+function renderControls(selectedModel: string | null, selectedEffort: ReasoningEffort | null = null, models: ModelOption[] = MODELS) {
+  const onSelectModel = vi.fn()
+  const onSelectEffort = vi.fn()
   render(
     <ModelControls
       models={models}
       selectedModel={selectedModel}
       selectedEffort={selectedEffort}
-      fastMode={fastMode}
       disabled={false}
-      onChange={onChange}
-      onFastModeChange={onFastModeChange}
+      onSelectModel={onSelectModel}
+      onSelectEffort={onSelectEffort}
     />
   )
-  return { onChange, onFastModeChange }
+  return { onSelectModel, onSelectEffort }
 }
 
-const openPopover = async (user: ReturnType<typeof userEvent.setup>) =>
-  user.click(screen.getByLabelText('Model and reasoning'))
+const openPopover = async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByLabelText('Model and reasoning'))
+
+const openBrowser = async (user: ReturnType<typeof userEvent.setup>) => {
+  await openPopover(user)
+  await user.click(screen.getByRole('button', { name: /Other models/ }))
+}
 
 describe('compact model label', () => {
   it('drops the vendor word the surrounding UI already implies', () => {
@@ -52,13 +51,32 @@ describe('compact model label', () => {
     expect(compactModelLabel('Claude Sonnet 4.6 (Thinking)')).toBe('Claude Sonnet 4.6')
   })
 
-  it('leaves a label alone when there is nothing redundant to remove', () => {
-    expect(compactModelLabel('GPT-OSS 120B')).toBe('GPT-OSS 120B')
-  })
-
   it('never trims a label down to nothing', () => {
     expect(compactModelLabel('Gemini')).toBe('Gemini')
     expect(compactModelLabel('(Thinking)')).toBe('(Thinking)')
+  })
+})
+
+describe('providers', () => {
+  it('identifies a provider from the stable half of a catalogue entry', () => {
+    expect(providerForModel(MODELS[0]!)).toBe('gemini')
+    expect(providerForModel(MODELS[2]!)).toBe('anthropic')
+    expect(providerForModel(MODELS[3]!)).toBe('openai')
+    expect(providerForModel({ id: 'mystery-7b', label: 'Mystery 7B' })).toBe('other')
+  })
+
+  it('groups the catalogue Gemini-first and drops providers with no models', () => {
+    const groups = groupByProvider(MODELS)
+    expect(groups.map((group) => group.provider.label)).toEqual(['Gemini', 'Claude', 'OpenAI'])
+    expect(groups[0]!.models).toHaveLength(2)
+  })
+
+  it('searches by name, id and provider', () => {
+    expect(matchesQuery(MODELS[0]!, 'flash')).toBe(true)
+    expect(matchesQuery(MODELS[0]!, 'gemini-3.8')).toBe(true)
+    expect(matchesQuery(MODELS[2]!, 'claude')).toBe(true)
+    expect(matchesQuery(MODELS[2]!, 'flash')).toBe(false)
+    expect(matchesQuery(MODELS[2]!, '   ')).toBe(true)
   })
 })
 
@@ -69,20 +87,40 @@ describe('closed composer control', () => {
     expect(screen.getByLabelText('Model and reasoning')).not.toHaveTextContent('Gemini 3.8 Flash')
   })
 
-  it('carries model, effort and fast mode in one control', () => {
-    renderControls('gemini-3.8-flash', 'high', true)
-    const trigger = screen.getByLabelText('Model and reasoning')
-    expect(trigger).toHaveTextContent('3.8 Flash')
-    expect(trigger).toHaveTextContent('High')
-    expect(trigger).toHaveTextContent('Fast mode')
+  it('carries the selected reasoning tier in the peak treatment at a model’s maximum', () => {
+    renderControls('gemini-3.8-flash', 'high')
+    const chip = screen.getByText('High')
+    expect(chip).toHaveAttribute('data-theme', 'peak')
   })
 
-  it('spends no space saying fast mode is off', () => {
-    renderControls('gemini-3.8-flash', 'high', false)
-    expect(screen.getByLabelText('Model and reasoning')).not.toHaveTextContent('Fast')
+  it('drops to a restrained treatment below the maximum, and updates immediately', () => {
+    const { rerender } = render(
+      <ModelControls
+        models={MODELS}
+        selectedModel="gemini-3.8-flash"
+        selectedEffort="medium"
+        disabled={false}
+        onSelectModel={vi.fn()}
+        onSelectEffort={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Medium')).toHaveAttribute('data-theme', 'mid')
+
+    rerender(
+      <ModelControls
+        models={MODELS}
+        selectedModel="gemini-3.8-flash"
+        selectedEffort="low"
+        disabled={false}
+        onSelectModel={vi.fn()}
+        onSelectEffort={vi.fn()}
+      />
+    )
+    expect(screen.queryByText('Medium')).not.toBeInTheDocument()
+    expect(screen.getByText('Low')).toHaveAttribute('data-theme', 'base')
   })
 
-  it('shows only the model when no effort is chosen', () => {
+  it('shows only the model when the model has no reasoning setting', () => {
     renderControls('claude-sonnet-4-6')
     const trigger = screen.getByLabelText('Model and reasoning')
     expect(trigger).toHaveTextContent('Claude Sonnet 4.6')
@@ -91,227 +129,281 @@ describe('closed composer control', () => {
   })
 
   it('is disabled when Antigravity’s catalogue could not be read', () => {
-    renderControls(null, null, false, [])
+    renderControls(null, null, [])
     expect(screen.getByLabelText('Model and reasoning')).toBeDisabled()
   })
 })
 
-describe('model list', () => {
-  it('lists the real catalogue with its genuine tiers', async () => {
+describe('compact model menu', () => {
+  it('shows the default model and Gemini only, because Antigravity is a Gemini workflow', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
 
-    expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toHaveTextContent('High · Medium · Low reasoning')
-    expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toHaveTextContent('High · Low reasoning')
-    expect(screen.getByRole('menuitemradio', { name: /Claude Sonnet/ })).toHaveTextContent('No reasoning setting')
-    expect(screen.getByRole('menuitemradio', { name: /GPT-OSS/ })).toHaveTextContent('Medium reasoning only')
+    expect(screen.getByRole('menuitemradio', { name: /Default model/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: /Claude Sonnet/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: /GPT-OSS/ })).not.toBeInTheDocument()
   })
 
-  it('keeps the primary list short and reveals the rest on request', async () => {
-    const user = userEvent.setup()
-    const many: ModelOption[] = Array.from({ length: 8 }, (_, index) => ({ id: `m-${index}`, label: `Model ${index}` }))
-    renderControls(null, null, false, many)
-    await openPopover(user)
-
-    expect(screen.queryByRole('menuitemradio', { name: 'Model 7' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /Other models/ }))
-    expect(screen.getByRole('menuitemradio', { name: /Model 7/ })).toBeInTheDocument()
+  it('describes each model’s real reasoning capability', () => {
+    expect(reasoningSummary(MODELS[0]!)).toBe('High · Medium · Low reasoning')
+    expect(reasoningSummary(MODELS[1]!)).toBe('High · Low reasoning')
+    expect(reasoningSummary(MODELS[2]!)).toBe('No reasoning setting')
+    expect(reasoningSummary(MODELS[3]!)).toBe('Medium reasoning only')
   })
 
-  it('drops an effort the newly chosen model does not offer', async () => {
+  it('reports the chosen model without deciding its tier', async () => {
     const user = userEvent.setup()
-    const { onChange } = renderControls('gemini-3.8-flash', 'medium')
+    const { onSelectModel, onSelectEffort } = renderControls('gemini-3.8-flash', 'medium')
     await openPopover(user)
     await user.click(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ }))
-    expect(onChange).toHaveBeenCalledWith('gemini-3.1-pro', null)
+    expect(onSelectModel).toHaveBeenCalledWith('gemini-3.1-pro')
+    expect(onSelectEffort).not.toHaveBeenCalled()
+  })
+
+  it('closes on Escape', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openPopover(user)
+    expect(screen.getByRole('dialog', { name: 'Model and reasoning' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Model and reasoning' })).not.toBeInTheDocument()
   })
 })
 
-describe('reasoning slider', () => {
+describe('full model browser', () => {
+  it('opens as a modal over the app and groups every provider the catalogue returned', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+
+    const modal = screen.getByRole('dialog', { name: 'All models' })
+    expect(modal).toHaveAttribute('aria-modal', 'true')
+    expect(within(modal).getByText('Gemini')).toBeInTheDocument()
+    expect(within(modal).getByText('Claude')).toBeInTheDocument()
+    expect(within(modal).getByText('OpenAI')).toBeInTheDocument()
+    expect(within(modal).getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ })).toBeInTheDocument()
+    expect(within(modal).getByRole('menuitemradio', { name: /GPT-OSS 120B/ })).toBeInTheDocument()
+  })
+
+  it('selects a model from a provider the compact menu never showed', async () => {
+    const user = userEvent.setup()
+    const { onSelectModel } = renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+    await user.click(screen.getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ }))
+    expect(onSelectModel).toHaveBeenCalledWith('claude-sonnet-4-6')
+    expect(screen.queryByRole('dialog', { name: 'All models' })).not.toBeInTheDocument()
+  })
+
+  it('closes on Escape', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'All models' })).not.toBeInTheDocument()
+  })
+
+  it('closes on a click outside the panel', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+    const backdrop = document.querySelector('.modal-backdrop')
+    expect(backdrop).not.toBeNull()
+    await user.click(backdrop as Element)
+    expect(screen.queryByRole('dialog', { name: 'All models' })).not.toBeInTheDocument()
+  })
+
+  it('stays open when a click starts inside the panel', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+    await user.click(screen.getByRole('heading', { name: 'All models' }))
+    expect(screen.getByRole('dialog', { name: 'All models' })).toBeInTheDocument()
+  })
+
+  it('spends no space on a search field for a catalogue this small', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openBrowser(user)
+    expect(screen.queryByLabelText('Search models')).not.toBeInTheDocument()
+  })
+
+  it('offers search once the catalogue is large enough to justify it', async () => {
+    const user = userEvent.setup()
+    const many: ModelOption[] = [
+      ...MODELS,
+      ...Array.from({ length: 8 }, (_, index) => ({ id: `gemini-extra-${index}`, label: `Gemini Extra ${index}` }))
+    ]
+    renderControls(null, null, many)
+    await openBrowser(user)
+
+    await user.type(screen.getByLabelText('Search models'), 'sonnet')
+    // Scoped to the modal: the compact popover stays mounted behind the
+    // backdrop on purpose, so dismissing the browser returns you to it.
+    const modal = screen.getByRole('dialog', { name: 'All models' })
+    expect(within(modal).getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ })).toBeInTheDocument()
+    expect(within(modal).queryByRole('menuitemradio', { name: /Gemini Extra 0/ })).not.toBeInTheDocument()
+  })
+
+  it('says so honestly when Antigravity’s catalogue could not be read', async () => {
+    const user = userEvent.setup()
+    renderControls(null, null, [])
+    // The trigger is disabled with no catalogue, so the browser is reached
+    // through the component's own empty state rather than a fabricated list.
+    expect(screen.getByLabelText('Model and reasoning')).toBeDisabled()
+    await user.click(screen.getByLabelText('Model and reasoning'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+})
+
+describe('reasoning control', () => {
   it('offers one stop per tier the model publishes, highest first', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
 
-    const levels = screen.getAllByRole('button', { pressed: false }).filter((node) => /^(High|Medium|Low)$/.test(node.textContent ?? ''))
-    expect(levels.map((node) => node.textContent)).toEqual(['High', 'Medium', 'Low'])
+    const stops = screen.getAllByRole('button').filter((node) => node.classList.contains('reasoning-stop'))
+    expect(stops.map((node) => node.textContent)).toEqual(['High', 'Medium', 'Low'])
   })
 
-  it('shows only the two real stops for a model with High and Low', async () => {
+  it('is physically shorter for a two-tier model, with no gap where medium would be', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.1-pro')
     await openPopover(user)
 
+    const scale = document.querySelector('.reasoning-scale') as HTMLElement
+    expect(scale.style.getPropertyValue('--stops')).toBe('2')
     expect(screen.getByRole('button', { name: 'High' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Low' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Medium' })).not.toBeInTheDocument()
   })
 
-  it('renders no adjustable control for a model with no reasoning setting', async () => {
+  it('sizes itself to three stops for a three-tier model', async () => {
     const user = userEvent.setup()
-    renderControls('claude-sonnet-4-6')
+    renderControls('gemini-3.8-flash')
     await openPopover(user)
-
-    expect(screen.queryByRole('slider')).not.toBeInTheDocument()
-    expect(screen.getByText(/has no reasoning setting/)).toBeInTheDocument()
+    expect((document.querySelector('.reasoning-scale') as HTMLElement).style.getPropertyValue('--stops')).toBe('3')
   })
 
-  it('states a single-tier model as a fact instead of faking a slider', async () => {
+  it('states a single fixed tier instead of drawing a slider that cannot move', async () => {
     const user = userEvent.setup()
     renderControls('gpt-oss-120b')
     await openPopover(user)
 
     expect(screen.queryByRole('slider')).not.toBeInTheDocument()
-    expect(screen.getByText(/runs at medium reasoning only/)).toBeInTheDocument()
+    expect(screen.getByText('Medium')).toBeInTheDocument()
+    expect(screen.getByText('Fixed by this model')).toBeInTheDocument()
   })
 
-  it('never pre-selects a tier', async () => {
+  it('says who owns the decision when there is no reasoning control at all', async () => {
     const user = userEvent.setup()
-    renderControls('gemini-3.8-flash')
+    renderControls('claude-sonnet-4-6')
     await openPopover(user)
 
-    expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Automatic')
-    expect(screen.getByText('Auto')).toBeInTheDocument()
+    expect(screen.queryByRole('slider')).not.toBeInTheDocument()
+    expect(screen.getByText('Reasoning is controlled by the model.')).toBeInTheDocument()
+  })
+
+  it('gives Antigravity’s own default model a real three-tier control', async () => {
+    const user = userEvent.setup()
+    renderControls(null, 'medium')
+    await openPopover(user)
+    expect((document.querySelector('.reasoning-scale') as HTMLElement).style.getPropertyValue('--stops')).toBe('3')
+    expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Medium')
   })
 
   it('selects a tier when its label is clicked', async () => {
     const user = userEvent.setup()
-    const { onChange } = renderControls('gemini-3.8-flash')
+    const { onSelectEffort, onSelectModel } = renderControls('gemini-3.8-flash', 'high')
     await openPopover(user)
     await user.click(screen.getByRole('button', { name: 'Medium' }))
-    expect(onChange).toHaveBeenCalledWith('gemini-3.8-flash', 'medium')
-  })
-
-  it('returns to automatic when the selected tier is clicked again', async () => {
-    const user = userEvent.setup()
-    const { onChange } = renderControls('gemini-3.8-flash', 'medium')
-    await openPopover(user)
-    await user.click(screen.getByRole('button', { name: 'Medium' }))
-    expect(onChange).toHaveBeenCalledWith('gemini-3.8-flash', null)
+    expect(onSelectEffort).toHaveBeenCalledWith('medium')
+    expect(onSelectModel).not.toHaveBeenCalled()
   })
 
   it('walks only real tiers with the keyboard', async () => {
     const user = userEvent.setup()
-    const { onChange } = renderControls('gemini-3.1-pro', 'low')
+    const { onSelectEffort } = renderControls('gemini-3.1-pro', 'low')
     await openPopover(user)
     screen.getByRole('slider').focus()
     await user.keyboard('{ArrowUp}')
     // Gemini 3.1 Pro has no medium, so up from low lands on high.
-    expect(onChange).toHaveBeenCalledWith('gemini-3.1-pro', 'high')
+    expect(onSelectEffort).toHaveBeenCalledWith('high')
+  })
+
+  it('animates with particles rather than stripes or a moving gradient', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash', 'high')
+    await openPopover(user)
+    expect(document.querySelectorAll('.reasoning-particle').length).toBeGreaterThan(1)
   })
 })
 
-describe('reasoning visuals', () => {
+describe('reasoning geometry', () => {
   const flash = MODELS[0]!
   const pro = MODELS[1]!
+  const oss = MODELS[3]!
 
-  it('uses the calm theme below a model’s maximum', () => {
-    expect(reasoningTheme(flash, 'medium')).toBe('calm')
-    expect(reasoningTheme(flash, 'low')).toBe('calm')
+  it('places every stop at its own row’s centre', () => {
+    expect(stopOffset(3, 0)).toBeCloseTo(1 / 6)
+    expect(stopOffset(3, 1)).toBeCloseTo(0.5)
+    expect(stopOffset(3, 2)).toBeCloseTo(5 / 6)
+    expect(stopOffset(2, 0)).toBeCloseTo(0.25)
+    expect(stopOffset(2, 1)).toBeCloseTo(0.75)
   })
 
-  it('switches to the purple peak theme at a model’s highest tier', () => {
-    expect(reasoningTheme(flash, 'high')).toBe('peak')
-    // "Peak" is relative to the model: Pro's maximum is also high, but a
-    // model whose top tier were medium would peak at medium.
-    expect(reasoningTheme(pro, 'high')).toBe('peak')
-    expect(reasoningTheme(pro, 'low')).toBe('calm')
-  })
-
-  it('stays inert until a tier is actually chosen', () => {
-    expect(reasoningTheme(flash, null)).toBe('auto')
+  it('fills the track from the bottom up to the handle, never past it', () => {
+    expect(trackFill(flash, 'high')).toBeCloseTo(5 / 6)
+    expect(trackFill(flash, 'medium')).toBeCloseTo(0.5)
+    // The lowest tier still has a real active section, so the control never
+    // looks dead — it is just the shortest one.
+    expect(trackFill(flash, 'low')).toBeCloseTo(1 / 6)
     expect(trackFill(flash, null)).toBe(0)
   })
 
-  it('fills the track by position among the real tiers', () => {
-    expect(trackFill(flash, 'high')).toBe(1)
-    expect(trackFill(flash, 'medium')).toBeCloseTo(0.5)
-    expect(trackFill(flash, 'low')).toBe(0)
-    expect(trackFill(pro, 'high')).toBe(1)
-    expect(trackFill(pro, 'low')).toBe(0)
-  })
-
-  it('runs quicker only when fast mode is on', () => {
-    expect(animationTempo(true)).toBe('quick')
-    expect(animationTempo(false)).toBe('steady')
-  })
-
-  it('snaps a drag to the nearest real tier and never between them', () => {
+  it('snaps a drag to the row it is over, and never between rows', () => {
     const three = descendingEfforts(flash)
     expect(tierAtFraction(three, 0)).toBe('high')
-    expect(tierAtFraction(three, 0.4)).toBe('medium')
-    expect(tierAtFraction(three, 0.99)).toBe('low')
+    expect(tierAtFraction(three, 0.5)).toBe('medium')
+    expect(tierAtFraction(three, 1)).toBe('low')
     const two = descendingEfforts(pro)
     expect(tierAtFraction(two, 0.3)).toBe('high')
     expect(tierAtFraction(two, 0.7)).toBe('low')
     expect(tierAtFraction([], 0.5)).toBeNull()
   })
 
+  it('reserves purple for a model’s own maximum', () => {
+    expect(reasoningTheme(flash, 'high')).toBe('peak')
+    expect(reasoningTheme(flash, 'medium')).toBe('mid')
+    expect(reasoningTheme(flash, 'low')).toBe('base')
+    expect(reasoningTheme(pro, 'high')).toBe('peak')
+    expect(reasoningTheme(pro, 'low')).toBe('base')
+    // A fixed tier is a fact about the model, not the top of a scale.
+    expect(reasoningTheme(oss, 'medium')).toBe('mid')
+    expect(reasoningTheme(flash, null)).toBe('auto')
+  })
+
   it('knows which models have a reasoning choice at all', () => {
     expect(isReasoningAdjustable(flash)).toBe(true)
     expect(isReasoningAdjustable(pro)).toBe(true)
     expect(isReasoningAdjustable(MODELS[2]!)).toBe(false)
-    expect(isReasoningAdjustable(MODELS[3]!)).toBe(false)
+    expect(isReasoningAdjustable(oss)).toBe(false)
   })
 })
 
 describe('fast mode', () => {
-  it('is a plain row, not a switch', async () => {
+  it('stays visible but inert, because agy 1.1.27 exposes no fast-mode setting', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
+
+    expect(screen.queryByRole('button', { name: /Fast mode/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Fast mode/ })).toBeInTheDocument()
-  })
-
-  it('toggles its own state without touching the model or effort', async () => {
-    const user = userEvent.setup()
-    const { onChange, onFastModeChange } = renderControls('gemini-3.8-flash', 'medium')
-    await openPopover(user)
-    await user.click(screen.getByRole('button', { name: /Fast mode/ }))
-    expect(onFastModeChange).toHaveBeenCalledWith(true)
-    expect(onChange).not.toHaveBeenCalled()
-  })
-
-  it('speeds the track up without changing its colour theme', async () => {
-    const user = userEvent.setup()
-    const { rerender } = render(
-      <ModelControls
-        models={MODELS}
-        selectedModel="gemini-3.8-flash"
-        selectedEffort="medium"
-        fastMode={false}
-        disabled={false}
-        onChange={vi.fn()}
-        onFastModeChange={vi.fn()}
-      />
-    )
-    await openPopover(user)
-    const slider = () => screen.getByRole('slider').closest('.reasoning-slider') as HTMLElement
-    expect(slider().className).toContain('tempo-steady')
-    expect(slider().className).toContain('theme-calm')
-
-    rerender(
-      <ModelControls
-        models={MODELS}
-        selectedModel="gemini-3.8-flash"
-        selectedEffort="medium"
-        fastMode
-        disabled={false}
-        onChange={vi.fn()}
-        onFastModeChange={vi.fn()}
-      />
-    )
-    expect(slider().className).toContain('tempo-quick')
-    expect(slider().className).toContain('theme-calm')
-  })
-
-  it('says plainly that it does not reach Antigravity yet', async () => {
-    const user = userEvent.setup()
-    renderControls('gemini-3.8-flash')
-    await openPopover(user)
-    expect(screen.getByText(/Antigravity has no fast-mode setting yet/i)).toBeInTheDocument()
+    const row = screen.getByText('Fast mode').closest('.fast-mode')
+    expect(row).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('Not available in Antigravity yet')).toBeInTheDocument()
   })
 })
 

@@ -1,44 +1,54 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ModelOption, ReasoningEffort } from '@shared/domain'
-import { EFFORT_LABEL, compactModelLabel, descendingEfforts, isReasoningAdjustable } from '../lib/modelDisplay'
-import { ReasoningSlider } from './ReasoningSlider'
+import { EFFORT_LABEL, compactModelLabel } from '../lib/modelDisplay'
+import { reasoningTheme } from '../lib/reasoningVisual'
+import { isGeminiModel, providerForModel } from '../lib/providers'
+import { modelForSelection } from '@shared/reasoningPolicy'
+import { ReasoningControl } from './ReasoningControl'
+import { ModelBrowser, ModelRow, Tick, AutoGlyph } from './ModelBrowser'
+import { ProviderLogo } from './ProviderLogo'
 
 interface ModelControlsProps {
   models: ModelOption[]
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
-  fastMode: boolean
   disabled: boolean
-  onChange: (model: string | null, effort: ReasoningEffort | null) => void
-  onFastModeChange: (fastMode: boolean) => void
+  /** Model and effort are separate intents: App resolves which tier a newly
+   *  chosen model should land on from the user's remembered preference, and
+   *  only an explicit tier click updates that preference. Collapsing both
+   *  into one callback would make those indistinguishable. */
+  onSelectModel: (model: string | null) => void
+  onSelectEffort: (effort: ReasoningEffort) => void
 }
 
-/** How many models the popover shows before "Other models…". Keeps the
- *  primary list short without ever hiding part of the real catalogue. */
-const PRIMARY_COUNT = 5
-
 /** One compact control in the composer footer that opens one popover:
- *  models on the left, reasoning on the right. Everything shown is real
- *  catalogue data — the reasoning side only exists when the selected model
- *  genuinely publishes more than one tier. */
+ *  models on the left, reasoning on the right.
+ *
+ *  The popover lists Gemini only, because Antigravity is a Gemini workflow
+ *  and dumping every vendor into a menu this size makes the common choice
+ *  the hardest one. Everything else lives one click away behind "Other
+ *  models…", which opens the full catalogue. */
 export function ModelControls({
   models,
   selectedModel,
   selectedEffort,
-  fastMode,
   disabled,
-  onChange,
-  onFastModeChange
+  onSelectModel,
+  onSelectEffort
 }: ModelControlsProps): JSX.Element {
   const [open, setOpen] = useState(false)
-  const [showAll, setShowAll] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const selected = models.find((model) => model.id === selectedModel) ?? null
-  const efforts = descendingEfforts(selected)
-  const adjustable = isReasoningAdjustable(selected)
+  // Reasoning is asked of the selection, not the catalogue row: "Default
+  // model" has real, selectable tiers even though it has no catalogue entry.
+  const reasoningModel = modelForSelection(models, selectedModel)
+  const theme = reasoningTheme(reasoningModel, selectedEffort)
 
+  // The full browser is a modal and owns its own dismissal; the popover must
+  // not also close on the clicks and Escapes happening inside it.
   useEffect(() => {
-    if (!open) return
+    if (!open || browsing) return
     const onDown = (event: MouseEvent): void => {
       if (!wrapperRef.current?.contains(event.target as Node)) setOpen(false)
     }
@@ -51,17 +61,9 @@ export function ModelControls({
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('keydown', onKey)
     }
-  }, [open])
+  }, [open, browsing])
 
-  const visibleModels = showAll ? models : models.slice(0, PRIMARY_COUNT)
-
-  const selectModel = (id: string | null): void => {
-    if (id === null) return onChange(null, null)
-    const next = models.find((model) => model.id === id) ?? null
-    // Carry the tier over only if the new model actually offers it.
-    const keep = next?.supportedReasoningEfforts?.includes(selectedEffort as ReasoningEffort) ? selectedEffort : null
-    onChange(id, keep)
-  }
+  const geminiModels = models.filter(isGeminiModel)
 
   return (
     <div className="model-control" ref={wrapperRef}>
@@ -75,20 +77,13 @@ export function ModelControls({
         title={models.length === 0 ? 'Antigravity’s model list is unavailable' : undefined}
         onClick={() => setOpen((value) => !value)}
       >
-        <OrbitMark />
+        {selected ? <ProviderLogo provider={providerForModel(selected)} size={15} /> : <AutoGlyph />}
         <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : 'Default model'}</span>
-        {/* Meta state rides alongside the model at lower weight, with no
-            divider glyphs between the parts. */}
+        {/* The closed control carries the live tier in the same treatment the
+            open control uses, so changing it is visible without reopening. */}
         {selectedEffort ? (
-          <span className="model-trigger-meta">
-            <LevelGlyph />
+          <span className="model-trigger-effort" data-theme={theme}>
             {EFFORT_LABEL[selectedEffort]}
-          </span>
-        ) : null}
-        {fastMode ? (
-          <span className="model-trigger-meta is-fast">
-            <BoltGlyph />
-            Fast mode
           </span>
         ) : null}
         <ChevronGlyph />
@@ -103,128 +98,71 @@ export function ModelControls({
                 type="button"
                 role="menuitemradio"
                 aria-checked={selectedModel === null}
-                className={selectedModel === null ? 'model-option selected' : 'model-option'}
-                onClick={() => selectModel(null)}
+                className={selectedModel === null ? 'model-row selected' : 'model-row'}
+                onClick={() => onSelectModel(null)}
               >
-                <span className="model-option-text">
-                  <span className="model-option-name">Default model</span>
-                  <span className="model-option-hint">Antigravity’s own choice</span>
+                <span className="model-row-mark model-row-mark-default" aria-hidden="true">
+                  <AutoGlyph />
+                </span>
+                <span className="model-row-text">
+                  <span className="model-row-name">Default model</span>
+                  <span className="model-row-hint">Antigravity’s own choice</span>
                 </span>
                 <Tick checked={selectedModel === null} />
               </button>
 
-              {visibleModels.map((model) => {
-                const tiers = descendingEfforts(model)
-                return (
-                  <button
-                    key={model.id}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={model.id === selectedModel}
-                    className={model.id === selectedModel ? 'model-option selected' : 'model-option'}
-                    onClick={() => selectModel(model.id)}
-                  >
-                    <span className="model-option-text">
-                      <span className="model-option-name">{model.label}</span>
-                      <span className="model-option-hint">
-                        {tiers.length > 1
-                          ? `${tiers.map((tier) => EFFORT_LABEL[tier]).join(' · ')} reasoning`
-                          : tiers.length === 1
-                            ? `${EFFORT_LABEL[tiers[0]!]} reasoning only`
-                            : 'No reasoning setting'}
-                      </span>
-                    </span>
-                    <Tick checked={model.id === selectedModel} />
-                  </button>
-                )
-              })}
+              {geminiModels.map((model) => (
+                <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelectModel(model.id)} />
+              ))}
             </div>
 
-            {models.length > PRIMARY_COUNT ? (
-              <button type="button" className="model-more" onClick={() => setShowAll((value) => !value)}>
-                <span>{showAll ? 'Show fewer' : 'Other models…'}</span>
-                <ChevronGlyph />
-              </button>
-            ) : null}
+            <button type="button" className="model-more" onClick={() => setBrowsing(true)}>
+              <span>Other models…</span>
+              <ChevronGlyph />
+            </button>
           </section>
 
-          {/* The reasoning pane exists only when there is a real choice to
-              make; a single-tier or no-tier model states the fact instead of
-              rendering an adjustable control that cannot move. */}
-          <section className={adjustable ? 'popover-pane pane-reasoning' : 'popover-pane pane-reasoning is-fixed'}>
-            <div className="pane-head">
-              <h3 className="pane-title">Reasoning effort</h3>
-              {adjustable ? <span className="pane-state">{selectedEffort ? EFFORT_LABEL[selectedEffort] : 'Auto'}</span> : null}
-            </div>
+          {/* The reasoning pane always states something true: an adjustable
+              control when there is a real choice, the fixed level when there
+              is exactly one, and who owns the decision when there is none. */}
+          <section className="popover-pane pane-reasoning">
+            {/* No level badge here: the active stop below already states it,
+                and a second copy only made the title wrap. */}
+            <h3 className="pane-title">Reasoning effort</h3>
 
-            {adjustable ? (
-              <ReasoningSlider
-                model={selected}
-                effort={selectedEffort}
-                fastMode={fastMode}
-                onChange={(effort) => onChange(selectedModel, effort)}
-              />
-            ) : (
-              <p className="pane-note">
-                {efforts.length === 1
-                  ? `${selected?.label ?? 'This model'} runs at ${EFFORT_LABEL[efforts[0]!].toLowerCase()} reasoning only.`
-                  : selected
-                    ? `${selected.label} has no reasoning setting.`
-                    : 'Choose a model to see its reasoning levels.'}
-              </p>
-            )}
+            <ReasoningControl model={reasoningModel} effort={selectedEffort} onChange={onSelectEffort} />
 
-            <button
-              type="button"
-              className={fastMode ? 'fast-mode active' : 'fast-mode'}
-              aria-pressed={fastMode}
-              onClick={() => onFastModeChange(!fastMode)}
-            >
+            {/* Kept visible because it is a real Antigravity concept, kept
+                disabled because agy 1.1.27 exposes no fast-mode setting. It
+                changes nothing anywhere while that is true. */}
+            <div className="fast-mode" aria-disabled="true">
               <BoltGlyph />
               <span className="fast-mode-label">Fast mode</span>
-              <span className="fast-mode-state">{fastMode ? 'On' : 'Off'}</span>
-            </button>
-            {/* Stated plainly rather than implied: agy 1.1.27 exposes no
-                fast-mode flag, so this changes how the indicator moves and
-                nothing about the request Orbit sends. */}
-            <p className="fast-mode-note">Indicator only — Antigravity has no fast-mode setting yet.</p>
+              <span className="fast-mode-note">Not available in Antigravity yet</span>
+            </div>
           </section>
         </div>
+      ) : null}
+
+      {browsing ? (
+        <ModelBrowser
+          models={models}
+          selectedModel={selectedModel}
+          onSelect={(modelId) => {
+            setBrowsing(false)
+            setOpen(false)
+            onSelectModel(modelId)
+          }}
+          onClose={() => setBrowsing(false)}
+        />
       ) : null}
     </div>
   )
 }
 
-function Tick({ checked }: { checked: boolean }): JSX.Element | null {
-  if (!checked) return null
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" className="model-tick">
-      <path d="M3.5 8.5l3 3 6-6.5" stroke="currentColor" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-/** Orbit's own mark, rather than the sparkle every AI product reaches for. */
-function OrbitMark(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false" className="orbit-mark">
-      <circle cx="8" cy="8" r="3" fill="currentColor" />
-      <ellipse cx="8" cy="8" rx="6.6" ry="3.1" stroke="currentColor" strokeWidth="1.1" fill="none" transform="rotate(-28 8 8)" opacity="0.75" />
-    </svg>
-  )
-}
-
-function LevelGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">
-      <path d="M3.5 11.5v-3M8 11.5v-6M12.5 11.5v-8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
-    </svg>
-  )
-}
-
 function BoltGlyph(): JSX.Element {
   return (
-    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
       <path d="M9 1.5L4 9h3.2l-.8 5.5L12 7H8.6z" fill="currentColor" />
     </svg>
   )

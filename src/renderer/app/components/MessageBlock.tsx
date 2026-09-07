@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Message, ProjectFile } from '@shared/domain'
+import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
@@ -10,6 +10,11 @@ interface MessageBlockProps {
   showRole: boolean
   attachments: ProjectFile[]
   thumbnails: Record<string, string>
+  /** The error the run actually recorded, when this block is a failure. It
+   *  carries the real code, which decides which explanation the reader
+   *  gets — a denied permission and an unreadable response are not the
+   *  same problem and must not share copy. */
+  error?: RuntimeErrorInfo | null
 }
 
 /** One block in the work-session transcript. Everything is left-aligned
@@ -23,9 +28,16 @@ function clockTime(iso: string): string {
   return new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
-export function MessageBlock({ message, showRole, attachments, thumbnails }: MessageBlockProps): JSX.Element {
-  if (message.status === 'failed') return <FailureBlock message={message} />
+export function MessageBlock({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
+  if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
+  // A turn can finish with nothing to show — Antigravity did the work in
+  // tools and said nothing, or its final text could not be read off the
+  // live session. Either way, say so rather than leaving a blank gap the
+  // reader has to interpret.
+  if (message.role === 'assistant' && message.content.trim().length === 0) {
+    return <div className="transcript-note">Antigravity finished this turn without any text to show.</div>
+  }
 
   const isUser = message.role === 'user'
   return (
@@ -61,11 +73,11 @@ function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile
   )
 }
 
-function FailureBlock({ message }: { message: Message }): JSX.Element {
+function FailureBlock({ message, error }: { message: Message; error: RuntimeErrorInfo | null }): JSX.Element {
   // Persisted failures only carry the message text, so the code is
   // unknown here; the generic mapping still yields honest product copy.
-  const view = describeRuntimeError({ code: 'provider.failed', message: message.content, retryable: true })
-  return <ErrorNote title={view.title} body={view.body} details={message.content} />
+  const view = describeRuntimeError(error ?? { code: 'provider.failed', message: message.content, retryable: true })
+  return <ErrorNote title={view.title} body={view.body} details={view.details ?? message.content} />
 }
 
 interface ErrorNoteProps {

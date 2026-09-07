@@ -153,6 +153,61 @@ describe('OrbitRuntime', () => {
     expect(run.conversationId).toBe(conversation!.id)
   })
 
+  it('runs Antigravity in the project folder the user chose', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
+    const project = runtime.createProject('Real folder', workspace)
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput).not.toBeNull())
+    expect(provider.lastInput?.workspacePath).toBe(workspace)
+    fs.rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('lets a session override its project folder', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
+    const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-session-'))
+    const project = runtime.createProject('Override', projectDir)
+    const conversation = runtime.createConversation(project.id, 'Docs', sessionDir)
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput?.conversationId).toBe(conversation.id))
+    expect(provider.lastInput?.workspacePath).toBe(sessionDir)
+    fs.rmSync(projectDir, { recursive: true, force: true })
+    fs.rmSync(sessionDir, { recursive: true, force: true })
+  })
+
+  it('falls back to the managed workspace when a chosen folder has gone away', async () => {
+    const gone = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-gone-'))
+    const project = runtime.createProject('Missing folder', gone)
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    fs.rmSync(gone, { recursive: true, force: true })
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput).not.toBeNull())
+    // A deleted folder must not fail the turn — the session keeps working in
+    // Orbit's own workspace for that project.
+    expect(provider.lastInput?.workspacePath).toBe(path.join(dir, 'projects', project.id, 'workspace'))
+  })
+
+  it('starts a session on the reasoning tier the user last chose', () => {
+    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: {} })
+    const project = runtime.createProject('Seeded')
+    expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('high')
+    expect(runtime.createConversation(project.id, 'Another').reasoningEffort).toBe('high')
+  })
+
+  it('starts a session on medium before the user has ever chosen a tier', () => {
+    const project = runtime.createProject('Fresh')
+    expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('medium')
+  })
+
+  it('round trips preferences through the runtime', () => {
+    expect(runtime.getPreferences().lastReasoningEffort).toBeNull()
+    runtime.setPreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    expect(runtime.getPreferences()).toEqual({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+  })
+
   it('passes cancellation to the provider', async () => {
     const project = runtime.createProject('Cancel')
     const conversation = runtime.openProject(project.id).conversations[0]!

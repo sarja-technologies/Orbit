@@ -33,3 +33,13 @@ export function descendingEfforts(model: ModelOption | null): ReasoningEffort[] 
 export function isReasoningAdjustable(model: ModelOption | null): boolean {
   return descendingEfforts(model).length > 1
 }
+
+/** The one-line reasoning capability shown under a model's name. States what
+ *  the catalogue actually publishes — it never promises a tier the model
+ *  does not have, and never pads a row that has nothing to say. */
+export function reasoningSummary(model: ModelOption): string {
+  const tiers = descendingEfforts(model)
+  if (tiers.length > 1) return `${tiers.map((tier) => EFFORT_LABEL[tier]).join(' · ')} reasoning`
+  if (tiers.length === 1) return `${EFFORT_LABEL[tiers[0]!]} reasoning only`
+  return 'No reasoning setting'
+}

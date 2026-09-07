@@ -8,8 +8,10 @@ import type {
   Message,
   MessageRole,
   MessageStatus,
+  OrbitPreferences,
   Project,
   ProjectFile,
+  ProjectGroup,
   ProjectSnapshot,
   ProviderId,
   ReasoningEffort,
@@ -20,21 +22,69 @@ import type {
 } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import { createId, nowIso } from '@main/util/ids'
+import { normalizePreferences } from '@shared/reasoningPolicy'
 import { jsonParseObject, jsonStringify, nullableText, numberValue, OrbitDatabase, text } from './database'
+
+/** Where cross-session preferences live in the `meta` key/value table. */
+const PREFERENCES_KEY = 'preferences'
 
 export class OrbitStore {
   constructor(private readonly db: OrbitDatabase) {}
 
-  createProject(name: string): Project {
+  createProject(name: string, rootPath: string | null = null): Project {
     const now = nowIso()
-    const project: Project = { id: createId('project'), name: name.trim(), createdAt: now, updatedAt: now }
-    this.db.run('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', [
+    const project: Project = {
+      id: createId('project'),
+      name: name.trim(),
+      rootPath: normalizePath(rootPath),
+      createdAt: now,
+      updatedAt: now
+    }
+    this.db.run('INSERT INTO projects (id, name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', [
       project.id,
       project.name,
+      project.rootPath,
       project.createdAt,
       project.updatedAt
     ])
     return project
+  }
+
+  setProjectRoot(projectId: ID, rootPath: string | null): Project {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error(`Project not found: ${projectId}`)
+    this.db.run('UPDATE projects SET root_path = ?, updated_at = ? WHERE id = ?', [normalizePath(rootPath), nowIso(), projectId])
+    return this.getProject(projectId)!
+  }
+
+  /** Every project with the sessions that belong to it. Projects keep the
+   *  same recency order as listProjects(), so the sidebar and the project
+   *  list can never disagree about ordering. */
+  listProjectTree(): ProjectGroup[] {
+    return this.listProjects().map((project) => ({ project, conversations: this.listConversations(project.id) }))
+  }
+
+  readPreferences(): OrbitPreferences {
+    const row = this.db.get<string | null>('SELECT value FROM meta WHERE key = ?', [PREFERENCES_KEY], (result) =>
+      nullableText(result, 'value')
+    )
+    if (!row) return normalizePreferences(null)
+    try {
+      return normalizePreferences(JSON.parse(row))
+    } catch {
+      // A corrupted preferences blob is not worth failing startup over —
+      // the user simply starts from the documented defaults again.
+      return normalizePreferences(null)
+    }
+  }
+
+  writePreferences(preferences: OrbitPreferences): OrbitPreferences {
+    const normalized = normalizePreferences(preferences)
+    this.db.run('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
+      PREFERENCES_KEY,
+      JSON.stringify(normalized)
+    ])
+    return normalized
   }
 
   listProjects(): Project[] {
@@ -45,26 +95,31 @@ export class OrbitStore {
     return this.db.get('SELECT * FROM projects WHERE id = ?', [projectId], mapProject)
   }
 
-  createConversation(projectId: ID, title: string, providerId: ProviderId = 'antigravity'): Conversation {
+  createConversation(
+    projectId: ID,
+    title: string,
+    options: { providerId?: ProviderId; workingDirectory?: string | null; reasoningEffort?: ReasoningEffort | null } = {}
+  ): Conversation {
     this.assertProject(projectId)
     const now = nowIso()
     const conversation: Conversation = {
       id: createId('conversation'),
       projectId,
       title: title.trim() || 'Main',
-      providerId,
+      providerId: options.providerId ?? 'antigravity',
       nativeConversationId: null,
       status: 'idle',
       transport: 'structured',
       model: null,
-      reasoningEffort: null,
+      reasoningEffort: options.reasoningEffort ?? null,
+      workingDirectory: normalizePath(options.workingDirectory ?? null),
       createdAt: now,
       updatedAt: now
     }
     this.db.run(
       `INSERT INTO conversations
-       (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, working_directory, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversation.id,
         conversation.projectId,
@@ -75,12 +130,24 @@ export class OrbitStore {
         conversation.transport,
         conversation.model,
         conversation.reasoningEffort,
+        conversation.workingDirectory,
         conversation.createdAt,
         conversation.updatedAt
       ]
     )
     this.touchProject(projectId)
     return conversation
+  }
+
+  setConversationWorkingDirectory(conversationId: ID, workingDirectory: string | null): Conversation {
+    const conversation = this.requireConversation(conversationId)
+    this.db.run('UPDATE conversations SET working_directory = ?, updated_at = ? WHERE id = ?', [
+      normalizePath(workingDirectory),
+      nowIso(),
+      conversationId
+    ])
+    this.touchProject(conversation.projectId)
+    return this.requireConversation(conversationId)
   }
 
   /** Removes a conversation and everything scoped to it. Messages, runs and
@@ -478,8 +545,21 @@ export class OrbitStore {
   }
 }
 
+/** Blank/whitespace-only folder input is the same as "no folder chosen" —
+ *  storing "" would read as a real path everywhere downstream. */
+function normalizePath(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? ''
+  return trimmed.length > 0 ? trimmed : null
+}
+
 function mapProject(row: Record<string, unknown>): Project {
-  return { id: text(row, 'id'), name: text(row, 'name'), createdAt: text(row, 'created_at'), updatedAt: text(row, 'updated_at') }
+  return {
+    id: text(row, 'id'),
+    name: text(row, 'name'),
+    rootPath: nullableText(row, 'root_path'),
+    createdAt: text(row, 'created_at'),
+    updatedAt: text(row, 'updated_at')
+  }
 }
 
 function mapConversation(row: Record<string, unknown>): Conversation {
@@ -493,6 +573,7 @@ function mapConversation(row: Record<string, unknown>): Conversation {
     transport: (nullableText(row, 'transport') ?? 'structured') as ConversationTransport,
     model: nullableText(row, 'model'),
     reasoningEffort: nullableText(row, 'reasoning_effort') as Conversation['reasoningEffort'],
+    workingDirectory: nullableText(row, 'working_directory'),
     createdAt: text(row, 'created_at'),
     updatedAt: text(row, 'updated_at')
   }

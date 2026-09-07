@@ -6,8 +6,10 @@ import type {
   ID,
   Message,
   ModelOption,
+  OrbitPreferences,
   Project,
   ProjectFile,
+  ProjectGroup,
   ProjectSnapshot,
   ProviderStatus,
   ReasoningEffort,
@@ -15,22 +17,28 @@ import type {
   Run
 } from '@shared/domain'
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
+import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor, rememberEffort } from '@shared/reasoningPolicy'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
-import { SessionSidebar, type ContextTab, type SessionIndicator } from './components/SessionSidebar'
+import { ProjectSidebar, type CreateIntent, type SessionIndicator } from './components/ProjectSidebar'
+import { CreateProjectDialog, CreateSessionDialog } from './components/CreateDialogs'
 import { WorkSession, type ResolvedRecord } from './components/WorkSession'
+import { WorkspaceRail } from './components/WorkspaceRail'
 import { Composer } from './components/Composer'
-import { EmptySession, type Starter } from './components/EmptySession'
-import { ContextPanel } from './components/ContextPanel'
+import { ComposerHints, EmptySession, type Starter } from './components/EmptySession'
+import { ContextPanel, type ContextTab } from './components/ContextPanel'
+import { ProviderLogoSprite } from './components/ProviderLogo'
 import { applyActivity, emptyActivity, type ActivityState } from './lib/activity'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
 
+/** Which project groups are open in the sidebar. Kept in the renderer rather
+ *  than the database: it is view state, and losing it costs one click. */
+const EXPANDED_KEY = 'orbit.sidebar.expandedProjects'
+
 interface WorkspaceState {
-  projects: Project[]
-  activeProject: Project | null
-  conversations: Conversation[]
+  activeProjectId: ID | null
   activeConversationId: ID | null
   messages: Message[]
   runs: Run[]
@@ -40,9 +48,7 @@ interface WorkspaceState {
 }
 
 const emptyWorkspace: WorkspaceState = {
-  projects: [],
-  activeProject: null,
-  conversations: [],
+  activeProjectId: null,
   activeConversationId: null,
   messages: [],
   runs: [],
@@ -52,9 +58,11 @@ const emptyWorkspace: WorkspaceState = {
 }
 
 export function App(): JSX.Element {
+  const [tree, setTree] = useState<ProjectGroup[]>([])
   const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace)
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null)
   const [models, setModels] = useState<ModelOption[]>([])
+  const [preferences, setPreferences] = useState<OrbitPreferences>(EMPTY_PREFERENCES)
   const [composer, setComposer] = useState('')
   const [attachments, setAttachments] = useState<DraftAttachment[]>([])
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({})
@@ -67,9 +75,8 @@ export function App(): JSX.Element {
   const [respondingId, setRespondingId] = useState<string | null>(null)
   const [staleRunIds, setStaleRunIds] = useState<string[]>([])
   const [contextTab, setContextTab] = useState<ContextTab | null>(null)
-  /** Fast mode is a renderer-only indicator today: agy 1.1.27 publishes no
-   *  fast-mode flag, so this deliberately never reaches the provider. */
-  const [fastMode, setFastMode] = useState(false)
+  const [expandedProjectIds, setExpandedProjectIds] = useState<ID[]>(readExpanded)
+  const [creating, setCreating] = useState<CreateIntent | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
@@ -78,8 +85,15 @@ export function App(): JSX.Element {
   const [startupError, setStartupError] = useState<{ message: string; detail?: string | undefined } | null>(null)
   const dragDepth = useRef(0)
   const composerFocusRef = useRef<(() => void) | null>(null)
+  /** Sessions whose reasoning tier has already been settled this launch, so
+   *  seeding a migrated session can never turn into a write loop. */
+  const seededEffortIds = useRef(new Set<ID>())
 
-  const activeConversation = workspace.conversations.find((item) => item.id === workspace.activeConversationId) ?? null
+  const projects = useMemo(() => tree.map((group) => group.project), [tree])
+  const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
+  const activeGroup = tree.find((group) => group.project.id === workspace.activeProjectId) ?? null
+  const conversations = activeGroup?.conversations ?? []
+  const activeConversation = conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
   const nativeMediaAvailable = providerStatus?.details?.nativeMedia !== false
 
@@ -147,36 +161,59 @@ export function App(): JSX.Element {
       .catch((error: unknown) => setNotice(error instanceof Error ? error.message : 'Unable to load artifact.'))
   }, [selectedArtifactId])
 
+  useEffect(() => {
+    writeExpanded(expandedProjectIds)
+  }, [expandedProjectIds])
+
+  // A session carried over from before Orbit had a reasoning preference has
+  // no tier at all. Rather than leaving it on "Auto" forever, settle it once
+  // from the same policy a new session uses — the user's remembered level.
+  useEffect(() => {
+    if (!activeConversation || models.length === 0) return
+    if (activeConversation.reasoningEffort !== null) return
+    if (seededEffortIds.current.has(activeConversation.id)) return
+    const target = modelForSelection(models, activeConversation.model)
+    const effort = effortForModel(target, preferences)
+    if (!effort) return
+    seededEffortIds.current.add(activeConversation.id)
+    void persistModel(activeConversation.id, activeConversation.model, effort)
+  }, [activeConversation, models, preferences])
+
   if (startupError) return <StartupError message={startupError.message} detail={startupError.detail} />
 
   async function loadInitial(): Promise<void> {
     const orbit = requireOrbitApi()
-    const [projects, status] = await Promise.all([orbit.projects.list(), orbit.providers.status()])
+    const [groups, status, storedPreferences] = await Promise.all([
+      orbit.projects.tree(),
+      orbit.providers.status(),
+      orbit.preferences.get()
+    ])
     setProviderStatus(status)
+    setPreferences(storedPreferences)
+    setTree(groups)
     // The catalogue comes from Antigravity itself. If it cannot be read we
     // show no models at all rather than inventing plausible-looking ones.
     void orbit.models
       .list()
       .then(setModels)
       .catch(() => setModels([]))
-    if (projects.length === 0) {
-      setWorkspace((current) => ({ ...current, projects }))
-      return
-    }
-    await openProject(projects[0]!.id, projects)
+    const first = groups[0]?.project
+    if (!first) return
+    setExpandedProjectIds((current) => (current.includes(first.id) ? current : [...current, first.id]))
+    await openProject(first.id)
   }
 
-  async function openProject(projectId: ID, knownProjects = workspace.projects, preferredConversationId?: ID | null): Promise<void> {
+  async function openProject(projectId: ID, preferredConversationId?: ID | null): Promise<void> {
     const orbit = requireOrbitApi()
-    const snapshot = await orbit.projects.open(projectId)
-    const projects = knownProjects.length ? knownProjects : await orbit.projects.list()
-    setWorkspace(fromSnapshot(snapshot, projects, preferredConversationId))
+    const [snapshot, groups] = await Promise.all([orbit.projects.open(projectId), orbit.projects.tree()])
+    setTree(groups)
+    setWorkspace(fromSnapshot(snapshot, preferredConversationId ?? workspaceConversationFor(groups, projectId, preferredConversationId)))
     setSelectedArtifactId((current) => current ?? snapshot.artifacts[0]?.id ?? null)
   }
 
   async function refreshProject(preferred?: ID | null): Promise<void> {
-    if (!workspace.activeProject) return
-    await openProject(workspace.activeProject.id, workspace.projects, preferred ?? workspace.activeConversationId)
+    if (!workspace.activeProjectId) return
+    await openProject(workspace.activeProjectId, preferred ?? workspace.activeConversationId)
   }
 
   function applyRuntimeEvent(event: RuntimeEvent): void {
@@ -187,8 +224,16 @@ export function App(): JSX.Element {
       setActivityByRun((current) => ({ ...current, [event.runId]: applyActivity(current[event.runId] ?? emptyActivity(), event) }))
     }
     if (event.type === 'interaction.required') {
-      if (event.canRespond) setPendingByRun((current) => ({ ...current, [event.runId]: event }))
-      else setUnavailableByRun((current) => ({ ...current, [event.runId]: event }))
+      if (event.canRespond) {
+        setPendingByRun((current) => ({ ...current, [event.runId]: event }))
+        // Antigravity can raise a prompt after it has already reported the
+        // turn complete (the PTY screen is read asynchronously). Without
+        // this the card would have nowhere to render and the session would
+        // sit blocked behind a request the user was never shown.
+        setRunningRunByConversation((current) =>
+          current[event.conversationId] === event.runId ? current : { ...current, [event.conversationId]: event.runId }
+        )
+      } else setUnavailableByRun((current) => ({ ...current, [event.runId]: event }))
     }
     if (event.type === 'interaction.resolved') {
       setPendingByRun((current) => {
@@ -209,7 +254,7 @@ export function App(): JSX.Element {
     }
     if (event.type === 'artifact.produced') {
       setSelectedArtifactId(event.artifact.id)
-      void openProject(event.projectId, [], event.conversationId)
+      void openProject(event.projectId, event.conversationId)
     }
     if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
       setRunningRunByConversation((current) => {
@@ -227,23 +272,37 @@ export function App(): JSX.Element {
         delete next[event.runId]
         return next
       })
-      void openProject(event.projectId, [], event.conversationId)
+      void openProject(event.projectId, event.conversationId)
     }
   }
 
-  async function createProject(name: string): Promise<void> {
+  async function createProject(input: { name: string; rootPath: string | null }): Promise<void> {
     const orbit = requireOrbitApi()
-    const project = await orbit.projects.create({ name })
-    await openProject(project.id, await orbit.projects.list())
+    try {
+      const project = await orbit.projects.create({ name: input.name, rootPath: input.rootPath })
+      setCreating(null)
+      setExpandedProjectIds((current) => (current.includes(project.id) ? current : [...current, project.id]))
+      await openProject(project.id)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That project could not be created.')
+    }
   }
 
-  async function createSession(): Promise<void> {
-    if (!workspace.activeProject) return
-    const conversation = await requireOrbitApi().conversations.create({
-      projectId: workspace.activeProject.id,
-      title: 'New session'
-    })
-    await refreshProject(conversation.id)
+  async function createSession(input: { projectId: ID; title: string | null; workingDirectory: string | null }): Promise<void> {
+    const orbit = requireOrbitApi()
+    try {
+      const conversation = await orbit.conversations.create({
+        projectId: input.projectId,
+        ...(input.title ? { title: input.title } : {}),
+        workingDirectory: input.workingDirectory
+      })
+      setCreating(null)
+      setExpandedProjectIds((current) => (current.includes(input.projectId) ? current : [...current, input.projectId]))
+      await openProject(input.projectId, conversation.id)
+      composerFocusRef.current?.()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That session could not be created.')
+    }
   }
 
   async function renameSession(conversationId: ID, title: string): Promise<void> {
@@ -253,12 +312,20 @@ export function App(): JSX.Element {
 
   async function deleteSession(conversationId: ID): Promise<void> {
     await requireOrbitApi().conversations.delete({ conversationId })
-    const remaining = workspace.conversations.filter((item) => item.id !== conversationId)
+    const remaining = conversations.filter((item) => item.id !== conversationId)
     await refreshProject(remaining[0]?.id ?? null)
   }
 
+  async function selectSession(projectId: ID, conversationId: ID): Promise<void> {
+    if (projectId === workspace.activeProjectId) {
+      setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))
+      return
+    }
+    await openProject(projectId, conversationId)
+  }
+
   async function send(): Promise<void> {
-    if (!workspace.activeProject || !activeConversation) return
+    if (!workspace.activeProjectId || !activeConversation) return
     if (!composer.trim() && attachments.length === 0) return
     const content = composer.trim() || 'See the attached files.'
     const fileIds = attachments.map((attachment) => attachment.fileId)
@@ -270,7 +337,7 @@ export function App(): JSX.Element {
 
     try {
       const run = await requireOrbitApi().messages.send({
-        projectId: workspace.activeProject.id,
+        projectId: workspace.activeProjectId,
         conversationId: activeConversation.id,
         content,
         attachmentFileIds: fileIds
@@ -287,19 +354,43 @@ export function App(): JSX.Element {
 
   /** Persisted per conversation, so a session keeps the model it was
    *  started with instead of silently drifting to whatever was picked last. */
-  async function changeModel(model: string | null, reasoningEffort: ReasoningEffort | null): Promise<void> {
-    if (!activeConversation) return
-    const conversationId = activeConversation.id
-    setWorkspace((current) => ({
-      ...current,
-      conversations: current.conversations.map((item) => (item.id === conversationId ? { ...item, model, reasoningEffort } : item))
-    }))
+  async function persistModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Promise<void> {
+    setTree((current) =>
+      current.map((group) => ({
+        ...group,
+        conversations: group.conversations.map((item) => (item.id === conversationId ? { ...item, model, reasoningEffort } : item))
+      }))
+    )
     try {
       await requireOrbitApi().conversations.setModel({ conversationId, model, reasoningEffort })
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That model could not be selected.')
       await refreshProject()
     }
+  }
+
+  /** Choosing a model does not choose a tier: the tier comes from what this
+   *  user has chosen before, mapped onto what the new model genuinely
+   *  offers. A model with no tiers lands on none. */
+  function selectModel(modelId: string | null): void {
+    if (!activeConversation) return
+    const target = modelForSelection(models, modelId)
+    void persistModel(activeConversation.id, modelId, effortForModel(target, preferences))
+  }
+
+  /** The only thing that updates the remembered preference: an explicit
+   *  click or keypress on a tier. */
+  function selectEffort(effort: ReasoningEffort): void {
+    if (!activeConversation) return
+    const next = rememberEffort(preferences, preferenceKeyFor(activeConversation.model), effort)
+    setPreferences(next)
+    void requireOrbitApi()
+      .preferences.set(next)
+      .catch(() => {
+        // A preference that failed to persist still applies to this session;
+        // it simply will not be remembered next launch.
+      })
+    void persistModel(activeConversation.id, activeConversation.model, effort)
   }
 
   async function cancel(): Promise<void> {
@@ -358,17 +449,17 @@ export function App(): JSX.Element {
   }
 
   async function pickFiles(): Promise<void> {
-    if (!workspace.activeProject) return
-    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProject.id })
+    if (!workspace.activeProjectId) return
+    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProjectId })
     if (files.length === 0) return
     addProjectFiles(files)
     await refreshProject()
   }
 
   async function attachDroppedPaths(paths: string[]): Promise<void> {
-    if (!workspace.activeProject || paths.length === 0) return
+    if (!workspace.activeProjectId || paths.length === 0) return
     try {
-      const files = await requireOrbitApi().files.attachPaths({ projectId: workspace.activeProject.id, paths })
+      const files = await requireOrbitApi().files.attachPaths({ projectId: workspace.activeProjectId, paths })
       addProjectFiles(files)
       await refreshProject()
     } catch (error) {
@@ -377,12 +468,12 @@ export function App(): JSX.Element {
   }
 
   async function attachPastedImages(files: File[]): Promise<void> {
-    if (!workspace.activeProject) return
+    if (!workspace.activeProjectId) return
     for (const file of files) {
       try {
         const data = new Uint8Array(await file.arrayBuffer())
         const name = file.name || `pasted-image-${Date.now()}.png`
-        const stored = await requireOrbitApi().files.attachImage({ projectId: workspace.activeProject.id, name, data })
+        const stored = await requireOrbitApi().files.attachImage({ projectId: workspace.activeProjectId, name, data })
         addProjectFiles([stored])
       } catch (error) {
         setNotice(error instanceof Error ? error.message : 'That image could not be attached.')
@@ -426,32 +517,32 @@ export function App(): JSX.Element {
 
   return (
     <div className="app">
-      <SessionSidebar
-        conversations={workspace.conversations}
+      <ProviderLogoSprite />
+      <ProjectSidebar
+        groups={tree}
+        activeProjectId={workspace.activeProjectId}
         activeConversationId={workspace.activeConversationId}
+        expandedProjectIds={expandedProjectIds}
         indicatorFor={indicatorFor}
         collapsed={sidebarCollapsed}
-        disabled={!workspace.activeProject}
-        fileCount={workspace.projectFiles.length}
-        artifactCount={workspace.artifacts.length}
-        openContextTab={contextTab}
-        onSelect={(conversationId) => setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))}
-        onCreate={() => void createSession()}
+        onToggleProject={(projectId) =>
+          setExpandedProjectIds((current) =>
+            current.includes(projectId) ? current.filter((id) => id !== projectId) : [...current, projectId]
+          )
+        }
+        onSelectSession={(projectId, conversationId) => void selectSession(projectId, conversationId)}
+        onCreate={setCreating}
         onRename={(conversationId, title) => void renameSession(conversationId, title)}
         onDelete={(conversationId) => void deleteSession(conversationId)}
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
-        onOpenContext={(tab) => setContextTab((current) => (current === tab ? null : tab))}
       />
 
       <div className="workspace">
         <ChromeBar
-          projects={workspace.projects}
-          activeProject={workspace.activeProject}
-          providerStatus={providerStatus}
+          activeProject={activeProject}
           sessionTitle={activeConversation?.title ?? null}
+          workingPath={workingPathFor(activeProject, activeConversation)}
           live={activeConversation?.transport === 'pty'}
-          onSelectProject={(projectId) => void openProject(projectId)}
-          onCreateProject={(name) => void createProject(name)}
         />
         <ProviderBanner providerStatus={providerStatus} />
         {notice ? (
@@ -461,99 +552,128 @@ export function App(): JSX.Element {
         ) : null}
 
         <div className="body">
-        <main
-          className={`session${dragging ? ' dragging' : ''}${blankSession ? ' session-blank' : ''}`}
-          onDragOver={onDragOver}
-          onDragEnter={onDragEnter}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-        >
-          <WorkSession
-            project={workspace.activeProject}
-            conversation={activeConversation}
-            messages={activeMessages}
-            runs={workspace.runs}
+          <main
+            className={`session${dragging ? ' dragging' : ''}${blankSession ? ' session-blank' : ''}`}
+            onDragOver={onDragOver}
+            onDragEnter={onDragEnter}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+          >
+            <WorkSession
+              project={activeProject}
+              conversation={activeConversation}
+              messages={activeMessages}
+              runs={workspace.runs}
+              projectFiles={workspace.projectFiles}
+              thumbnails={thumbnails}
+              activeRunId={activeRunId}
+              streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
+              activityByRun={activityByRun}
+              pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
+              unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}
+              staleInteraction={Boolean(activeRunId && staleRunIds.includes(activeRunId))}
+              respondingInteractionId={respondingId}
+              resolvedRecords={resolvedRecords}
+              onRespond={(optionId) => void respond(optionId)}
+            />
+
+            {blankSession ? (
+              <EmptySession
+                projectName={activeProject?.name ?? null}
+                onPick={(starter: Starter) => {
+                  setComposer(starter.prompt)
+                  composerFocusRef.current?.()
+                }}
+              />
+            ) : null}
+
+            {activeConversation ? (
+              <Composer
+                models={models}
+                selectedModel={activeConversation.model}
+                selectedEffort={activeConversation.reasoningEffort}
+                onSelectModel={selectModel}
+                onSelectEffort={selectEffort}
+                registerFocus={(focus) => {
+                  composerFocusRef.current = focus
+                }}
+                value={composer}
+                attachments={displayAttachments}
+                disabled={!activeConversation}
+                running={Boolean(activeRunId)}
+                replying={replying}
+                onChange={setComposer}
+                onSend={() => void send()}
+                onCancel={() => void cancel()}
+                onPickFiles={() => void pickFiles()}
+                onPasteImages={(files) => void attachPastedImages(files)}
+                onRemoveAttachment={(fileId) => setAttachments((current) => current.filter((item) => item.fileId !== fileId))}
+                onRetryAttachment={(fileId) =>
+                  setAttachments((current) => current.map((item) => (item.fileId === fileId ? { ...item, state: 'ready', error: null } : item)))
+                }
+              />
+            ) : null}
+
+            {blankSession && activeConversation ? <ComposerHints /> : null}
+
+            {dragging ? <div className="drop-overlay">Drop to attach</div> : null}
+          </main>
+
+          <ContextPanel
+            tab={contextTab}
+            onSelectTab={setContextTab}
             projectFiles={workspace.projectFiles}
-            thumbnails={thumbnails}
-            activeRunId={activeRunId}
-            streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
-            activityByRun={activityByRun}
-            pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
-            unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}
-            staleInteraction={Boolean(activeRunId && staleRunIds.includes(activeRunId))}
-            respondingInteractionId={respondingId}
-            resolvedRecords={resolvedRecords}
-            onRespond={(optionId) => void respond(optionId)}
+            artifacts={workspace.artifacts}
+            conversations={conversations}
+            activeConversationId={workspace.activeConversationId}
+            selectedArtifactId={selectedArtifactId}
+            artifactContent={artifactContent}
+            attachedFileIds={attachments.map((attachment) => attachment.fileId)}
+            onClose={() => setContextTab(null)}
+            onAddFiles={() => void pickFiles()}
+            onImportArtifacts={() => void importArtifacts()}
+            onAttachFile={(file) => addProjectFiles([file])}
+            onSelectArtifact={setSelectedArtifactId}
+            onRevealArtifact={(artifactId) => void requireOrbitApi().artifacts.reveal(artifactId)}
+            onReferenceArtifact={(artifactId, conversationId) => void referenceArtifact(artifactId, conversationId)}
           />
 
-          {blankSession ? (
-            <EmptySession
-              projectName={workspace.activeProject?.name ?? null}
-              onPick={(starter: Starter) => {
-                setComposer(starter.prompt)
-                composerFocusRef.current?.()
-              }}
-            />
-          ) : null}
-
-          {activeConversation ? (
-            <Composer
-              models={models}
-              selectedModel={activeConversation.model}
-              selectedEffort={activeConversation.reasoningEffort}
-              onModelChange={(model, effort) => void changeModel(model, effort)}
-              fastMode={fastMode}
-              onFastModeChange={setFastMode}
-              registerFocus={(focus) => {
-                composerFocusRef.current = focus
-              }}
-              value={composer}
-              attachments={displayAttachments}
-              disabled={!activeConversation}
-              running={Boolean(activeRunId)}
-              replying={replying}
-              onChange={setComposer}
-              onSend={() => void send()}
-              onCancel={() => void cancel()}
-              onPickFiles={() => void pickFiles()}
-              onPasteImages={(files) => void attachPastedImages(files)}
-              onRemoveAttachment={(fileId) => setAttachments((current) => current.filter((item) => item.fileId !== fileId))}
-              onRetryAttachment={(fileId) =>
-                setAttachments((current) => current.map((item) => (item.fileId === fileId ? { ...item, state: 'ready', error: null } : item)))
-              }
-            />
-          ) : null}
-
-          {dragging ? <div className="drop-overlay">Drop to attach</div> : null}
-        </main>
-
-        <ContextPanel
-          tab={contextTab}
-          onSelectTab={setContextTab}
-          projectFiles={workspace.projectFiles}
-          artifacts={workspace.artifacts}
-          conversations={workspace.conversations}
-          activeConversationId={workspace.activeConversationId}
-          selectedArtifactId={selectedArtifactId}
-          artifactContent={artifactContent}
-          attachedFileIds={attachments.map((attachment) => attachment.fileId)}
-          onClose={() => setContextTab(null)}
-          onAddFiles={() => void pickFiles()}
-          onImportArtifacts={() => void importArtifacts()}
-          onAttachFile={(file) => addProjectFiles([file])}
-          onSelectArtifact={setSelectedArtifactId}
-          onRevealArtifact={(artifactId) => void requireOrbitApi().artifacts.reveal(artifactId)}
-          onReferenceArtifact={(artifactId, conversationId) => void referenceArtifact(artifactId, conversationId)}
-        />
+          {/* The drawer's own controls, on the edge the drawer comes from. */}
+          <WorkspaceRail
+            tab={contextTab}
+            fileCount={workspace.projectFiles.length}
+            artifactCount={workspace.artifacts.length}
+            onSelect={(tab) => setContextTab((current) => (current === tab ? null : tab))}
+          />
         </div>
       </div>
+
+      {creating?.kind === 'project' ? (
+        <CreateProjectDialog
+          onCancel={() => setCreating(null)}
+          onCreate={(input) => void createProject(input)}
+          pickFolder={() => requireOrbitApi().dialog.pickFolder({ title: 'Choose the project folder' })}
+        />
+      ) : null}
+
+      {creating?.kind === 'session' && projects.length > 0 ? (
+        <CreateSessionDialog
+          projects={projects}
+          initialProjectId={creating.projectId ?? workspace.activeProjectId}
+          onCancel={() => setCreating(null)}
+          onCreate={(input) => void createSession(input)}
+          pickFolder={(defaultPath) =>
+            requireOrbitApi().dialog.pickFolder({ title: 'Choose the session folder', defaultPath })
+          }
+        />
+      ) : null}
     </div>
   )
 
   async function importArtifacts(): Promise<void> {
-    if (!workspace.activeProject) return
+    if (!workspace.activeProjectId) return
     const imported = await requireOrbitApi().artifacts.import({
-      projectId: workspace.activeProject.id,
+      projectId: workspace.activeProjectId,
       conversationId: activeConversation?.id ?? null
     })
     if (imported.length === 0) return
@@ -562,9 +682,13 @@ export function App(): JSX.Element {
   }
 
   async function referenceArtifact(artifactId: ID, destinationConversationId: ID): Promise<void> {
-    if (!workspace.activeProject) return
-    await requireOrbitApi().references.create({ projectId: workspace.activeProject.id, artifactId, destinationConversationId })
-    const target = workspace.conversations.find((item) => item.id === destinationConversationId)
+    if (!workspace.activeProjectId) return
+    await requireOrbitApi().references.create({
+      projectId: workspace.activeProjectId,
+      artifactId,
+      destinationConversationId
+    })
+    const target = conversations.find((item) => item.id === destinationConversationId)
     setNotice(`Referenced in ${target?.title ?? 'session'}.`)
     await refreshProject()
   }
@@ -576,21 +700,50 @@ function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {
   return orbit
 }
 
-function fromSnapshot(snapshot: ProjectSnapshot, projects: Project[], preferredConversationId?: ID | null): WorkspaceState {
-  const activeConversationId =
-    preferredConversationId && snapshot.conversations.some((conversation) => conversation.id === preferredConversationId)
-      ? preferredConversationId
-      : (snapshot.conversations[0]?.id ?? null)
+/** The folder the header reports. A session override wins; otherwise the
+ *  project's own folder; otherwise nothing is claimed, because the managed
+ *  workspace is an internal location and not a place the user chose. */
+function workingPathFor(project: Project | null, conversation: Conversation | null): string | null {
+  return conversation?.workingDirectory ?? project?.rootPath ?? null
+}
+
+function workspaceConversationFor(groups: ProjectGroup[], projectId: ID, preferred?: ID | null): ID | null {
+  const group = groups.find((candidate) => candidate.project.id === projectId)
+  if (!group) return null
+  if (preferred && group.conversations.some((conversation) => conversation.id === preferred)) return preferred
+  return group.conversations[0]?.id ?? null
+}
+
+function fromSnapshot(snapshot: ProjectSnapshot, activeConversationId: ID | null): WorkspaceState {
   return {
-    projects,
-    activeProject: snapshot.project,
-    conversations: snapshot.conversations,
-    activeConversationId,
+    activeProjectId: snapshot.project.id,
+    activeConversationId:
+      activeConversationId && snapshot.conversations.some((conversation) => conversation.id === activeConversationId)
+        ? activeConversationId
+        : (snapshot.conversations[0]?.id ?? null),
     messages: snapshot.messages,
     runs: snapshot.runs,
     artifacts: snapshot.artifacts,
     projectFiles: snapshot.projectFiles,
     references: snapshot.references
+  }
+}
+
+function readExpanded(): ID[] {
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeExpanded(ids: readonly ID[]): void {
+  try {
+    window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(ids))
+  } catch {
+    // Sidebar view state is not worth surfacing an error for.
   }
 }
 
