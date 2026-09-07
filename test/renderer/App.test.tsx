@@ -77,7 +77,13 @@ describe('App', () => {
         onEvent: vi.fn(() => () => undefined)
       },
       interactions: { respond: vi.fn() },
-      files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn() },
+      files: {
+        attach: vi.fn(),
+        attachPaths: vi.fn(),
+        attachImage: vi.fn(),
+        thumbnail: vi.fn(async () => null),
+        pathForFile: vi.fn(() => null)
+      },
       artifacts: {
         list: vi.fn(),
         import: vi.fn(),

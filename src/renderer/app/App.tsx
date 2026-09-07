@@ -64,6 +64,19 @@ export function App(): JSX.Element {
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
   const nativeMediaAvailable = providerStatus?.details?.nativeMedia !== false
 
+  // An attachment that can only ever be shared as a workspace reference
+  // says so while it is still sitting in the composer, so the user learns
+  // the real outcome before sending rather than from a flash mid-send.
+  const displayAttachments = useMemo(
+    () =>
+      attachments.map((attachment) =>
+        attachment.state === 'ready' && projectedState(attachment, nativeMediaAvailable) === 'reference'
+          ? { ...attachment, state: 'reference' as const }
+          : attachment
+      ),
+    [attachments, nativeMediaAvailable]
+  )
+
   const activeMessages = useMemo(
     () =>
       workspace.messages
@@ -282,9 +295,21 @@ export function App(): JSX.Element {
       const additions = files.filter((file) => !existing.has(file.id)).map((file) => draftFromProjectFile(file))
       return [...current, ...additions]
     })
-    for (const file of files) {
-      if (!isImage(file)) continue
-      setThumbnails((current) => (current[file.id] ? current : { ...current, [file.id]: `file://${file.storedPath}` }))
+    for (const file of files) void loadThumbnail(file)
+  }
+
+  /** Thumbnails arrive as data URLs from main: the renderer's CSP forbids
+   *  `file:`, so pointing an <img> at the stored path renders nothing. */
+  async function loadThumbnail(file: ProjectFile): Promise<void> {
+    if (!isImage(file)) return
+    if (thumbnails[file.id]) return
+    try {
+      const dataUrl = await requireOrbitApi().files.thumbnail(file.id)
+      if (!dataUrl) return
+      setThumbnails((current) => ({ ...current, [file.id]: dataUrl }))
+      setAttachments((current) => current.map((item) => (item.fileId === file.id ? { ...item, thumbnail: dataUrl } : item)))
+    } catch {
+      // A missing preview is cosmetic — the attachment itself still stands.
     }
   }
 
@@ -346,8 +371,11 @@ export function App(): JSX.Element {
     event.preventDefault()
     dragDepth.current = 0
     setDragging(false)
+    // Electron 32+ removed File.path (verified absent on 33.4.11), so the
+    // real location must come from webUtils via the preload.
+    const orbit = getOrbitApi()
     const paths = Array.from(event.dataTransfer.files)
-      .map((file) => (file as File & { path?: string }).path)
+      .map((file) => orbit?.files.pathForFile(file) ?? null)
       .filter((path): path is string => typeof path === 'string' && path.length > 0)
     void attachDroppedPaths(paths)
   }
@@ -424,7 +452,7 @@ export function App(): JSX.Element {
           {activeConversation ? (
             <Composer
               value={composer}
-              attachments={attachments}
+              attachments={displayAttachments}
               disabled={!activeConversation}
               running={Boolean(activeRunId)}
               replying={replying}

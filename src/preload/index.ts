@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, type OrbitApi } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 
@@ -37,7 +37,19 @@ const orbitApi: OrbitApi = {
   files: {
     attach: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttach, input),
     attachPaths: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttachPaths, input),
-    attachImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttachImage, input)
+    attachImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.filesAttachImage, input),
+    thumbnail: (fileId) => ipcRenderer.invoke(IPC_CHANNELS.filesThumbnail, fileId),
+    // Electron removed File.path in v32+ (verified absent on 33.4.11), so a
+    // dropped file's real location is only obtainable through webUtils, and
+    // only from this preload context. Reading `file.path` in the renderer
+    // silently yields undefined and drag-and-drop attaches nothing.
+    pathForFile: (file) => {
+      try {
+        return webUtils.getPathForFile(file) || null
+      } catch {
+        return null
+      }
+    }
   },
   artifacts: {
     list: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsList, projectId),

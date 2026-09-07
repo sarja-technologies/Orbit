@@ -99,6 +99,52 @@ Implemented with Electron's own `clipboard`/`nativeImage` modules (`nativeClipbo
 
 **Real bug found and fixed during verification:** attaching an image via Ctrl+V does not itself start generation — the screen shows the "N media attached" marker and immediately returns to the same ready-for-input footer a genuinely completed turn uses. The PTY session tracks an explicit `deliveringImages` flag so a ready-for-input signal seen mid-attachment-sequence is not misread as turn completion (which previously caused the text prompt to never be sent at all).
 
+## Attachment UI ↔ native delivery (live-verified)
+
+The composer's attachment states were verified against the real app and real
+agy 1.1.27 (Linux/Wayland, `wl-clipboard` present):
+
+- **One image via the file picker** — chip shows a real thumbnail in `ready`;
+  after sending, agy answered `Red` for a solid-red PNG, proving it received
+  the image through the native path, and the sent thumbnail persists in the
+  user's turn.
+- **Two images in one message** — independent chips, both thumbnails render,
+  agy answered `Red, Blue` in order, and both sent thumbnails persist.
+- **Drag and drop** — the `Drop to attach` overlay appears on dragenter and
+  clears on drop; the pipeline it feeds (`files.attachPaths` → validation →
+  storage → chip) was exercised with a real on-disk path and refuses a
+  relative one.
+- **Clipboard paste** — an image payload becomes an attachment; ordinary
+  copied text is *not* intercepted (`defaultPrevented === false`, no chip).
+- **Reference fallback** — re-run with the clipboard helpers removed from
+  `PATH`, so `checkClipboardCapability()` genuinely reported unavailable.
+  Chips then read **"Shared as reference"** *at rest*, before sending, and a
+  whole-document scan found no user-facing `PTY` / `clipboard` / `view_file` /
+  transport terminology.
+- **Failure** — a managed file deleted from disk underneath Orbit degrades to
+  no thumbnail rather than throwing or leaking a path; Remove works from
+  every state and Retry appears only for a genuine failure.
+
+Three real bugs were found and fixed by this verification:
+1. **Drag-and-drop was entirely broken.** Electron removed `File.path` (absent
+   on 33.4.11 — `'path' in file === false`), so the drop handler always
+   resolved zero paths and attached nothing. Dropped files are now resolved
+   via `webUtils.getPathForFile` in the preload.
+2. **Thumbnails never rendered.** They pointed at `file://<storedPath>`, which
+   the renderer CSP forbids (`img-src 'self' data: blob:`). Managed image
+   bytes now come through a `files.thumbnail` IPC as a `data:` URL, validated
+   to be a real, present, size-capped image belonging to the store.
+3. **Reference mode was effectively invisible.** It was only applied during
+   send, where it was cleared within milliseconds. An attachment that can only
+   be shared as a reference now says so while still in the composer.
+
+**Known limitation (not an attachment bug):** the *first* turn of a brand-new
+PTY session occasionally settles with empty extracted prose — observed once in
+three valid live runs. The attachment itself was still delivered in that run
+(the sent thumbnail rendered, and the next turn in the same session answered
+correctly). This is the same first-turn extraction flake already recorded for
+the resume test above, not a regression in the attachment path.
+
 ## Cross-platform clipboard notes and capability detection
 
 On this Linux/Wayland environment, Electron's `clipboard.writeImage()` genuinely depends on an external clipboard helper (`wl-copy`/`wl-paste` for Wayland, or `xclip`/`xsel` for X11) being installed on the system — it is **not** self-contained the way one might assume from Electron's cross-platform clipboard API. Confirmed live: image attachment failed with `no supported clipboard tool found (install wl-clipboard or xclip)` printed by agy itself until `wl-clipboard` was installed. Orbit does not install or manage this dependency — it's a documented host-environment prerequisite.

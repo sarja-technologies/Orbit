@@ -71,6 +71,7 @@ export function registerIpc(runtime: OrbitRuntime): void {
     const parsed = attachImageSchema.parse(input)
     return runtime.attachFileBytes(parsed.projectId, parsed.name, parsed.data)
   })
+  ipcMain.handle(IPC_CHANNELS.filesThumbnail, (_event, fileId: unknown) => runtime.getProjectFileThumbnail(idSchema.parse(fileId)))
   ipcMain.handle(IPC_CHANNELS.artifactsList, (_event, projectId: unknown) => runtime.listArtifacts(idSchema.parse(projectId)))
   ipcMain.handle(IPC_CHANNELS.artifactsImport, async (_event, input: unknown) => {
     const parsed = importArtifactSchema.parse(input)

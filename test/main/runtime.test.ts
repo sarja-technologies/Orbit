@@ -262,6 +262,30 @@ describe('OrbitRuntime', () => {
     expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('pty')
   })
 
+  it('serves a managed image as a data URL, because the renderer CSP forbids file:', () => {
+    const project = runtime.createProject('Thumbnails')
+    const imagePath = path.join(dir, 'shot.png')
+    // A minimal but real PNG so the mime/type checks operate on genuine bytes.
+    fs.writeFileSync(
+      imagePath,
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+    )
+    const [file] = runtime.attachFiles(project.id, [imagePath])
+
+    const thumbnail = runtime.getProjectFileThumbnail(file!.id)
+    expect(thumbnail).toMatch(/^data:image\/png;base64,/)
+  })
+
+  it('returns no thumbnail for a non-image or unknown file rather than leaking a path', () => {
+    const project = runtime.createProject('Thumbnails 2')
+    const textPath = path.join(dir, 'notes.txt')
+    fs.writeFileSync(textPath, 'not an image')
+    const [file] = runtime.attachFiles(project.id, [textPath])
+
+    expect(runtime.getProjectFileThumbnail(file!.id)).toBeNull()
+    expect(runtime.getProjectFileThumbnail('file_does-not-exist')).toBeNull()
+  })
+
   it('deletes a conversation, releasing any live provider session first', async () => {
     const project = runtime.createProject('Delete')
     const first = runtime.openProject(project.id).conversations[0]!

@@ -96,6 +96,23 @@ export class ArtifactService {
     return base
   }
 
+  /** Data-URL preview for a managed project file. Returns null for
+   *  anything that is not a real, still-present, reasonably sized image —
+   *  the renderer never receives a path, only bytes it is allowed to show. */
+  getProjectFileThumbnail(fileId: ID): string | null {
+    const file = this.store.getProjectFile(fileId)
+    if (!file) return null
+    const mimeType = file.mimeType ?? inferMimeType(file.name)
+    if (!mimeType?.startsWith('image/')) return null
+    try {
+      const stat = fs.statSync(file.storedPath)
+      if (!stat.isFile() || stat.size > BINARY_PREVIEW_LIMIT) return null
+      return fileToDataUrl(file.storedPath, mimeType)
+    } catch {
+      return null
+    }
+  }
+
   async reveal(artifactId: ID): Promise<void> {
     const artifact = this.store.getArtifact(artifactId)
     if (!artifact) throw new Error('Artifact not found.')

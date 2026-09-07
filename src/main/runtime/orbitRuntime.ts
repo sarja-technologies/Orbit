@@ -184,6 +184,10 @@ export class OrbitRuntime extends EventEmitter {
     return this.artifactService.attachProjectFiles(projectId, paths)
   }
 
+  getProjectFileThumbnail(fileId: ID): string | null {
+    return this.artifactService.getProjectFileThumbnail(fileId)
+  }
+
   /** Used by clipboard paste, which supplies bytes rather than a path. */
   attachFileBytes(projectId: ID, name: string, bytes: Uint8Array): ProjectFile {
     if (!this.store.getProject(projectId)) throw new Error('Project not found.')

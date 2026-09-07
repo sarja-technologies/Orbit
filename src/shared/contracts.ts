@@ -31,6 +31,7 @@ export const IPC_CHANNELS = {
   filesAttach: 'orbit:files:attach',
   filesAttachPaths: 'orbit:files:attach-paths',
   filesAttachImage: 'orbit:files:attach-image',
+  filesThumbnail: 'orbit:files:thumbnail',
   artifactsList: 'orbit:artifacts:list',
   artifactsImport: 'orbit:artifacts:import',
   artifactsContent: 'orbit:artifacts:content',
@@ -152,6 +153,13 @@ export interface OrbitApi {
     attach(input: AttachFilesInput): Promise<ProjectFile[]>
     attachPaths(input: AttachPathsInput): Promise<ProjectFile[]>
     attachImage(input: AttachImageInput): Promise<ProjectFile>
+    /** Data URL preview for an Orbit-managed image file, or null. The
+     *  renderer's CSP intentionally forbids `file:`, so bytes must come
+     *  through here rather than being pointed at from disk. */
+    thumbnail(fileId: ID): Promise<string | null>
+    /** Real filesystem path for a dropped File. Synchronous preload call —
+     *  see the preload for why `file.path` cannot be used. */
+    pathForFile(file: File): string | null
   }
   artifacts: {
     list(projectId: ID): Promise<Artifact[]>

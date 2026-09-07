@@ -126,6 +126,18 @@ describe('attachments', () => {
     expect(projectedState(file({ state: 'failed' }), true)).toBe('failed')
   })
 
+  it('regression: a ready image resolves to reference at rest when this machine cannot deliver media', () => {
+    // The composer shows this outcome BEFORE sending. Previously reference
+    // mode was only applied during send, where it was cleared within
+    // milliseconds and the user never saw it.
+    const ready = file({ state: 'ready' })
+    expect(projectedState(ready, false)).toBe('reference')
+    expect(stateLabel(projectedState(ready, false))).toBe('Shared as reference')
+    // With native media available a ready image must NOT claim to be a
+    // reference, and must not prematurely claim to be attaching at rest.
+    expect(projectedState(ready, true)).toBe('attaching')
+  })
+
   it('describes every state in user-facing language with no transport jargon', () => {
     for (const state of ['ready', 'attaching', 'attached', 'reference', 'failed'] as const) {
       const label = stateLabel(state)
