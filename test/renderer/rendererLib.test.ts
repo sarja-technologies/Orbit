@@ -4,6 +4,7 @@ import { describeProviderProblem, describeRuntimeError } from '../../src/rendere
 import { imageItemsFromClipboard, isNativeImage, projectedState, stateLabel, type DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import { parseInline, parseMarkdown } from '../../src/renderer/app/lib/markdown'
 import type { ToolActivityEvent } from '../../src/shared/runtime-events'
+import { relativeTime } from '../../src/renderer/app/lib/relativeTime'
 
 function activityEvent(label: string, status: ToolActivityEvent['status'], providerStepId?: string): ToolActivityEvent {
   return {
@@ -189,5 +190,22 @@ describe('markdown', () => {
 
   it('returns plain text unchanged when there is no markup', () => {
     expect(parseInline('just words')).toEqual([{ type: 'text', value: 'just words' }])
+  })
+})
+
+describe('relativeTime', () => {
+  const now = Date.parse('2026-09-07T12:00:00Z')
+
+  it('reads as a mail client would', () => {
+    expect(relativeTime('2026-09-07T11:59:40Z', now)).toBe('Now')
+    expect(relativeTime('2026-09-07T11:20:00Z', now)).toBe('40m ago')
+    expect(relativeTime('2026-09-07T09:00:00Z', now)).toBe('3h ago')
+    expect(relativeTime('2026-09-05T12:00:00Z', now)).toBe('2d ago')
+    expect(relativeTime('2026-08-24T12:00:00Z', now)).toBe('2w ago')
+    expect(relativeTime('2026-06-07T12:00:00Z', now)).toBe('3mo ago')
+  })
+
+  it('says nothing rather than guessing for an unusable timestamp', () => {
+    expect(relativeTime('not-a-date', now)).toBe('')
   })
 })

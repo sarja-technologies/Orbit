@@ -18,7 +18,7 @@ import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-eve
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
-import { SessionSidebar, type SessionIndicator } from './components/SessionSidebar'
+import { SessionSidebar, type ContextTab, type SessionIndicator } from './components/SessionSidebar'
 import { WorkSession, type ResolvedRecord } from './components/WorkSession'
 import { Composer } from './components/Composer'
 import { EmptySession, type Starter } from './components/EmptySession'
@@ -66,7 +66,10 @@ export function App(): JSX.Element {
   const [resolvedRecords, setResolvedRecords] = useState<ResolvedRecord[]>([])
   const [respondingId, setRespondingId] = useState<string | null>(null)
   const [staleRunIds, setStaleRunIds] = useState<string[]>([])
-  const [contextOpen, setContextOpen] = useState(false)
+  const [contextTab, setContextTab] = useState<ContextTab | null>(null)
+  /** Fast mode is a renderer-only indicator today: agy 1.1.27 publishes no
+   *  fast-mode flag, so this deliberately never reaches the provider. */
+  const [fastMode, setFastMode] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
@@ -423,34 +426,41 @@ export function App(): JSX.Element {
 
   return (
     <div className="app">
-      <ChromeBar
-        projects={workspace.projects}
-        activeProject={workspace.activeProject}
-        providerStatus={providerStatus}
-        onSelectProject={(projectId) => void openProject(projectId)}
-        onCreateProject={(name) => void createProject(name)}
+      <SessionSidebar
+        conversations={workspace.conversations}
+        activeConversationId={workspace.activeConversationId}
+        indicatorFor={indicatorFor}
+        collapsed={sidebarCollapsed}
+        disabled={!workspace.activeProject}
+        fileCount={workspace.projectFiles.length}
+        artifactCount={workspace.artifacts.length}
+        openContextTab={contextTab}
+        onSelect={(conversationId) => setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))}
+        onCreate={() => void createSession()}
+        onRename={(conversationId, title) => void renameSession(conversationId, title)}
+        onDelete={(conversationId) => void deleteSession(conversationId)}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
+        onOpenContext={(tab) => setContextTab((current) => (current === tab ? null : tab))}
       />
-      <ProviderBanner providerStatus={providerStatus} />
-      {notice ? (
-        <button type="button" className="notice" onClick={() => setNotice(null)}>
-          {notice}
-        </button>
-      ) : null}
 
-      <div className="body">
-        <SessionSidebar
-          conversations={workspace.conversations}
-          activeConversationId={workspace.activeConversationId}
-          indicatorFor={indicatorFor}
-          collapsed={sidebarCollapsed}
-          disabled={!workspace.activeProject}
-          onSelect={(conversationId) => setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))}
-          onCreate={() => void createSession()}
-          onRename={(conversationId, title) => void renameSession(conversationId, title)}
-          onDelete={(conversationId) => void deleteSession(conversationId)}
-          onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
+      <div className="workspace">
+        <ChromeBar
+          projects={workspace.projects}
+          activeProject={workspace.activeProject}
+          providerStatus={providerStatus}
+          sessionTitle={activeConversation?.title ?? null}
+          live={activeConversation?.transport === 'pty'}
+          onSelectProject={(projectId) => void openProject(projectId)}
+          onCreateProject={(name) => void createProject(name)}
         />
+        <ProviderBanner providerStatus={providerStatus} />
+        {notice ? (
+          <button type="button" className="notice" onClick={() => setNotice(null)}>
+            {notice}
+          </button>
+        ) : null}
 
+        <div className="body">
         <main
           className={`session${dragging ? ' dragging' : ''}${blankSession ? ' session-blank' : ''}`}
           onDragOver={onDragOver}
@@ -458,27 +468,6 @@ export function App(): JSX.Element {
           onDragLeave={onDragLeave}
           onDrop={onDrop}
         >
-          <div className="session-head">
-            <div className="session-heading">
-              <h1>{activeConversation?.title ?? (workspace.activeProject ? 'No session selected' : 'Welcome to Orbit')}</h1>
-              {activeConversation?.transport === 'pty' ? (
-                <span className="live-badge" title="This conversation can ask for approval and receive images directly.">
-                  Live session
-                </span>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              className={contextOpen ? 'files-toggle active' : 'files-toggle'}
-              onClick={() => setContextOpen((value) => !value)}
-              aria-expanded={contextOpen}
-            >
-              <FilesGlyph />
-              <span>Files</span>
-              {workspace.projectFiles.length > 0 ? <span className="files-count">{workspace.projectFiles.length}</span> : null}
-            </button>
-          </div>
-
           <WorkSession
             project={workspace.activeProject}
             conversation={activeConversation}
@@ -513,6 +502,8 @@ export function App(): JSX.Element {
               selectedModel={activeConversation.model}
               selectedEffort={activeConversation.reasoningEffort}
               onModelChange={(model, effort) => void changeModel(model, effort)}
+              fastMode={fastMode}
+              onFastModeChange={setFastMode}
               registerFocus={(focus) => {
                 composerFocusRef.current = focus
               }}
@@ -537,7 +528,8 @@ export function App(): JSX.Element {
         </main>
 
         <ContextPanel
-          open={contextOpen}
+          tab={contextTab}
+          onSelectTab={setContextTab}
           projectFiles={workspace.projectFiles}
           artifacts={workspace.artifacts}
           conversations={workspace.conversations}
@@ -545,7 +537,7 @@ export function App(): JSX.Element {
           selectedArtifactId={selectedArtifactId}
           artifactContent={artifactContent}
           attachedFileIds={attachments.map((attachment) => attachment.fileId)}
-          onClose={() => setContextOpen(false)}
+          onClose={() => setContextTab(null)}
           onAddFiles={() => void pickFiles()}
           onImportArtifacts={() => void importArtifacts()}
           onAttachFile={(file) => addProjectFiles([file])}
@@ -553,6 +545,7 @@ export function App(): JSX.Element {
           onRevealArtifact={(artifactId) => void requireOrbitApi().artifacts.reveal(artifactId)}
           onReferenceArtifact={(artifactId, conversationId) => void referenceArtifact(artifactId, conversationId)}
         />
+        </div>
       </div>
     </div>
   )
@@ -575,21 +568,6 @@ export function App(): JSX.Element {
     setNotice(`Referenced in ${target?.title ?? 'session'}.`)
     await refreshProject()
   }
-}
-
-function FilesGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
-      <path
-        d="M4 2h4l3 3v9H4z"
-        stroke="currentColor"
-        strokeWidth="1.25"
-        fill="none"
-        strokeLinejoin="round"
-      />
-      <path d="M8 2v3h3" stroke="currentColor" strokeWidth="1.25" fill="none" strokeLinejoin="round" />
-    </svg>
-  )
 }
 
 function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {

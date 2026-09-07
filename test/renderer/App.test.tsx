@@ -106,8 +106,11 @@ describe('App', () => {
 
     expect(await screen.findByText('Orbit')).toBeInTheDocument()
     expect(screen.getByText('Sessions')).toBeInTheDocument()
+    // Files and Artifacts are sidebar utilities, not header chrome.
+    expect(screen.getByRole('button', { name: /Files/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Artifacts/ })).toBeInTheDocument()
     // Provider identity is a compact status, never a permanent success banner.
-    expect(screen.getByText('Antigravity')).toBeInTheDocument()
+    expect(screen.getByText('Antigravity unavailable')).toBeInTheDocument()
   })
 
   it('shows the composer once a session is open', async () => {
@@ -163,7 +166,7 @@ describe('App', () => {
     ])
     render(<App />)
 
-    const trigger = await screen.findByLabelText('Model')
+    const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
     await userEvent.click(trigger)
     await userEvent.click(screen.getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ }))
@@ -191,7 +194,7 @@ describe('App', () => {
     await screen.findByText('Sessions')
 
     expect(screen.queryByLabelText('Project files and artifacts')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Files' }))
+    await userEvent.click(screen.getByRole('button', { name: /Files/ }))
     expect(await screen.findByLabelText('Project files and artifacts')).toBeInTheDocument()
   })
 

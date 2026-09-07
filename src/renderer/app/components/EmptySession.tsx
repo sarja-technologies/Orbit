@@ -1,42 +1,19 @@
-/** The new-session state: a short invitation and a few concrete starting
- *  points, sitting above the composer rather than competing with it. This
- *  replaces what was previously an empty black area with no indication of
- *  what Orbit can do. Disappears the moment a conversation has content. */
+/** The new-session state: an invitation, the workspace it applies to, and a
+ *  few lightweight starting points that read as suggestions rather than
+ *  product features. Disappears the moment the session has content. */
 export interface Starter {
   id: string
   label: string
-  hint: string
   prompt: string
 }
 
-/** Deliberately task-shaped rather than feature-shaped, and phrased as the
- *  user's own words so the filled composer reads naturally and is worth
- *  editing before sending. */
+/** Task-shaped rather than feature-shaped, and phrased as the user's own
+ *  words so the filled composer reads naturally and is worth editing. */
 export const STARTERS: readonly Starter[] = [
-  {
-    id: 'build',
-    label: 'Build or change something',
-    hint: 'Add a feature or edit existing code',
-    prompt: 'I want to change '
-  },
-  {
-    id: 'explore',
-    label: 'Explore this project',
-    hint: 'Understand how the code fits together',
-    prompt: 'Give me an overview of how this project is structured, and point out anything surprising.'
-  },
-  {
-    id: 'fix',
-    label: 'Fix an issue',
-    hint: 'Track down a bug and repair it',
-    prompt: "Something isn't working: "
-  },
-  {
-    id: 'review',
-    label: 'Review my work',
-    hint: 'Check recent changes before shipping',
-    prompt: 'Review my recent changes and tell me what you would fix before I ship this.'
-  }
+  { id: 'explore', label: 'Explore this project', prompt: 'Give me an overview of how this project is structured, and point out anything surprising.' },
+  { id: 'build', label: 'Build or change something', prompt: 'I want to change ' },
+  { id: 'fix', label: 'Fix an issue', prompt: "Something isn't working: " },
+  { id: 'review', label: 'Review my work', prompt: 'Review my recent changes and tell me what you would fix before I ship this.' }
 ]
 
 export function EmptySession({ projectName, onPick }: { projectName: string | null; onPick: (starter: Starter) => void }): JSX.Element {
@@ -44,16 +21,54 @@ export function EmptySession({ projectName, onPick }: { projectName: string | nu
     <div className="empty-session">
       <div className="empty-inner">
         <h2 className="empty-title">What should we work on?</h2>
-        {projectName ? <p className="empty-sub">Antigravity can read and change files in {projectName}.</p> : null}
+        {projectName ? (
+          <p className="empty-sub">
+            Working in <span className="empty-project">{projectName}</span>
+          </p>
+        ) : null}
         <div className="starters">
           {STARTERS.map((starter) => (
             <button key={starter.id} type="button" className="starter" onClick={() => onPick(starter)}>
-              <span className="starter-label">{starter.label}</span>
-              <span className="starter-hint">{starter.hint}</span>
+              <StarterGlyph id={starter.id} />
+              <span>{starter.label}</span>
             </button>
           ))}
         </div>
       </div>
     </div>
+  )
+}
+
+/** Small, literal icons — a magnifier for exploring, a pencil for building.
+ *  They aid recognition at a glance; nothing decorative. */
+function StarterGlyph({ id }: { id: string }): JSX.Element {
+  const common = { viewBox: '0 0 16 16', width: 13, height: 13, 'aria-hidden': true, focusable: 'false' as const }
+  if (id === 'explore') {
+    return (
+      <svg {...common}>
+        <circle cx="7" cy="7" r="4.2" stroke="currentColor" strokeWidth="1.4" fill="none" />
+        <path d="M10.2 10.2L14 14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    )
+  }
+  if (id === 'build') {
+    return (
+      <svg {...common}>
+        <path d="M10.5 2.5l3 3L6 13H3v-3z" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  if (id === 'fix') {
+    return (
+      <svg {...common}>
+        <path d="M8 2.2v3M8 10.8v3M2.2 8h3M10.8 8h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        <circle cx="8" cy="8" r="2.4" stroke="currentColor" strokeWidth="1.3" fill="none" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...common}>
+      <path d="M2.5 8.5l3.2 3.2L13.5 4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }

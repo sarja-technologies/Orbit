@@ -2,42 +2,55 @@ import { useEffect, useRef, useState } from 'react'
 import type { ID, Project, ProviderStatus } from '@shared/domain'
 import { describeProviderProblem } from '../lib/errorCopy'
 
-interface ChromeBarProps {
+interface WorkspaceHeaderProps {
   projects: Project[]
   activeProject: Project | null
   providerStatus: ProviderStatus | null
+  sessionTitle: string | null
+  live: boolean
   onSelectProject: (projectId: ID) => void
   onCreateProject: (name: string) => void
 }
 
-/** One compact bar: identity, active project, provider health. A healthy
- *  provider is a dot and a word — never a permanent banner. */
-export function ChromeBar({ projects, activeProject, providerStatus, onSelectProject, onCreateProject }: ChromeBarProps): JSX.Element {
+/** The header belongs to the workspace, not the window: where you are on
+ *  the left, how Antigravity is doing on the right, nothing else. */
+export function ChromeBar({
+  projects,
+  activeProject,
+  providerStatus,
+  sessionTitle,
+  live,
+  onSelectProject,
+  onCreateProject
+}: WorkspaceHeaderProps): JSX.Element {
   const problem = providerStatus ? describeProviderProblem(providerStatus.state, providerStatus.message) : null
   const state = providerStatus?.state ?? 'idle'
 
   return (
     <header className="chrome">
-      <div className="chrome-brand">Orbit</div>
-
-      {/* Project context reads as a path, so "where am I" is unambiguous.
-          Creating a project lives inside the menu rather than advertising
-          itself as permanent chrome. */}
       <div className="chrome-project">
-        <span className="chrome-sep" aria-hidden="true">/</span>
         <ProjectMenu
           projects={projects}
           activeProject={activeProject}
           onSelectProject={onSelectProject}
           onCreateProject={onCreateProject}
         />
+        {sessionTitle ? (
+          <>
+            <span className="chrome-sep" aria-hidden="true">/</span>
+            <span className="chrome-session">{sessionTitle}</span>
+          </>
+        ) : null}
+        {live ? (
+          <span className="live-badge" title="This session can ask for approval and receive images directly.">
+            Live
+          </span>
+        ) : null}
       </div>
 
-      {/* Tertiary: a healthy provider is a dot, nothing more. */}
       <div className="chrome-status" title={providerStatus?.message ?? undefined}>
         <span className={`status-dot status-dot-${state}`} aria-hidden="true" />
-        {problem ? <span className="status-label">Antigravity</span> : null}
-        <span className="visually-hidden">{problem ? problem.title : 'Antigravity is ready'}</span>
+        <span className="status-label">{problem ? 'Antigravity unavailable' : 'Antigravity online'}</span>
       </div>
     </header>
   )
@@ -153,15 +166,21 @@ function ProjectMenu({
 
 function FolderGlyph(): JSX.Element {
   return (
-    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">
-      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3l1.2 1.5h5.5A1.5 1.5 0 0 1 14 6v5.5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinejoin="round" />
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path
+        d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3l1.2 1.5h5.5A1.5 1.5 0 0 1 14 6v5.5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill="none"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }
 
 function ChevronGlyph(): JSX.Element {
   return (
-    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">
+    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false" className="chevron-glyph">
       <path d="M4 6.5l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )

@@ -15,6 +15,14 @@ interface MessageBlockProps {
 /** One block in the work-session transcript. Everything is left-aligned
  *  document flow — role is carried by a label and type weight, never by
  *  alignment or a filled bubble. */
+/** Local wall-clock time, or nothing at all if the stored value cannot be
+ *  parsed — an empty slot beats a made-up timestamp. */
+function clockTime(iso: string): string {
+  const parsed = Date.parse(iso)
+  if (Number.isNaN(parsed)) return ''
+  return new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 export function MessageBlock({ message, showRole, attachments, thumbnails }: MessageBlockProps): JSX.Element {
   if (message.status === 'failed') return <FailureBlock message={message} />
   if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
@@ -22,7 +30,13 @@ export function MessageBlock({ message, showRole, attachments, thumbnails }: Mes
   const isUser = message.role === 'user'
   return (
     <article className={`block block-${message.role}`}>
-      {showRole ? <div className="block-role">{isUser ? 'You' : 'Antigravity'}</div> : null}
+      {showRole ? (
+        <div className="block-role">
+          <span>{isUser ? 'You' : 'Antigravity'}</span>
+          {/* Real send time from the stored message — never a placeholder. */}
+          <time dateTime={message.createdAt}>{clockTime(message.createdAt)}</time>
+        </div>
+      ) : null}
       {isUser ? <div className="block-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
     </article>
