@@ -154,9 +154,17 @@ export class AntigravityProvider implements AgentProvider {
     if (!session) return
     // Kept rather than dropped when it still owns a live process: a fresh
     // session for this conversation would know nothing about that process
-    // and would happily become its second owner. The session releases
-    // itself once the process really exits.
-    if (await session.release()) this.ptySessions.delete(conversationId)
+    // and would happily become its second owner. A released session refuses
+    // to spawn either way, so the retained one is inert — it exists purely
+    // to hold ownership until the process is genuinely gone, and is dropped
+    // then.
+    if (await session.release()) {
+      this.ptySessions.delete(conversationId)
+      return
+    }
+    void session.whenOwnershipReleased().then(() => {
+      if (this.ptySessions.get(conversationId) === session) this.ptySessions.delete(conversationId)
+    })
   }
 
   async shutdown(): Promise<void> {

@@ -24,7 +24,24 @@ import { checkClipboardCapability, type ClipboardCapability } from './clipboardC
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
 import { findRecentConversationId } from './nativeConversationHistory'
 
-type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'waiting_for_interaction'
+type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'retiring' | 'waiting_for_interaction'
+
+/** A handover in progress: the previous process is being terminated, and
+ *  until it is confirmed gone it is still this conversation's owner.
+ *
+ *  ONE RULE governs every path in this file: a conversation has exactly one
+ *  owner at a time, an owner is an active process (`transport`) OR a
+ *  retiring one (`retirement.transport`), and ownership is released by
+ *  exactly one event — the owner's genuine exit. A new process may spawn
+ *  only when there is no owner and the session is still valid for sends. */
+interface Retirement {
+  /** Still the conversation's owner, alive or dying. */
+  readonly transport: IAntigravityPtyTransport
+  /** Resolves true if it genuinely exited, false if it never did. */
+  readonly done: Promise<boolean>
+  /** Set the moment it is known to have survived every escalation. */
+  blocked: boolean
+}
 
 const MEDIA_PASTE_CONFIRM_TIMEOUT_MS = 8000
 const MEDIA_PASTE_POLL_INTERVAL_MS = 200
@@ -144,20 +161,14 @@ export class AntigravityPtySession {
   private sawBusy = false
   private turnStartTimer: ReturnType<typeof setTimeout> | null = null
   private graceExpired = false
-  /** Set while a process this session detached is still exiting. A spawn
-   *  waits on it, so a replacement can never overlap a predecessor holding
-   *  the same native conversation — whichever path retired it. Null in the
-   *  ordinary case, where spawning stays synchronous. */
-  private retiring: Promise<unknown> | null = null
-  /** A detached process that survived termination *and* SIGKILL and is
-   *  still, as far as this session can tell, alive.
-   *
-   *  Retaining it is the whole point: `this.transport` has already been
-   *  cleared by then, so without this the session would simply forget a
-   *  process it knows is running and let the next send() start a second
-   *  owner of the same native conversation. Ownership is released only by
-   *  the predecessor's genuine exit. */
-  private unkillable: IAntigravityPtyTransport | null = null
+  /** The handover in progress, if any — see `Retirement`. Non-null means
+   *  this conversation still has an owner even though `transport` is null,
+   *  which is precisely the window a second send used to slip through. */
+  private retirement: Retirement | null = null
+  /** Set once the provider has released this conversation. The session may
+   *  still be retained (to keep owning a process that would not die), but it
+   *  must never spawn again — the conversation it belonged to is gone. */
+  private released = false
   /** Checked once per session (the answer can't meaningfully change while
    *  Orbit is running) rather than on every attachment attempt. */
   private clipboardCapability: ClipboardCapability | null = null
@@ -185,6 +196,9 @@ export class AntigravityPtySession {
   private spawnedInvocation = ''
 
   send(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): void {
+    // Checked before everything else: a closed conversation should say so
+    // rather than report itself busy with work nobody can see.
+    if (this.released) throw codedError('provider.session_released', 'This Antigravity session has been closed.')
     if (this.isBusy) {
       const error = Object.assign(new Error('This conversation already has an Antigravity turn in progress.'), {
         code: 'provider.session_busy'
@@ -192,12 +206,9 @@ export class AntigravityPtySession {
       throw error
     }
     // A predecessor that refused to die still owns this conversation. Refuse
-    // the turn rather than becoming its second owner; the block lifts by
-    // itself the moment that process really exits, so retrying works.
-    if (this.unkillable) {
-      if (this.unkillable.isRunning) throw codedError('provider.retire_failed', RETIRE_FAILED_MESSAGE)
-      this.unkillable = null
-    }
+    // rather than become its second owner; the block lifts by itself the
+    // moment that process really exits, so retrying works.
+    if (this.retirement?.blocked) throw codedError('provider.retire_failed', RETIRE_FAILED_MESSAGE)
     this.currentRunId = input.runId
     this.currentInput = input
     this.onEvent = onEvent
@@ -249,7 +260,11 @@ export class AntigravityPtySession {
       // dying, and the screen it leaves behind must not be mistaken for the
       // next turn's answer.
       this.transport = null
-      this.state = 'idle'
+      // 'retiring', NOT 'idle'. The predecessor still owns this conversation
+      // and a replacement is already promised to this run — an idle session
+      // here let a concurrent send see no transport, no retirement and no
+      // block, and start a second agy alongside the one still dying.
+      this.state = 'retiring'
       this.lastScreenLines = []
       // Two agy processes must never hold the same native conversation at
       // once — the replacement resumes it, and a still-exiting predecessor
@@ -268,16 +283,35 @@ export class AntigravityPtySession {
       return
     }
 
-    const retiring = this.retiring
-    if (retiring) {
-      // A process this session detached is still exiting (see shutdown).
-      // Claim the session first so a second send cannot interleave, then
-      // wait it out rather than running two agy processes at once.
+    const retirement = this.retirement
+    if (retirement) {
+      // A process this session detached is still being retired (see
+      // shutdown). It owns the conversation until it is confirmed gone, so
+      // claim the session — making any further send busy — and wait for the
+      // outcome rather than spawning alongside it.
       this.state = 'bootstrapping'
-      void retiring.then(() => this.spawn(input, images, invocation))
+      void retirement.done.then((exited) => this.spawnAfterRetirement(exited, input, images, invocation))
       return
     }
     this.spawn(input, images, invocation)
+  }
+
+  /** Decides a send that had to wait for a retirement. It may only spawn if
+   *  the predecessor genuinely exited *and* this session is still valid —
+   *  otherwise it would either become a second owner, or strand a process on
+   *  a session the provider has already discarded. */
+  private spawnAfterRetirement(exited: boolean, input: ProviderSendInput, images: ImageAttachment[], invocation: string): void {
+    if (exited && !this.released) {
+      this.spawn(input, images, invocation)
+      return
+    }
+    this.state = 'idle'
+    this.emit({
+      type: 'run.failed',
+      error: exited
+        ? { code: 'provider.session_released', message: 'This Antigravity session was closed before the message could be sent.', retryable: false }
+        : { code: 'provider.retire_failed', message: RETIRE_FAILED_MESSAGE, retryable: true }
+    })
   }
 
   /** Retires the previous process and only then spawns its replacement.
@@ -295,32 +329,53 @@ export class AntigravityPtySession {
     images: ImageAttachment[],
     invocation: string
   ): Promise<void> {
-    if (!(await this.forceRetire(retired))) {
+    if (!(await this.beginRetirement(retired))) {
       this.state = 'idle'
       this.emit({ type: 'run.failed', error: { code: 'provider.retire_failed', message: RETIRE_FAILED_MESSAGE, retryable: true } })
+      return
+    }
+    if (this.released) {
+      this.state = 'idle'
       return
     }
     this.spawn(input, images, invocation)
   }
 
+  /** Records a handover and runs it. From this moment the conversation has
+   *  an owner again — visible to `send()` — even though `transport` is
+   *  already null. That window is exactly where a second agy used to be
+   *  able to start. */
+  private beginRetirement(retired: IAntigravityPtyTransport): Promise<boolean> {
+    let settle!: (exited: boolean) => void
+    const record: Retirement = { transport: retired, blocked: false, done: new Promise<boolean>((resolve) => { settle = resolve }) }
+    this.retirement = record
+    void this.forceRetire(retired, record).then((exited) => {
+      // Ownership is released by exactly one event: the real exit.
+      if (exited && this.retirement === record) this.retirement = null
+      settle(exited)
+    })
+    return record.done
+  }
+
   /** Terminates a detached process, escalating once, and reports whether it
    *  is genuinely gone.
    *
-   *  A process that survives everything is *kept* — see `unkillable`. The
-   *  bounded waits exist so a caller is never left hanging, not so the
-   *  session can pretend a live process stopped existing. */
-  private async forceRetire(retired: IAntigravityPtyTransport): Promise<boolean> {
+   *  A process that survives everything keeps its `Retirement` record, so
+   *  it keeps owning the conversation. The bounded waits exist so a caller
+   *  is never left hanging, not so the session can pretend a live process
+   *  stopped existing. */
+  private async forceRetire(retired: IAntigravityPtyTransport, record: Retirement): Promise<boolean> {
     retired.kill()
     if (await this.awaitExit(retired, RETIRE_TIMEOUT_MS)) return true
     console.warn('[antigravity-pty] the previous agy process did not exit when asked; escalating to SIGKILL.')
     retired.kill('SIGKILL')
     if (await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)) return true
     console.warn('[antigravity-pty] the previous agy process survived SIGKILL; this conversation is blocked until it exits.')
-    this.unkillable = retired
+    record.blocked = true
     void retired.whenExited().then(() => {
       // The only thing that releases ownership: the predecessor is really
       // gone, so the next send() may spawn normally again.
-      if (this.unkillable === retired) this.unkillable = null
+      if (this.retirement === record) this.retirement = null
     })
     return false
   }
@@ -410,9 +465,18 @@ export class AntigravityPtySession {
    *  fresh one, with no knowledge of that process, in charge of the same
    *  native conversation. */
   async release(): Promise<boolean> {
+    // Set before shutting down, so a send already waiting on a retirement
+    // cannot spawn onto a session the provider is about to discard.
+    this.released = true
     this.shutdown()
-    await this.retiring
-    return this.unkillable === null
+    const retirement = this.retirement
+    return retirement ? retirement.done : true
+  }
+
+  /** Resolves once nothing this session owns is still running. */
+  async whenOwnershipReleased(): Promise<void> {
+    const owner = this.transport ?? this.retirement?.transport
+    if (owner) await owner.whenExited()
   }
 
   shutdown(): void {
@@ -424,14 +488,9 @@ export class AntigravityPtySession {
     this.transport = null
     this.state = 'idle'
     if (!retired) return
-    // Same rule as a model-change retirement: if it will not die, it is
-    // remembered (`unkillable`) rather than forgotten, so a later send()
-    // cannot start a second owner on top of it.
-    const retirement = this.forceRetire(retired)
-    this.retiring = retirement
-    void retirement.finally(() => {
-      if (this.retiring === retirement) this.retiring = null
-    })
+    // Same rule as a model-change retirement: the process keeps owning this
+    // conversation until it is confirmed gone, so nothing else can spawn.
+    void this.beginRetirement(retired)
   }
 
   /** Real, verified clipboard-paste choreography (see nativeClipboardImage

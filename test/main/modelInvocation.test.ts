@@ -310,6 +310,127 @@ describe('a live pty session honours a later model change', () => {
     expect(transports[1]!.isRunning).toBe(true)
   })
 
+  it('refuses a send that arrives while a model-change retirement is still in flight', async () => {
+    // The window the review found: the transport has been detached and the
+    // predecessor is still alive, so an `idle` session showed no transport,
+    // no retirement and no block — and a concurrent send started a second
+    // agy alongside the one still dying.
+    const { instance, spawns, transports } = ptyHarness(() => 'eeeeeeee-1111-2222-3333-444444444444')
+
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    // Model change: retirement starts, predecessor deliberately stays alive.
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(transports[0]!.killCalls).toBe(1)
+    expect(transports[0]!.isRunning, 'still the owner').toBe(true)
+    expect(spawns).toHaveLength(1)
+
+    // A second send arrives *before* the retirement resolves.
+    await expect(
+      instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+    ).rejects.toMatchObject({ code: 'provider.session_busy' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(spawns, 'nothing may spawn or be scheduled while a predecessor is retiring').toHaveLength(1)
+    expect(transports).toHaveLength(1)
+
+    // The predecessor finally exits: the replacement promised to run_2 spawns
+    // — exactly once.
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(spawns).toHaveLength(2)
+    expect(transports).toHaveLength(2)
+    expect(spawns[1]![spawns[1]!.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
+  })
+
+  it('fails a send that waited on a retirement which then became unkillable', async () => {
+    vi.useFakeTimers()
+    try {
+      const { instance, spawns, transports } = ptyHarness(() => 'ffffffff-aaaa-2222-3333-444444444444')
+      await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+      await settleTurnFake(transports[0]!)
+
+      // Retire the process out of band (shutdown-style), so a later send has
+      // to queue behind the retirement rather than being refused as busy.
+      const session = instance as unknown as { ptySessions: Map<string, { shutdown: () => void }> }
+      session.ptySessions.get('conversation_1')!.shutdown()
+      await vi.advanceTimersByTimeAsync(20)
+
+      const events: RuntimeEvent[] = []
+      await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+      await vi.advanceTimersByTimeAsync(20)
+      expect(spawns, 'the queued send must not spawn while the predecessor lives').toHaveLength(1)
+
+      // TERM bound, then SIGKILL bound, both survived.
+      await vi.advanceTimersByTimeAsync(6_200)
+      expect(transports[0]!.killSignals).toEqual([undefined, 'SIGKILL'])
+      expect(spawns, 'a queued send must never spawn onto an unkillable predecessor').toHaveLength(1)
+      const failure = events.find((event) => event.type === 'run.failed')
+      expect(failure, 'the queued send must fail, not hang').toBeDefined()
+      expect((failure as { error: { code: string } }).error.code).toBe('provider.retire_failed')
+
+      // Genuine exit releases ownership; a retry then works.
+      transports[0]!.exit(137)
+      await vi.advanceTimersByTimeAsync(20)
+      await instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'claude-sonnet-4-6' }), () => undefined)
+      await vi.advanceTimersByTimeAsync(20)
+      expect(spawns).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a send that arrives once a release is under way', async () => {
+    const { instance, spawns, transports } = ptyHarness(() => 'aaaabbbb-1111-2222-3333-444444444444')
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    const releasing = instance.releaseConversation('conversation_1')
+    // Arrives while the release is still waiting on the predecessor.
+    await expect(
+      instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'claude-sonnet-4-6' }), () => undefined)
+    ).rejects.toMatchObject({ code: 'provider.session_released' })
+    expect(spawns).toHaveLength(1)
+
+    transports[0]!.exit(0)
+    await releasing
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(spawns, 'nothing may spawn for a released conversation').toHaveLength(1)
+    expect(transports).toHaveLength(1)
+  })
+
+  it('does not let a send already queued behind a retirement spawn onto a released session', async () => {
+    // The orphan case: the send queues while the session is merely shutting
+    // down, and the provider releases the conversation before the
+    // predecessor exits. When the queued callback finally runs, the session
+    // it would spawn on is gone.
+    const { instance, spawns, transports } = ptyHarness(() => 'bbbbcccc-1111-2222-3333-444444444444')
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    const sessions = (instance as unknown as { ptySessions: Map<string, { shutdown: () => void }> }).ptySessions
+    sessions.get('conversation_1')!.shutdown()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // Queued: the retirement is in flight, so this send waits rather than spawning.
+    const events: RuntimeEvent[] = []
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+    expect(spawns).toHaveLength(1)
+
+    // The conversation is released while that send is still waiting.
+    const releasing = instance.releaseConversation('conversation_1')
+    transports[0]!.exit(0)
+    await releasing
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(spawns, 'the queued send must not resurrect a released session').toHaveLength(1)
+    expect(transports).toHaveLength(1)
+    const failure = events.find((event) => event.type === 'run.failed')
+    expect(failure, 'the queued send must be told, not silently dropped').toBeDefined()
+    expect((failure as { error: { code: string } }).error.code).toBe('provider.session_released')
+  })
+
   it('escalates to SIGKILL, and refuses to start a second owner if the process still will not exit', async () => {
     vi.useFakeTimers()
     try {
@@ -389,9 +510,11 @@ describe('a live pty session honours a later model change', () => {
       // A brand-new session for the same conversation must not spawn on top
       // of it. (releaseConversation drops the session, so this is the
       // provider creating a fresh one — the invariant has to survive that.)
+      // A released conversation is closed, so the honest reason is that —
+      // and either way no second process may exist.
       await expect(
         instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'claude-sonnet-4-6' }), () => undefined)
-      ).rejects.toMatchObject({ code: 'provider.retire_failed' })
+      ).rejects.toMatchObject({ code: 'provider.session_released' })
       await vi.advanceTimersByTimeAsync(50)
       expect(spawns.length, 'no second owner while the shut-down process lives').toBe(1)
 

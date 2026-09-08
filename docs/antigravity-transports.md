@@ -491,31 +491,68 @@ kill()  →  wait up to 4 s for the real exit
 A failed turn is recoverable; two agy processes writing into one conversation
 is not.
 
-**Refusing once is not enough.** A predecessor that survives everything is
-*retained* (`AntigravityPtySession.unkillable`), not forgotten — `this.transport`
-has already been cleared by then, so without that the very next `send()` would
-see no transport and no retirement and quietly become the second owner it had
-just refused to be. While that process is still alive every send is rejected
-with the same retryable `provider.retire_failed`, and ownership is released by
-exactly one thing: its genuine exit, observed through `whenExited()`. A later
-retry then spawns normally, still resuming by `--conversation`.
+### The ownership rule
+
+One rule governs every path in `AntigravityPtySession`:
+
+> A conversation has exactly one owner at a time. An owner is an **active**
+> process (`transport`) **or** one being retired (`retirement.transport`) —
+> whether that retirement is in flight or has given up. Ownership is released
+> by exactly one event: the owner's confirmed exit. A new process may spawn
+> only when there is no owner **and** the session is still valid for sends.
+
+Retirement is therefore a first-class state, not a gap between states. A
+`Retirement` record (`{ transport, done, blocked }`) is installed
+*synchronously* in the same tick the transport is detached, so there is no
+window in which a conversation appears ownerless. A model-change retirement
+additionally puts the session in state `'retiring'` — which counts as busy —
+because a replacement is already promised to the run that triggered it.
+
+What a `send()` meets, and what it gets:
+
+| Session state | Result |
+| --- | --- |
+| Released (conversation deleted) | rejected, `provider.session_released` |
+| Busy — including `'retiring'` | rejected, `provider.session_busy`; **nothing is spawned or scheduled** |
+| Retirement in flight (no run attached, e.g. after `shutdown()`) | claims the session and waits on `retirement.done` |
+| Retirement `blocked` | rejected, retryable `provider.retire_failed` |
+| No owner | spawns normally |
+
+A send that waited then only spawns if the retirement resolved **true** *and*
+the session is still valid; a retirement that resolved false fails it with
+`provider.retire_failed`, and a session released meanwhile fails it with
+`provider.session_released`. It can never spawn onto a discarded session.
+
+**Refusing once is not enough.** A predecessor that survives everything keeps
+its `Retirement` record rather than being forgotten — `this.transport` has
+already been cleared by then, so without it the very next `send()` would see no
+transport and no retirement and quietly become the second owner it had just
+refused to be. Ownership is released by exactly one thing: its genuine exit,
+observed through `whenExited()`. A later retry then spawns normally, still
+resuming by `--conversation`.
 
 `shutdown()` goes through the same `forceRetire`, so it records a survivor the
 same way. And `releaseConversation` no longer drops a session that still owns a
 live process — dropping it would put a fresh session, with no knowledge of that
-process, in charge of the same native conversation. The session is discarded
-only once it reports itself safe to forget (`release()`).
+process, in charge of the same native conversation. It keeps the session (inert:
+a released session refuses every send) and drops it once
+`whenOwnershipReleased()` confirms the process is gone.
 
 Verified live by sampling the process table across a real model change — the
 count for the workspace never exceeded 1, and the surviving process was
 observably running the new `--model`/`--effort` with `--conversation <id>`.
 
-Regression coverage for the blocked state (`test/main/modelInvocation.test.ts`)
-drives the whole sequence: force the polite timeout, force the SIGKILL timeout,
-assert `provider.retire_failed`, **send another turn and assert no second
-process appears**, then let the stubborn process finally exit and prove a retry
-spawns safely. The shutdown path has its own equivalent through
-`releaseConversation`.
+Regression coverage (`test/main/modelInvocation.test.ts`) drives each window
+deterministically, always issuing the second send **before** the retirement
+resolves: a send during an in-flight model-change retirement (refused, nothing
+spawned or scheduled, and the promised replacement still happens exactly once
+after the real exit); a send queued behind a retirement that then becomes
+unkillable (fails with `provider.retire_failed`, never spawns, and a retry works
+after the genuine exit); a send arriving once a release is under way; and a send
+already queued when the conversation is released (refused with
+`provider.session_released` rather than spawning an orphan). Plus the blocked
+sequence end to end: polite timeout, SIGKILL timeout, `provider.retire_failed`,
+another send with no second process, then exit and a safe retry.
 
 Regression coverage: `test/main/antigravityPtyTransportLifecycle.test.ts`
 drives a *real* PTY (a trivial `sh` that ignores `TERM`/`HUP`/`INT`) and
