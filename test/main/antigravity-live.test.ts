@@ -211,17 +211,32 @@ describe('AntigravityProvider live streaming', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-stream-live-'))
       dirs.push(dir)
       const provider = new AntigravityProvider()
-      const trace = await traceStreaming(provider, {
-        ...input(dir, 'Write a detailed 600-word essay about the history of the bicycle. Do not use any tools.'),
-        transport: 'structured'
-      })
+      const subjects = [
+        'Write a detailed 600-word essay about the history of the bicycle. Do not use any tools.',
+        'Write a detailed 600-word essay about the history of the printing press. Do not use any tools.'
+      ]
 
-      expect(trace.deltas.length, 'expected more than one incremental delta').toBeGreaterThan(1)
-      expect(trace.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(trace.completedAtMs)
-      expect(trace.deltas.join('')).toBe(trace.finalText)
+      // agy decides when to flush its `agent_response` deltas, and a turn it
+      // flushes in one go has nothing incremental in it — see
+      // docs/antigravity-transports.md, where the captured traces show
+      // 62-73% of a long answer arriving in the final delta. So, as with the
+      // PTY test below, two turns are asked and one must stream. What every
+      // turn must satisfy regardless is the invariant the normalizer is
+      // responsible for: the deltas concatenate to exactly the final text.
+      const traces: StreamingTrace[] = []
+      for (const [index, subject] of subjects.entries()) {
+        traces.push(await traceStreaming(provider, { ...input(dir, subject), runId: `structured-stream-run-${index + 1}`, transport: 'structured' }))
+        const latest = traces.at(-1)!
+        expect(latest.deltas.join(''), 'deltas must concatenate to the final response').toBe(latest.finalText)
+        if (latest.deltas.length > 1) break
+      }
+
+      const streaming = traces.find((trace) => trace.deltas.length > 1)
+      expect(streaming, `no turn produced more than one incremental delta (${traces.length} attempted)`).toBeDefined()
+      expect(streaming!.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(streaming!.completedAtMs)
       // The gap between the first visible text and the end of the turn is
       // the streaming window the user actually sees.
-      expect(trace.completedAtMs - trace.firstDeltaAtMs).toBeGreaterThan(300)
+      expect(streaming!.completedAtMs - streaming!.firstDeltaAtMs).toBeGreaterThan(300)
       await provider.shutdown()
     },
     300_000
