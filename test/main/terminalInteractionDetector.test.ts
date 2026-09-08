@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   detectGenericInteraction,
   extractResponseText,
+  progressiveAppendIndex,
   isBusy,
   isReadyForInput,
   readMediaAttachedCount
@@ -250,6 +251,96 @@ describe('extractResponseText', () => {
     expect(result).toBe('Build succeeded with no errors.')
     expect(result).not.toContain('Requesting permission')
     expect(result).not.toContain('1. Yes')
+  })
+})
+
+describe('extractResponseText prompt anchoring (progressive reading)', () => {
+  const WIDE = '─'.repeat(120)
+  const PROMPT = 'Write a short essay about the history of the bicycle.'
+  const ANSWER = '  The bicycle stands as one of the most efficient machines ever built.'
+
+  it('anchors on the known prompt instead of the blank line beneath it', () => {
+    // Real captured regression: once the terminal scrolls, agy's blank
+    // separator under the echo is gone, and the blank-line heuristic then
+    // skips real response lines looking for one. With the prompt to match
+    // against, the answer starts exactly where it should.
+    const scrolled = [`> ${PROMPT}`, '▸ Thought for 11s', '  Verifying Requirements Thoroughly', ANSWER, WIDE, '>', WIDE, '? for shortcuts   Gemini 3.6 Flash · medium']
+    expect(extractResponseText(scrolled, { prompt: PROMPT })).toBe(`Verifying Requirements Thoroughly\n${ANSWER}`)
+  })
+
+  it('consumes a prompt that word-wrapped across several rows', () => {
+    const long = 'Do not run any shell commands yet. First ask me one short clarifying question: what filename should you use for a test file?'
+    const lines = [
+      '> Do not run any shell commands yet. First ask me one short clarifying question: what filename should you use for a',
+      ' test file?',
+      '  What filename should I use?',
+      WIDE,
+      '>',
+      WIDE,
+      '? for shortcuts'
+    ]
+    expect(extractResponseText(lines, { prompt: long })).toBe('What filename should I use?')
+  })
+
+  it('returns nothing when the echo on screen belongs to a different turn', () => {
+    const previousTurn = [`> An older question`, '', '  An older answer.', WIDE, '>', WIDE, '? for shortcuts']
+    expect(extractResponseText(previousTurn, { prompt: PROMPT, requirePromptEcho: true })).toBe('')
+    // Without requirePromptEcho the blank-line fallback still applies, so
+    // the settle path keeps working exactly as before.
+    expect(extractResponseText(previousTurn, { prompt: PROMPT })).toBe('An older answer.')
+  })
+
+  it('drops the compose box even when the footer is momentarily just the model name', () => {
+    // Real captured shape while a prompt is being typed into the box: no
+    // "? for shortcuts" and no "esc to cancel" to recognise it by.
+    const typing = [`> ${PROMPT}`, WIDE, '                                        Gemini 3.6 Flash · medium']
+    expect(extractResponseText(typing, { prompt: PROMPT })).toBe('')
+  })
+
+  it('drops the Braille spinner progress line agy redraws while working', () => {
+    const lines = [`> ${PROMPT}`, '', ANSWER, '⣽  Working...', WIDE, '>', WIDE, 'esc to cancel']
+    expect(extractResponseText(lines, { prompt: PROMPT })).toBe(ANSWER.trim())
+  })
+
+  it('drops the rotating tip line agy hangs off its working indicator', () => {
+    // Real captured frame: the tip changes from turn to turn and even
+    // mid-turn, so it is both chrome and a moving target.
+    const working = [`> ${PROMPT}`, '⡿  Generating...', '└ Tip: Use /model to switch between available models.', WIDE, '>', WIDE, 'esc to cancel']
+    expect(extractResponseText(working, { prompt: PROMPT })).toBe('')
+
+    const answering = [`> ${PROMPT}`, ANSWER, '⡿  Generating...', '└ Tip: You can switch conversations with /resume.', WIDE, '>', WIDE, 'esc to cancel']
+    expect(extractResponseText(answering, { prompt: PROMPT })).toBe(ANSWER.trim())
+  })
+
+  it('keeps a markdown horizontal rule inside a response', () => {
+    // Only the terminal-width box rules are chrome; agy draws a markdown
+    // rule short and indented.
+    const lines = [`> ${PROMPT}`, '', '  Intro.', '  ──────', '  Conclusion.', WIDE, '>', WIDE, '? for shortcuts']
+    expect(extractResponseText(lines, { prompt: PROMPT })).toContain('Conclusion.')
+  })
+})
+
+describe('progressiveAppendIndex', () => {
+  it('reports where a grown screen continues from what already streamed', () => {
+    expect(progressiveAppendIndex('Hello', 'Hello world')).toBe(5)
+    expect('Hello world'.slice(progressiveAppendIndex('Hello', 'Hello world'))).toBe(' world')
+  })
+
+  it('treats a re-wrap that changes only whitespace as no new text', () => {
+    // Real captured churn: a blank line and a trailing space come and go
+    // between frames as the terminal scrolls and re-wraps.
+    expect(progressiveAppendIndex('Line one.\n\nLine two.', 'Line one.\nLine two.')).toBe('Line one.\nLine two.'.length)
+    expect('Line one.\nLine two.'.slice(progressiveAppendIndex('Line one.\n\nLine two.', 'Line one.\nLine two.'))).toBe('')
+    expect('Line one. \nLine two. extra'.slice(progressiveAppendIndex('Line one.\nLine two.', 'Line one. \nLine two. extra'))).toBe(' extra')
+  })
+
+  it('rejects a frame that is not a continuation at all', () => {
+    expect(progressiveAppendIndex('The bicycle stands', 'A different answer entirely')).toBe(-1)
+    expect(progressiveAppendIndex('Longer already streamed text', 'Shorter')).toBe(-1)
+  })
+
+  it('starts from the beginning when nothing has streamed yet', () => {
+    expect(progressiveAppendIndex('', 'First words')).toBe(0)
   })
 })
 

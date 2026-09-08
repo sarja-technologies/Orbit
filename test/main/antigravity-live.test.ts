@@ -184,6 +184,96 @@ describe('AntigravityProvider live PTY integration', () => {
   )
 })
 
+// Issue #2. Both transports are asserted on the same property: real
+// assistant prose reaches Orbit as `text.delta` *while the turn is still
+// running*, not in one lump at completion. The evidence these were built
+// from — raw `stream-json` traces and 200 ms PTY screen samples from real
+// turns — is written up in docs/antigravity-transports.md.
+describe('AntigravityProvider live streaming', () => {
+  it.runIf(live)(
+    'streams a long structured answer progressively instead of only at the result',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-stream-live-'))
+      dirs.push(dir)
+      const provider = new AntigravityProvider()
+      const trace = await traceStreaming(provider, {
+        ...input(dir, 'Write a detailed 600-word essay about the history of the bicycle. Do not use any tools.'),
+        transport: 'structured'
+      })
+
+      expect(trace.deltas.length, 'expected more than one incremental delta').toBeGreaterThan(1)
+      expect(trace.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(trace.completedAtMs)
+      expect(trace.deltas.join('')).toBe(trace.finalText)
+      // The gap between the first visible text and the end of the turn is
+      // the streaming window the user actually sees.
+      expect(trace.completedAtMs - trace.firstDeltaAtMs).toBeGreaterThan(300)
+      await provider.shutdown()
+    },
+    300_000
+  )
+
+  it.runIf(live)(
+    'streams a long PTY answer progressively from the live terminal screen',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-stream-pty-live-'))
+      dirs.push(dir)
+      const provider = new AntigravityProvider()
+      const trace = await traceStreaming(provider, {
+        ...input(dir, 'Write a detailed 1200-word essay about the history of the bicycle, with several sections. Do not use any tools.'),
+        conversationId: 'pty-streaming-live',
+        transport: 'pty'
+      })
+
+      // How many deltas a live turn produces depends on how fast the model
+      // writes, so the assertion is on the property that actually matters:
+      // real text reached Orbit while the turn was still running. The
+      // multi-delta, no-duplication guarantees are asserted deterministically
+      // against recorded frames in antigravityPtyStreaming.test.ts.
+      expect(trace.deltas.length, 'expected assistant text before the result').toBeGreaterThan(0)
+      expect(trace.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(trace.completedAtMs)
+      expect(trace.completedAtMs - trace.firstDeltaAtMs).toBeGreaterThan(200)
+      expect(trace.finalText.length).toBeGreaterThan(500)
+      // No terminal chrome, tip line or account details ever reached the transcript.
+      const streamed = trace.deltas.join('')
+      expect(streamed).not.toMatch(/[⠀-⣿]/)
+      expect(streamed).not.toContain('for shortcuts')
+      expect(streamed).not.toContain('Antigravity CLI')
+      expect(streamed).not.toContain('└ Tip:')
+      await provider.shutdown()
+    },
+    300_000
+  )
+})
+
+interface StreamingTrace {
+  deltas: string[]
+  firstDeltaAtMs: number
+  completedAtMs: number
+  finalText: string
+}
+
+/** Records when each `text.delta` actually arrived, which is the whole
+ *  question issue #2 asks. */
+function traceStreaming(provider: AntigravityProvider, value: ProviderSendInput): Promise<StreamingTrace> {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now()
+    const deltas: string[] = []
+    let firstDeltaAtMs = Number.POSITIVE_INFINITY
+    const onEvent = (event: RuntimeEvent) => {
+      if (event.type === 'text.delta') {
+        if (deltas.length === 0) firstDeltaAtMs = Date.now() - startedAt
+        deltas.push(event.delta)
+      }
+      if (event.type === 'run.completed') {
+        resolve({ deltas, firstDeltaAtMs, completedAtMs: Date.now() - startedAt, finalText: event.finalText || deltas.join('') })
+      }
+      if (event.type === 'run.failed') reject(new Error(event.error.message))
+      if (event.type === 'run.cancelled') reject(new Error('unexpected cancellation'))
+    }
+    void provider.sendMessage(value, onEvent).catch(reject)
+  })
+}
+
 function input(workspacePath: string, prompt: string): ProviderSendInput {
   return {
     projectId: 'project',

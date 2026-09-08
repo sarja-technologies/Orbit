@@ -195,7 +195,24 @@ export class AntigravityProvider implements AgentProvider {
         this.fail(active, 'provider.interaction_denied', prompt)
       } else if (result.status === 'SUCCESS') {
         const finalText = result.response ?? active.text
-        if (result.response && !active.text) this.emit(active, { type: 'text.delta', delta: result.response })
+        // Verified against every captured agy 1.1.27 turn: the concatenated
+        // `agent_response` deltas are exactly `result.response`, and the
+        // last of them (state DONE) carries whatever agy had not flushed
+        // yet — typically most of a long answer. So the final response is
+        // streamed only for the part the deltas have not already
+        // delivered: the whole thing when nothing streamed (the
+        // final-response-only fallback, deliberately kept), the tail when
+        // it continues what streamed, and nothing at all when it merely
+        // repeats it. A response that diverges from what streamed is left
+        // to `finalText`, which is authoritative, rather than appended as
+        // a contradictory second copy.
+        if (result.response) {
+          const remainder = result.response.startsWith(active.text) ? result.response.slice(active.text.length) : ''
+          if (remainder) {
+            active.text += remainder
+            this.emit(active, { type: 'text.delta', delta: remainder })
+          }
+        }
         this.complete(active, finalText, result.usage)
       } else this.fail(active, 'provider.failed', result.error ?? 'Antigravity reported an error.')
     }

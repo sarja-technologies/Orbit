@@ -18,7 +18,7 @@ import type { ID, ProjectFile } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
-import { extractResponseText } from '@main/terminal/TerminalInteractionDetector'
+import { extractResponseText, progressiveAppendIndex } from '@main/terminal/TerminalInteractionDetector'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
@@ -36,6 +36,14 @@ const RETIRE_POLL_MS = 50
 const RETIRE_TIMEOUT_MS = 4_000
 
 const MAX_NATIVE_IMAGE_BYTES = 15 * 1024 * 1024
+/** How many consecutive frames may fail to line up with what has already
+ *  been streamed before the reader gives up on matching and resynchronizes
+ *  on the current screen. One or two is an ordinary redraw caught
+ *  mid-write, which recovers by itself; a longer run means agy has
+ *  rewritten text it had already drawn (it resolves markdown emphasis a
+ *  beat after the raw `**` appears), and continuing to wait would freeze
+ *  streaming for the rest of the turn. */
+const STREAM_RESYNC_AFTER_FRAMES = 3
 
 interface PendingInteraction {
   interactionId: string
@@ -98,6 +106,19 @@ export class AntigravityPtySession {
   private queuedPrompt: string | null = null
   private queuedImages: ImageAttachment[] = []
   private lastScreenLines: string[] = []
+  /** Exactly what was written into the PTY for the turn in flight. The
+   *  progressive reader anchors on this echo, so it can tell this turn's
+   *  answer from the previous turn's, which is still on screen for a
+   *  moment after a new prompt is submitted. */
+  private deliveredPrompt: string | null = null
+  /** The response text already delivered to the renderer as `text.delta`
+   *  for the turn in flight. agy's TUI is a full-redraw display, so this
+   *  is compared against each new frame rather than assumed to be a
+   *  prefix of it — see progressiveAppendIndex. */
+  private streamedText = ''
+  /** Consecutive sampled frames that did not line up with `streamedText`.
+   *  See STREAM_RESYNC_AFTER_FRAMES. */
+  private divergedFrames = 0
   /** Checked once per session (the answer can't meaningfully change while
    *  Orbit is running) rather than on every attachment attempt. */
   private clipboardCapability: ClipboardCapability | null = null
@@ -135,6 +156,8 @@ export class AntigravityPtySession {
     this.currentInput = input
     this.onEvent = onEvent
     this.text = ''
+    this.streamedText = ''
+    this.deliveredPrompt = null
     this.cancelRequested = false
     this.nativeConversationId = input.nativeConversationId ?? this.nativeConversationId
     const images: ImageAttachment[] = (input.attachments ?? [])
@@ -213,6 +236,7 @@ export class AntigravityPtySession {
       onReadyForInput: () => { if (isCurrent()) this.handleReady() },
       onBusy: () => { if (isCurrent()) this.handleBusy() },
       onExit: (code, signal) => { if (isCurrent()) this.handleExit(code, signal) },
+      onStreamText: (lines) => { if (isCurrent()) this.handleStreamText(lines) },
       onScreenText: (lines) => { if (isCurrent()) this.lastScreenLines = lines }
     })
   }
@@ -262,6 +286,7 @@ export class AntigravityPtySession {
    *  how many attachments succeeded. */
   private async deliverPrompt(prompt: string, images: ImageAttachment[]): Promise<void> {
     if (images.length === 0) {
+      this.beginStreaming(prompt)
       this.transport?.sendPrompt(prompt)
       return
     }
@@ -273,7 +298,9 @@ export class AntigravityPtySession {
     if (!this.clipboardCapability) this.clipboardCapability = (this.deps.checkClipboardCapability ?? checkClipboardCapability)()
     if (!this.clipboardCapability.available) {
       console.warn(`[antigravity-pty] native image attachment unavailable (${this.clipboardCapability.reason}) — falling back to a text hint for ${images.length} image(s).`)
-      this.transport?.sendPrompt(appendSkippedImageHint(prompt, images, this.clipboardCapability))
+      const hinted = appendSkippedImageHint(prompt, images, this.clipboardCapability)
+      this.beginStreaming(hinted)
+      this.transport?.sendPrompt(hinted)
       return
     }
 
@@ -307,7 +334,56 @@ export class AntigravityPtySession {
     // A cancellation mid-attachment-sequence must not still deliver the
     // original text prompt afterward — that would silently ignore the
     // user's cancel and start the very turn they just cancelled.
-    if (!this.cancelRequested && this.state === 'running' && this.transport?.isRunning) this.transport.sendPrompt(prompt)
+    if (!this.cancelRequested && this.state === 'running' && this.transport?.isRunning) {
+      this.beginStreaming(prompt)
+      this.transport.sendPrompt(prompt)
+    }
+  }
+
+  /** Arms progressive reading for the prompt that is about to be written.
+   *  Nothing is streamed until this has run, so a screen still showing the
+   *  previous turn can never be read as this turn's answer. */
+  private beginStreaming(prompt: string): void {
+    this.deliveredPrompt = prompt
+    this.streamedText = ''
+    this.divergedFrames = 0
+  }
+
+  /** Turns the live terminal screen into ordinary Orbit `text.delta`
+   *  events, so a PTY turn's answer appears while agy is still writing it
+   *  instead of arriving whole at completion.
+   *
+   *  Only genuinely new text is ever emitted: `progressiveAppendIndex`
+   *  ignores the re-wrapping and padding a redraw introduces, and returns
+   *  -1 for a frame that is not a continuation at all (a redraw sampled
+   *  mid-write, or another turn's screen), which is skipped rather than
+   *  guessed at. `run.completed`'s `finalText` remains the authoritative
+   *  response either way, so a skipped frame costs nothing but a beat of
+   *  streaming. */
+  private handleStreamText(lines: string[]): void {
+    if (this.state !== 'running' || this.deliveringImages || this.cancelRequested) return
+    const prompt = this.deliveredPrompt
+    if (prompt === null) return
+    const candidate = extractResponseText(lines, { prompt, requirePromptEcho: true })
+    if (!candidate || candidate === this.streamedText) return
+    const appendAt = progressiveAppendIndex(this.streamedText, candidate)
+    if (appendAt === -1) {
+      this.divergedFrames += 1
+      // Resynchronizing silently means the rewritten stretch is not shown
+      // twice and not shown late — it simply arrives with `run.completed`,
+      // which carries the authoritative answer either way. Freezing the
+      // stream instead would cost the rest of the turn.
+      if (this.divergedFrames >= STREAM_RESYNC_AFTER_FRAMES && candidate.length > this.streamedText.length) {
+        this.streamedText = candidate
+        this.divergedFrames = 0
+      }
+      return
+    }
+    this.divergedFrames = 0
+    const delta = candidate.slice(appendAt)
+    if (!delta) return
+    this.streamedText = candidate
+    this.emit({ type: 'text.delta', delta })
   }
 
   private async waitForMediaAttachedAtLeast(count: number, timeoutMs: number): Promise<boolean> {
@@ -367,7 +443,7 @@ export class AntigravityPtySession {
       return
     }
     this.state = 'ready'
-    this.text = extractResponseText(this.lastScreenLines)
+    this.text = extractResponseText(this.lastScreenLines, this.deliveredPrompt === null ? {} : { prompt: this.deliveredPrompt })
     if (!this.nativeConversationId && this.currentInput) {
       const lookup = this.deps.findConversationId ?? findRecentConversationId
       this.nativeConversationId = lookup(this.currentInput.workspacePath)

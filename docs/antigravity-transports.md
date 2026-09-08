@@ -83,9 +83,9 @@ This mechanism (`history.jsonl`) was not found in — and is not used by — Age
 
 ## Response text extraction
 
-PTY mode has no token-stream the way `stream-json` does. `extractResponseText` (in `TerminalInteractionDetector.ts`) reconstructs "what agy said" from the settled screen: everything after the last echoed prompt line (`> ...`), skipping every non-blank row immediately following it (a long prompt word-wraps across multiple physical rows with no blank line between them — confirmed live), then stripping borders, the empty compose box, footers, and tool-activity (`●`/`▸`) lines. Verified against real captured transcripts covering short answers, word-wrapped prompts, fenced code blocks, Unicode/emoji content, multi-paragraph answers, and a resolved-permission-menu-plus-tool-activity turn (live-confirmed: a resolved menu is fully erased/redrawn away before the turn settles, so a real screen never actually contains both the menu and the final text — the fixture covering that shape is a deliberate defense-in-depth test, not a literal capture). This is a best-effort reconstruction of ordinary prose, not a pixel-perfect transcript of rich formatting (box-drawing tables are not specifically handled).
+PTY mode has no token-stream the way `stream-json` does; the screen is the only source, and it is read both progressively during a turn and once when it settles (see "Streaming assistant text" below). `extractResponseText` (in `TerminalInteractionDetector.ts`) reconstructs "what agy said" from the screen: everything after the echoed prompt line (`> ...`) — consuming however many rows the known prompt word-wrapped onto when the prompt is supplied, otherwise falling back to skipping non-blank rows until the first blank one — cut at the compose box, then stripping borders, footers, tool-activity (`●`/`▸`), Braille spinner and `└ Tip:` status rows. Verified against real captured transcripts covering short answers, word-wrapped prompts, fenced code blocks, Unicode/emoji content, multi-paragraph answers, and a resolved-permission-menu-plus-tool-activity turn (live-confirmed: a resolved menu is fully erased/redrawn away before the turn settles, so a real screen never actually contains both the menu and the final text — the fixture covering that shape is a deliberate defense-in-depth test, not a literal capture). This is a best-effort reconstruction of ordinary prose, not a pixel-perfect transcript of rich formatting (box-drawing tables are not specifically handled).
 
-Considered and rejected alternatives (Objective 2 of the hardening pass): there is no evidence of a parallel structured channel available while a PTY session owns the terminal (Option A) — running one would risk the exact double-execution the task explicitly rules out. AgentDock Pro's own screen buffer (Option C) is architecturally the same `@xterm/headless` approach already adapted here; its "response text" isn't extracted as one string at all (it classifies the screen into typed events for a heavier system Orbit doesn't need). Identifiable markers (Option B) don't exist for the response body specifically — only for its edges (the echo line, the footer). Option D (harden the current heuristic) was the pragmatic choice.
+Considered and rejected alternatives: there is no evidence of a parallel structured channel available while a PTY session owns the terminal (Option A) — running one would risk double execution, which is why progressive text is read from the screen the session already owns rather than from a second agy process. AgentDock Pro's own screen buffer (Option C) is architecturally the same `@xterm/headless` approach already adapted here; its "response text" isn't extracted as one string at all (it classifies the screen into typed events for a heavier system Orbit doesn't need). Identifiable markers (Option B) don't exist for the response body specifically — only for its edges (the echo line, the footer). Option D (harden the current heuristic) was the pragmatic choice.
 
 ### Real bug found and fixed: numbered-list responses misread as a menu
 
@@ -96,6 +96,172 @@ Fixed with two layered guards in `detectGenericInteraction`, both confirmed live
 2. **Cursor-marker/permission-wording gate**: this alone doesn't cover a numbered list that happens to be on screen during a slow/paused *busy* period (footer still `esc to cancel` — the same footer text a real permission menu also uses, so it can't be excluded outright). Every real captured menu highlights one option with a cursor marker (`> 1. Yes`); ordinary prose never does. The numbered-menu branch now requires a cursor marker **or** explicit permission-shaped wording nearby before treating 2+ numbered lines as a real interaction.
 
 Regression tests for both the ready-footer and busy-footer cases (using the exact real captured shapes) are in `test/main/terminalInteractionDetector.test.ts`.
+
+## Streaming assistant text (issue #2)
+
+**Symptom:** Orbit sat on `Working` / `Replying` and then displayed the whole
+answer at once.
+
+**Root cause — two independent causes, one per transport:**
+
+1. **PTY had no incremental text path at all.** `AntigravityPtySession` only
+   ever called `extractResponseText` once, in `settleTurn()`, and emitted the
+   whole result with `run.completed`. Worse, the screen was only ever read on
+   the transport's *idle-debounced* (450 ms) snapshot — and agy writes a long
+   answer continuously, so that debounce never fires until the turn is
+   already over. **Measured live:** a 14-second PTY turn produced exactly
+   **one** screen snapshot, after completion. Every interactive conversation
+   therefore showed `Working → nothing → entire answer`, 100% of the time.
+2. **The renderer erased the streamed answer at completion.** `run.completed`
+   deleted `runningRunByConversation` and `streamTextByRun` synchronously and
+   only *then* awaited the project refresh that loads the persisted assistant
+   message, so the finished reply was off screen for the whole round trip.
+
+The structured transport's `stream-json` normalizer was **not** at fault —
+see the evidence below. It already converted every incremental
+`agent_response` delta into `text.delta` correctly.
+
+### Real captured `agy 1.1.27` evidence
+
+Raw `agy --print <prompt> --output-format stream-json --add-dir <ws>`,
+one line per event, timestamped from process start:
+
+```text
+  7276ms init            conversation_id=0f204da1-…
+  7482ms step_update     idx=0 DONE  user_input
+ 19519ms step_update     idx=1 ACTIVE agent_response  text_delta 156 chars
+ 19721ms step_update     idx=1 ACTIVE agent_response  text_delta 246 chars
+ …  (deltas every ~200 ms) …
+ 21124ms step_update     idx=1 DONE   agent_response  text_delta 3710 chars
+ 21124ms result          SUCCESS  response 5718 chars
+```
+
+Verified across four captured turns of different lengths, including a
+54,546-character one with 230 deltas and a tool-using turn:
+
+- agy **does** emit assistant prose incrementally (`step_update` /
+  `step_type: "agent_response"` / `text_delta`) — so this is case 1 of the
+  issue, not case 2, for the structured transport.
+- The concatenated deltas equal `result.response` **exactly**, byte for byte,
+  in every captured turn.
+- The final delta (`state: "DONE"`, same millisecond as `result`) carries
+  whatever agy had not flushed yet — 62–73% of a long answer. That is agy's
+  own behaviour and is not something Orbit can change.
+- A turn can contain an `agent_response` step with **no** `text_delta` field
+  at all (captured on a tool-using turn); a short answer arrives as a single
+  `DONE` delta with nothing to stream before it.
+- agy emits nothing at all during the model's thinking phase (12–18 s on
+  these turns), which is the bulk of the perceived wait.
+
+The PTY screen was captured the same way — `TerminalScreenBuffer` sampled
+every 200 ms through one real turn. Six of those frames are checked in
+verbatim as `test/main/fixtures/agyPtyStreamFrames.json`. They show the
+answer genuinely growing on screen (426 → 826 → 1144 → 1426 → 4266
+characters), which is what makes progressive PTY reading possible at all
+without a second agy process.
+
+### What changed
+
+**PTY — progressive reading of the live screen.** No second process, no
+parallel structured run, no fake reveal: the same single `agy` process and
+the same `TerminalScreenBuffer` VT model that already backed the transport.
+
+- `AntigravityPtyTransport` gained a second, **read-only** reader:
+  `onStreamText`, sampled every 120 ms while output is arriving, and only
+  when xterm has finished parsing what it was given (`TerminalScreenBuffer.
+  isDrained`). It never classifies the screen — ready/busy/interaction
+  detection remains the exclusive job of the idle-debounced snapshot, whose
+  logic and edge-flag invariants are untouched.
+- `AntigravityPtySession` turns each sample into ordinary `text.delta`
+  events, and only while a turn is genuinely in flight: not during
+  bootstrap (which would leak agy's startup banner, including the signed-in
+  account's email), not while an interaction is pending, not during an image
+  paste sequence, and not after a cancel.
+- `run.completed`'s `finalText` is still the authoritative answer and is
+  still extracted the same way. Nothing was removed.
+
+**Extraction (`extractResponseText`) hardened with what the real screens
+showed.** Each of these was a live-observed defect, not a hypothetical:
+
+| Real screen behaviour | What it broke | Fix |
+| --- | --- | --- |
+| The blank line agy leaves under the echoed prompt disappears once the terminal scrolls | The "skip rows until the first blank" anchor then ate the first lines of the answer — mid-stream it read as a completely different answer and stalled streaming for the rest of the turn | The known prompt is now matched across however many rows it wrapped onto (`{ prompt }`), with the old blank-line heuristic kept as the fallback |
+| A Braille spinner line (`⣽  Working...`, `⢿  Verifying Requirements Thoroughly...`) sits at the end of the answer and is rewritten every frame | Every frame looked different from the last | Spinner rows are chrome and are dropped |
+| agy hangs a rotating hint off the working indicator: `└ Tip: Use /model to switch between available models.` | It was extracted **as the assistant's reply**, and because it rotates, everything after it stopped matching — this is what limited a real 10,907-character answer to a single delta | `└`-prefixed status rows are chrome and are dropped |
+| agy prints that tip *below* the compose box | Walking up from the last row stopped at the tip and kept the whole box | The body is now cut **at** the compose box (`───` / `>` / `───`), so anything below it is gone by construction |
+| Trailing cell padding shifts between redraws | Frames differed by invisible whitespace | Kept rows are right-trimmed |
+
+**Comparing frames (`progressiveAppendIndex`).** agy's TUI is a full-redraw
+display, so a new frame is not simply "the old text plus more": it re-wraps,
+re-pads, scrolls, and resolves markdown emphasis a beat after drawing the raw
+`**`. Comparison is therefore anchored on the **tail** of what has already
+been streamed, over visible characters only, taking the last occurrence. A
+frame whose tail is absent (a redraw sampled mid-write) is skipped and
+recovers on the next one. If frames keep failing to line up — which happens
+when agy rewrites text it had already drawn — the reader resynchronizes on
+the current screen after 3 frames rather than freezing for the rest of the
+turn. Nothing is ever re-emitted, so no text is duplicated; a resynchronized
+stretch simply arrives with `run.completed`.
+
+**Structured — no duplication, no lost tail.** `result.response` is now
+streamed only for the part the deltas have not already delivered: the whole
+thing when nothing streamed (**the final-response-only fallback is kept**),
+the remainder when it continues what streamed, nothing when it merely repeats
+it. A response that *diverges* from what streamed is left to `finalText`,
+which is authoritative, rather than appended as a contradictory second copy.
+
+**Renderer hand-off.** `run.completed` / `run.failed` / `run.cancelled` now
+refresh the project **first** and retire the live run and its streamed text
+only once the stored assistant message has arrived, so a finished reply is
+never off screen for a frame.
+
+### Live verification
+
+Real Electron build, real signed-in `agy 1.1.27`, driven through the real UI
+(prompt typed into the real composer, real Send button), sampling the real
+transcript DOM:
+
+```text
+structured, 900-word essay          PTY (interactive), 1200-word essay
+     3ms  "Antigravity is replying"      3ms  "Antigravity is replying"
+ 13029ms  177 chars                  19280ms  281 chars
+ 13232ms  429 chars                  19686ms  820 chars
+ 13635ms  988 chars                  20904ms  2183 chars
+ 15457ms  3127 chars                 22937ms  4497 chars
+ 15659ms  completed, 7928 chars      23547ms  completed, 10999 chars
+```
+
+A short interactive turn streams too (67 characters on screen ~400 ms before
+completion). In every run the transcript row count never dropped at
+completion — the streamed reply hands over to the persisted message without a
+blank frame.
+
+`test/main/antigravity-live.test.ts` carries two opt-in
+(`ORBIT_REAL_AGY=1`) tests asserting the same property per transport: real
+assistant text reaches Orbit as `text.delta` strictly before `run.completed`.
+Both passed on three consecutive runs.
+
+### Remaining limitations (agy's own behaviour, not Orbit's)
+
+- **Nothing is exposed during thinking.** agy emits no assistant prose at all
+  while the model reasons — 12–18 s on the captured turns, and the largest
+  part of the perceived wait. Orbit shows `Antigravity is replying` because
+  there is genuinely nothing yet.
+- **The structured transport dumps most of a long answer at the end.** The
+  final `DONE` delta arrives in the same millisecond as `result` and carried
+  62–73% of the answer in every captured turn. Orbit forwards it the instant
+  it arrives; agy decides when that is.
+- **A short answer cannot stream.** It arrives as one `DONE` delta (structured)
+  or one screen repaint (PTY). There is nothing incremental to show, and
+  Orbit does not invent any.
+- **PTY mid-flight text is not always byte-identical to the settled answer.**
+  agy draws raw markdown first and resolves emphasis afterwards, so a
+  resynchronized stretch is skipped mid-stream and arrives with the final
+  message. The persisted message is always the complete, settled text.
+- The transient work-title agy prints above an answer ("Verifying Task
+  Instructions", "Analyzing the Directive") is still included in the extracted
+  response, as it was before this change — it is indistinguishable from an
+  ordinary unindented heading on the screen.
 
 ## Native image attachment
 
@@ -162,6 +328,28 @@ three valid live runs. The attachment itself was still delivered in that run
 (the sent thumbnail rendered, and the next turn in the same session answered
 correctly). This is the same first-turn extraction flake already recorded for
 the resume test above, not a regression in the attachment path.
+
+## macOS environment notes (from the issue #2 verification)
+
+This was the first pass run on macOS (Darwin 25.6, x64 Node/Electron). Two
+things worth recording:
+
+- **`node-pty`'s prebuilt `spawn-helper` arrives without the executable
+  bit.** `node_modules/node-pty/prebuilds/darwin-{x64,arm64}/spawn-helper` is
+  mode `644` after a plain `npm install`, and every `pty.spawn` then fails
+  with `Error: posix_spawnp failed.` — i.e. the whole PTY transport is dead
+  on arrival until `chmod +x` is applied. This is an upstream packaging /
+  install-time issue, not an Orbit one; it is noted here because it makes the
+  interactive transport look broken for reasons that have nothing to do with
+  agy.
+- **The `answers native questions, approves and denies real permission
+  prompts` live PTY test does not pass on this machine**, with or without the
+  issue #2 changes (verified by running it against the unmodified code): agy
+  never raises the expected command-permission prompt for the shell command
+  the test asks for, so `expect(approval).toBeDefined()` fails. The
+  interaction *machinery* is unchanged and its unit tests pass; this looks
+  like a platform/permission-mode difference in agy itself, and is recorded
+  as an open item rather than fixed blind.
 
 ## Cross-platform clipboard notes and capability detection
 
@@ -230,7 +418,8 @@ Compared against `AntigravityAdapter.ts`, `TerminalSessionController.ts`, `Termi
 
 ## Verified / Orbit policy / Unknown upstream behavior
 
-**Verified** (live, against the installed signed-in `agy 1.1.27`, this session, Linux/Wayland):
+**Verified** (live, against the installed signed-in `agy 1.1.27`, Linux/Wayland unless noted):
+- **Progressive streaming, both transports, on macOS** (issue #2, this session): raw `stream-json` traces of four real turns; 200 ms screen samples of real PTY turns; opt-in provider-level live tests; and the real Electron build driven through its own UI. See "Streaming assistant text" above for the captured numbers.
 - Structured transport: plain messaging, streaming, conversation continuation, cancellation, headless-denial honesty (pre-existing, re-confirmed).
 - PTY: workspace-trust/permission menu detection and approval; native free-text question asked and answered via composer continuity in the same live session; a second permission prompt approved and the command actually ran; a third permission prompt denied and the command did **not** run, and the session continued normally afterward; a stale/duplicate interaction response rejected; a numbered-list response no longer falsely triggers an interaction.
 - **Native conversation resume across a simulated Orbit restart**: a completely fresh `AntigravityProvider` (previous process killed) recalled a secret fact from an earlier, separate process's conversation via `--conversation <id>`. **Observed flake rate**: passed 3 of 4 runs across this hardening pass; one run returned an empty extracted final-text (the resumed process still logged a native conversation id and completed the turn, so the resume itself likely still worked — no diagnostic capture was enabled for that specific run to confirm root cause). Two immediate retries with identical code both passed. Treated as live-system/timing flakiness (a real network call to a hosted model, not a deterministic local process) rather than a reproducible code defect — no code change was made in response, since there was nothing reproducible to fix.
@@ -248,6 +437,7 @@ Compared against `AntigravityAdapter.ts`, `TerminalSessionController.ts`, `Termi
 **Unknown / not verified:**
 - macOS and Windows clipboard behavior for native image attachment, and Linux X11 (this environment is Wayland).
 - Whether resuming a conversation that died after exactly one turn (no captured id yet) has any safe alternative to starting fresh.
+- Whether agy ever exposes assistant prose during its thinking phase (nothing was observed on any captured turn, on either transport).
 - Behavior of permission menus beyond the two captured shapes above (e.g. a plan-mode-specific prompt, or a menu with more than 4 options).
 - Structured → PTY continuation safety.
 - `node-pty`/ConPTY behavior, shell/executable invocation, and PTY resize on macOS or Windows — reviewed for obvious platform-specific bugs (none found: paths are resolved via `node:path` and `os.homedir()`, no POSIX-only assumptions in the PTY spawn/write/resize/kill calls) but **not live-verified** on either platform.

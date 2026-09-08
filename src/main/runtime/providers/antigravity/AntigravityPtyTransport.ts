@@ -23,6 +23,19 @@ import {
 } from '@main/terminal/TerminalInteractionDetector'
 
 const IDLE_DEBOUNCE_MS = 450
+/** How often the live screen is read for progressive response text while
+ *  output is still flowing. The idle-debounced classification snapshot
+ *  below cannot do this job: agy streams a long answer continuously, so
+ *  the debounce never fires until the turn is already over (confirmed
+ *  live — a 14-second answer produced exactly one snapshot, after
+ *  completion). This is a read-only second reader; it never classifies the
+ *  screen and never touches the ready/busy/interaction edge state.
+ *
+ *  The interval is deliberately short: agy draws a whole answer in about a
+ *  second once the model starts writing (the thinking phase before it
+ *  shows nothing at all), so a slower cadence turns that second into one
+ *  or two jumps rather than a reply that visibly grows. */
+const STREAM_SAMPLE_MS = 120
 /** Real, verified cancel-current-turn key (agy's own on-screen hint is
  *  "esc to cancel"). NOT Ctrl+C — that is reserved for exiting the whole
  *  interactive session and needs a second press. */
@@ -53,6 +66,12 @@ export interface AntigravityPtyHandlers {
    *  Fired once per busy transition, not on every redraw. */
   onBusy(): void
   onExit(code: number, signal?: number): void
+  /** Fires on a throttled cadence *while output is still arriving*, with
+   *  the full current screen. Purely for progressively reading the
+   *  response as it is drawn — this handler must never be used to decide
+   *  readiness, busyness, or interactions, which stay the exclusive job of
+   *  the idle-debounced snapshot below. Optional. */
+  onStreamText?(lines: string[]): void
   /** Fires on every idle snapshot with the full current screen text —
    *  independent of ready/busy/interaction classification. Used for
    *  one-off scraping (e.g. capturing the native conversation id from a
@@ -87,6 +106,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
   private lastRespondedSignature: string | null = null
   private lastRespondedAtMs = 0
   private mediaAttached = 0
+  private lastStreamSampleAtMs = 0
 
   constructor(
     private readonly executable: string,
@@ -106,7 +126,9 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     })
     this.running = true
     this.proc.onData((chunk) => {
-      this.screen.write(chunk)
+      // The callback runs once xterm has actually parsed this chunk, so a
+      // progressive read never observes a half-applied redraw.
+      this.screen.write(chunk, () => this.sampleStreamText())
       this.scheduleSnapshot()
     })
     this.proc.onExit(({ exitCode, signal }) => {
@@ -197,6 +219,19 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     // reported and the run hangs forever.
     this.wasReady = false
     this.proc?.write(value)
+  }
+
+  /** Throttled, read-only look at the live screen for progressive
+   *  response text. Skipped entirely while any write is still being
+   *  parsed, so callers only ever see complete frames. */
+  private sampleStreamText(): void {
+    const onStreamText = this.handlers?.onStreamText
+    if (!onStreamText || !this.running) return
+    if (!this.screen.isDrained) return
+    const now = Date.now()
+    if (now - this.lastStreamSampleAtMs < STREAM_SAMPLE_MS) return
+    this.lastStreamSampleAtMs = now
+    onStreamText(this.screen.peekLines())
   }
 
   private scheduleSnapshot(): void {

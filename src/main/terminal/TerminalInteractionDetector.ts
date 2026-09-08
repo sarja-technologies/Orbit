@@ -207,17 +207,74 @@ export function isBusy(lines: string[]): boolean {
 
 const PROMPT_ECHO_LINE = /^>\s+\S/
 const BORDER_LINE = /^─+$/
+/** The compose box agy draws under every screen is boxed by a rule as wide
+ *  as the terminal itself; a markdown horizontal rule inside a response is
+ *  drawn short and indented, so width is what separates chrome from
+ *  content (real captured screens: 120-column box rules vs. a 6-column
+ *  `──────` inside prose). */
+const WIDE_BORDER_LINE = /^─{40,}$/
 const TOOL_ACTIVITY_LINE = /^\s*[●▸]/
+/** Real captured progress lines — a Braille spinner frame followed by the
+ *  current activity ("⣽  Working...", "⢿  Verifying Requirements
+ *  Thoroughly..."). They sit at the end of the response body and are
+ *  rewritten on every frame, so they are chrome, not prose. */
+const SPINNER_LINE = /^\s*[⠀-⣿](\s|$)/
+/** Real captured hint line agy hangs off its working indicator — e.g.
+ *  `└ Tip: Use /model to switch between available models.` It rotates
+ *  through different tips while a turn runs, which is exactly the kind of
+ *  churn that must never reach the transcript. */
+const STATUS_HINT_LINE = /^\s*└/
 
-/** Best-effort extraction of "what agy actually said back", for a screen
- *  that has just settled to the ready-for-input footer after a turn. agy's
- *  interactive TUI is a full-redraw display, not a text stream — there is
- *  no reliable per-token delta the way structured `--output-format
- *  stream-json` provides, so this reconstructs the reply from the visible
- *  screen: everything after the last echoed prompt line ("> ..."), minus
- *  UI chrome (borders, the empty compose box, the footer, tool-activity
- *  lines). Good enough for ordinary prose; not a pixel-perfect transcript
- *  of complex formatting — see docs/antigravity-transports.md.
+export interface ExtractResponseOptions {
+  /** The prompt actually written into the PTY for this turn. When given,
+   *  the echoed prompt is consumed by matching it (across however many
+   *  rows it word-wrapped onto) rather than by the blank-line heuristic
+   *  below — which silently eats real response text whenever the terminal
+   *  has scrolled the blank separator away. */
+  prompt?: string
+  /** Return '' unless the anchor echo really is this turn's prompt. Used
+   *  by progressive reading, where the screen briefly still shows the
+   *  PREVIOUS turn's echo and answer after a new prompt is submitted. */
+  requirePromptEcho?: boolean
+}
+
+const squashWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim()
+
+/** Drops everything from agy's compose box down. The box is unmistakable:
+ *  a terminal-width rule, the input line, another terminal-width rule —
+ *  and cutting at it (rather than walking up from the last row) is what
+ *  keeps whatever agy prints *below* it out of the response. Real captured
+ *  example: `└ Tip: You can switch conversations with /resume.`, printed
+ *  under the footer, which a backwards walk stops at and then reports as
+ *  the assistant's reply. Falls back to trimming the trailing chrome when
+ *  no box is on screen. */
+function stripComposeChrome(body: string[]): string[] {
+  for (let i = body.length - 3; i >= 0; i--) {
+    if (!WIDE_BORDER_LINE.test(body[i]!.trim())) continue
+    if (!body[i + 1]!.trim().startsWith('>')) continue
+    if (!WIDE_BORDER_LINE.test(body[i + 2]!.trim())) continue
+    return body.slice(0, i)
+  }
+  let end = body.length
+  while (end > 0 && body[end - 1]!.trim() === '') end--
+  // Only the box's lower half is on screen (the echo itself was the input
+  // line): the footer sits directly under its closing rule.
+  if (end >= 2 && WIDE_BORDER_LINE.test(body[end - 2]!.trim())) end--
+  while (end > 0) {
+    const trimmed = body[end - 1]!.trim()
+    if (trimmed === '' || WIDE_BORDER_LINE.test(trimmed)) { end--; continue }
+    break
+  }
+  return body.slice(0, end)
+}
+
+/** Best-effort extraction of "what agy actually said back" from the
+ *  visible screen. agy's interactive TUI is a full-redraw display, not a
+ *  text stream, so this reconstructs the reply from the screen: everything
+ *  after the echoed prompt line ("> ..."), minus UI chrome (the compose
+ *  box, borders, footers, tool-activity and spinner rows). Good enough for
+ *  ordinary prose; not a pixel-perfect transcript of complex formatting —
+ *  see docs/antigravity-transports.md.
  *
  *  Returns '' when the screen contains no prompt echo to anchor against.
  *  CRITICAL (real bug, caught by inspecting the running app): this used to
@@ -227,26 +284,103 @@ const TOOL_ACTIVITY_LINE = /^\s*[●▸]/
  *  persisted and displayed as if Antigravity had said them. Without an echo
  *  anchor the response boundary is genuinely unknown, so reporting nothing
  *  is both honest and the only way to avoid leaking that banner. */
-export function extractResponseText(lines: string[]): string {
+export function extractResponseText(lines: string[], options: ExtractResponseOptions = {}): string {
   const echoIdx = findLastIndex(lines, (l) => PROMPT_ECHO_LINE.test(l))
   if (echoIdx === -1) return ''
-  // A long prompt word-wraps across multiple physical rows with no blank
-  // line between them (confirmed live) — the real response always starts
-  // only after the next blank line, so skip every non-blank row right
-  // after the echo rather than assuming the echo is exactly one row tall.
+
   let bodyStart = echoIdx + 1
-  while (bodyStart < lines.length && lines[bodyStart]!.trim() !== '') bodyStart++
-  const body = lines.slice(bodyStart)
-  const kept = body.filter((line) => {
+  let anchored = false
+  if (options.prompt) {
+    // Consume exactly the rows the known prompt wrapped onto. Comparison
+    // is whitespace-insensitive because the terminal re-wraps and pads.
+    const wanted = squashWhitespace(options.prompt)
+    let seen = squashWhitespace(lines[echoIdx]!.replace(/^>\s*/, ''))
+    if (wanted.startsWith(seen)) {
+      anchored = true
+      while (seen.length < wanted.length && bodyStart < lines.length) {
+        const next = squashWhitespace(lines[bodyStart]!)
+        if (!next) break
+        const merged = squashWhitespace(`${seen} ${next}`)
+        if (!wanted.startsWith(merged)) break
+        seen = merged
+        bodyStart++
+      }
+    }
+  }
+  if (!anchored) {
+    if (options.requirePromptEcho) return ''
+    // A long prompt word-wraps across multiple physical rows with no blank
+    // line between them (confirmed live) — without the prompt to match
+    // against, the real response is assumed to start after the next blank
+    // line.
+    bodyStart = echoIdx + 1
+    while (bodyStart < lines.length && lines[bodyStart]!.trim() !== '') bodyStart++
+  }
+
+  const kept = stripComposeChrome(lines.slice(bodyStart)).filter((line) => {
     const trimmed = line.trim()
     if (!trimmed) return true // preserve paragraph breaks
     if (BORDER_LINE.test(trimmed)) return false
     if (trimmed === '>') return false // empty compose box
     if (READY_FOOTER.test(trimmed) || BUSY_FOOTER.test(trimmed)) return false
     if (TOOL_ACTIVITY_LINE.test(line)) return false
+    if (SPINNER_LINE.test(line)) return false
+    if (STATUS_HINT_LINE.test(line)) return false
     return true
   })
-  return kept.join('\n').trim()
+  // Trailing cells keep their padding across a redraw, and that padding
+  // shifts from frame to frame — trimming it is what makes successive
+  // reads of a growing answer comparable.
+  return kept.map((line) => line.replace(/\s+$/, '')).join('\n').trim()
+}
+
+/** How much of the already-streamed tail must reappear in a new frame for
+ *  it to count as the same answer, still growing. Long enough that it
+ *  cannot match somewhere else in the response by chance, short enough to
+ *  stay inside one redraw. */
+const STREAM_ANCHOR_CHARS = 80
+
+const isSpace = (value: string): boolean => value === ' ' || value === '\n' || value === '\t'
+
+/** Where `candidate` continues on from the text already streamed, or -1
+ *  when it is not a continuation at all.
+ *
+ *  agy's TUI is a full-redraw display, not a text stream: as an answer
+ *  grows the terminal scrolls and re-wraps, so the same prose reads back
+ *  with a blank line or a trailing space more or fewer than last time, and
+ *  agy rewrites its own transient work-title above the answer as the turn
+ *  progresses. Matching a whole prefix therefore fails constantly (and
+ *  stalls streaming for the rest of the turn), while matching nothing
+ *  duplicates words already on screen. So the comparison is anchored on
+ *  the *tail* of what has been streamed, over visible characters only:
+ *  whatever follows that tail in the new frame is genuinely new, no matter
+ *  what changed above it. The last occurrence wins, which is the right
+ *  reading of a screen that only ever grows downward.
+ *
+ *  -1 means the streamed tail is not on this screen at all — a redraw
+ *  sampled mid-write, or another turn's screen. Callers skip those frames
+ *  rather than guess; `run.completed`'s text stays authoritative. */
+export function progressiveAppendIndex(streamed: string, candidate: string): number {
+  if (streamed === '') return 0
+  const anchor: string[] = []
+  for (let i = streamed.length - 1; i >= 0 && anchor.length < STREAM_ANCHOR_CHARS; i--) {
+    const character = streamed[i]!
+    if (!isSpace(character)) anchor.push(character)
+  }
+  if (anchor.length === 0) return 0
+  const needle = anchor.reverse().join('')
+
+  const visible: string[] = []
+  const positions: number[] = []
+  for (let i = 0; i < candidate.length; i++) {
+    const character = candidate[i]!
+    if (isSpace(character)) continue
+    visible.push(character)
+    positions.push(i)
+  }
+  const found = visible.join('').lastIndexOf(needle)
+  if (found === -1) return -1
+  return positions[found + needle.length - 1]! + 1
 }
 
 export function readMediaAttachedCount(lines: string[]): number {

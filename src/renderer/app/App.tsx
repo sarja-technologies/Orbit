@@ -247,6 +247,28 @@ export function App(): JSX.Element {
     }
   }
 
+  /** Reloads the project, then — and only then — retires the run's live
+   *  state, so the streamed reply stays on screen until the stored
+   *  assistant message has taken over from it. */
+  async function refreshAfterRun(projectId: ID, conversationId: ID, runId: ID): Promise<void> {
+    try {
+      await openProject(projectId, conversationId)
+    } finally {
+      setRunningRunByConversation((current) => {
+        if (current[conversationId] !== runId) return current
+        const next = { ...current }
+        delete next[conversationId]
+        return next
+      })
+      setStreamTextByRun((current) => {
+        if (!(runId in current)) return current
+        const next = { ...current }
+        delete next[runId]
+        return next
+      })
+    }
+  }
+
   function applyRuntimeEvent(event: RuntimeEvent): void {
     if (event.type === 'interaction.required') {
       if (event.canRespond) {
@@ -282,22 +304,18 @@ export function App(): JSX.Element {
       void openProject(event.projectId, event.conversationId)
     }
     if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
-      setRunningRunByConversation((current) => {
-        const next = { ...current }
-        delete next[event.conversationId]
-        return next
-      })
       setPendingByRun((current) => {
         const next = { ...current }
         delete next[event.runId]
         return next
       })
-      setStreamTextByRun((current) => {
-        const next = { ...current }
-        delete next[event.runId]
-        return next
-      })
-      void openProject(event.projectId, event.conversationId)
+      // The live run and its streamed text are what the transcript is
+      // currently drawing the reply from; the persisted assistant message
+      // only exists after the refresh below has come back. Dropping them
+      // first blanks a finished answer for as long as that round trip
+      // takes — so the hand-off happens the other way round, and the reply
+      // is never off screen for a frame.
+      void refreshAfterRun(event.projectId, event.conversationId, event.runId)
     }
   }
 
