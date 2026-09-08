@@ -241,6 +241,23 @@ blank frame.
 assistant text reaches Orbit as `text.delta` strictly before `run.completed`.
 Both passed on three consecutive runs.
 
+### Live-test flake rates measured on this branch
+
+Live tests talk to a hosted model through a real CLI, so a handful of runs
+behave differently. Measured across this branch's verification (macOS, agy
+1.1.27):
+
+| Test | Observed | Reading |
+| --- | --- | --- |
+| `streams a long PTY answer` | ~1 turn in 8 paints its whole answer in one repaint | agy's pacing; the test asks two turns and requires one to stream |
+| `streams a long structured answer` | occasionally flushes a whole answer in one delta | same, same mitigation |
+| `uses the installed signed-in agy runtime` | ~1 run in 8 fails a strict `toBe('ORBIT_AGENTDOCK_AGY_OK')` | pre-existing test asserting exact model output; left as is |
+| `resumes a real native conversation` | ~1 run in 8 settles with empty text | the pre-existing resume flake already recorded above; one such run was observed taking the 10 s grace path, i.e. agy never showed the prompt as submitted at all |
+
+None of these are deterministic-suite failures: `npm run verify` (369 tests)
+is green, and every guarantee they probe is also asserted deterministically
+against recorded frames and captured event shapes.
+
 ### Remaining limitations (agy's own behaviour, not Orbit's)
 
 - **Nothing is exposed during thinking.** agy emits no assistant prose at all
