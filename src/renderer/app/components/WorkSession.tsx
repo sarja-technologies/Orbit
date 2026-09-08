@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef } from 'react'
+import { memo, useMemo } from 'react'
 import type { Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
 import type { ActivityState } from '../lib/activity'
@@ -7,6 +7,7 @@ import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
 import { ActivitySummary, LiveActivity } from './ActivityLine'
 import { InactiveInteraction, InteractionCard, ResolvedInteraction } from './InteractionCard'
+import { useTranscriptScroll } from '../lib/useTranscriptScroll'
 
 export interface ResolvedRecord {
   interactionId: string
@@ -49,8 +50,6 @@ export function WorkSession({
   resolvedRecords,
   onRespond
 }: WorkSessionProps): JSX.Element {
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const atBottomRef = useRef(true)
   const runsById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const projectFilesById = useMemo(() => new Map(projectFiles.map((file) => [file.id, file])), [projectFiles])
   const attachmentsByRun = useMemo(() => {
@@ -90,13 +89,24 @@ export function WorkSession({
     return next
   }, [messages])
 
-  // Follow new output only when the reader is already at the bottom, so
-  // scrolling back through a long session isn't yanked away.
-  useEffect(() => {
-    const node = scrollRef.current
-    if (!node || !atBottomRef.current) return
-    node.scrollTop = node.scrollHeight
-  }, [messages.length, streamText, pendingInteraction?.interactionId, activeRunId])
+  // Everything that can change the transcript's height, as one value. The
+  // ResizeObserver inside the hook is what actually guarantees a landing at
+  // the bottom; this only lets the ordinary cases pin before paint.
+  const revision = [
+    messages.length,
+    messages[messages.length - 1]?.id ?? '',
+    streamText.length,
+    activeRunId ?? '',
+    activeRunId ? (activityByRun[activeRunId]?.items.length ?? 0) : 0,
+    pendingInteraction?.interactionId ?? '',
+    unavailableInteraction?.interactionId ?? '',
+    staleInteraction ? '1' : '0'
+  ].join('|')
+
+  const { viewportRef, contentRef, bottomRef, showJumpToLatest, onScroll, jumpToLatest } = useTranscriptScroll(
+    conversation?.id ?? null,
+    revision
+  )
 
   if (!conversation) {
     return (
@@ -107,87 +117,110 @@ export function WorkSession({
   }
 
   return (
-    <div className="transcript" ref={scrollRef} onScroll={(event) => {
-      const node = event.currentTarget
-      atBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48
-    }}>
-      <div className="transcript-inner">
-        {messages.map((message, index) => {
-          const previous = index > 0 ? messages[index - 1] : undefined
-          const showRole = !previous || previous.role !== message.role
-          const runId = message.role === 'user' ? (runIdByUserMessageId.get(message.id) ?? null) : message.runId
-          const activity = message.role === 'assistant' && message.runId ? activityByRun[message.runId] : undefined
-          const resolved = message.role === 'assistant' && message.runId ? (resolvedByRun.get(message.runId) ?? EMPTY_RESOLVED) : EMPTY_RESOLVED
+    <div className="transcript-viewport">
+      <div className="transcript" ref={viewportRef} onScroll={onScroll}>
+        <div className="transcript-inner" ref={contentRef}>
+          {messages.map((message, index) => {
+            const previous = index > 0 ? messages[index - 1] : undefined
+            const showRole = !previous || previous.role !== message.role
+            const runId = message.role === 'user' ? (runIdByUserMessageId.get(message.id) ?? null) : message.runId
+            const activity = message.role === 'assistant' && message.runId ? activityByRun[message.runId] : undefined
+            const resolved = message.role === 'assistant' && message.runId ? (resolvedByRun.get(message.runId) ?? EMPTY_RESOLVED) : EMPTY_RESOLVED
 
-          return (
-            <MessageTurn
-              key={message.id}
-              message={message}
-              showRole={showRole}
-              attachments={message.role === 'user' && runId ? (attachmentsByRun.get(runId) ?? EMPTY_ATTACHMENTS) : EMPTY_ATTACHMENTS}
-              thumbnails={thumbnails}
-              error={message.runId ? (runsById.get(message.runId)?.error ?? null) : null}
-              activity={activity}
-              resolved={resolved}
-            />
-          )
-        })}
-
-        {activeRunId ? (
-          <div className="turn">
-            {resolvedRecords
-              .filter((record) => record.runId === activeRunId)
-              .map((record) => (
-                <div className="chat-aside" key={record.interactionId}>
-                  <ResolvedInteraction summary={record.summary} />
-                </div>
-              ))}
-
-            {/* Text has started arriving. The bubble is the real assistant
-                surface, plus a live badge and a moving edge so a reply
-                mid-flight never reads as a finished one. */}
-            {streamText ? (
-              <ChatRow role="assistant" showIdentity status={<ReplyingBadge />} bubbleClassName="is-streaming">
-                <Markdown source={streamText} />
-                <span className="stream-cursor" aria-hidden="true" />
-              </ChatRow>
-            ) : null}
-
-            {/* Nothing to read yet: a real assistant bubble holding animated
-                dots, so the wait happens where the answer will appear.
-                A run opens with an empty activity state, which is not yet
-                evidence of tool work — only real steps earn "working". */}
-            {!pendingInteraction && !streamText ? (
-              <PendingReply label={hasSteps(activityByRun[activeRunId]) ? 'Antigravity is working' : 'Antigravity is replying'} />
-            ) : null}
-
-            {/* Tool work is subordinate to the reply: indented onto the
-                assistant rail, never competing with the message itself. */}
-            {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
-              <div className="chat-aside">
-                <LiveActivity activity={activityByRun[activeRunId]!} />
-              </div>
-            ) : null}
-
-            {pendingInteraction ? (
-              <InteractionCard
-                event={pendingInteraction}
-                busy={respondingInteractionId === pendingInteraction.interactionId}
-                onRespond={onRespond}
+            return (
+              <MessageTurn
+                key={message.id}
+                message={message}
+                showRole={showRole}
+                attachments={message.role === 'user' && runId ? (attachmentsByRun.get(runId) ?? EMPTY_ATTACHMENTS) : EMPTY_ATTACHMENTS}
+                thumbnails={thumbnails}
+                error={message.runId ? (runsById.get(message.runId)?.error ?? null) : null}
+                activity={activity}
+                resolved={resolved}
               />
-            ) : null}
-          </div>
-        ) : null}
+            )
+          })}
 
-        {unavailableInteraction ? <InactiveInteraction event={unavailableInteraction} reason="unavailable" /> : null}
-        {staleInteraction ? (
-          <ErrorNote
-            title="That request is no longer active"
-            body="It was already answered or the turn moved on. Send another message to continue."
-            details={null}
-          />
-        ) : null}
+          {activeRunId ? (
+            <div className="turn">
+              {resolvedRecords
+                .filter((record) => record.runId === activeRunId)
+                .map((record) => (
+                  <div className="chat-aside" key={record.interactionId}>
+                    <ResolvedInteraction summary={record.summary} />
+                  </div>
+                ))}
+
+              {/* Text has started arriving. The bubble is the real assistant
+                  surface, plus a live badge and a moving edge so a reply
+                  mid-flight never reads as a finished one. */}
+              {streamText ? (
+                <ChatRow role="assistant" showIdentity status={<ReplyingBadge />} bubbleClassName="is-streaming">
+                  <Markdown source={streamText} />
+                  <span className="stream-cursor" aria-hidden="true" />
+                </ChatRow>
+              ) : null}
+
+              {/* Nothing to read yet: a real assistant bubble holding animated
+                  dots, so the wait happens where the answer will appear.
+                  A run opens with an empty activity state, which is not yet
+                  evidence of tool work — only real steps earn "working". */}
+              {!pendingInteraction && !streamText ? (
+                <PendingReply label={hasSteps(activityByRun[activeRunId]) ? 'Antigravity is working' : 'Antigravity is replying'} />
+              ) : null}
+
+              {/* Tool work is subordinate to the reply: indented onto the
+                  assistant rail, never competing with the message itself. */}
+              {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
+                <div className="chat-aside">
+                  <LiveActivity activity={activityByRun[activeRunId]!} />
+                </div>
+              ) : null}
+
+              {pendingInteraction ? (
+                <InteractionCard
+                  event={pendingInteraction}
+                  busy={respondingInteractionId === pendingInteraction.interactionId}
+                  onRespond={onRespond}
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          {unavailableInteraction ? <InactiveInteraction event={unavailableInteraction} reason="unavailable" /> : null}
+          {staleInteraction ? (
+            <ErrorNote
+              title="That request is no longer active"
+              body="It was already answered or the turn moved on. Send another message to continue."
+              details={null}
+            />
+          ) : null}
+        </div>
+
+        {/* The end of the conversation, as an element. Whether this is in
+            view is the definition of "at the bottom" — a question a
+            `scrollHeight` sample answers wrongly while turns are still
+            resolving their real heights. */}
+        <div className="transcript-end" ref={bottomRef} aria-hidden="true" />
       </div>
+
+      {/* Offered rather than imposed: new content while the reader is up
+          in the history moves nothing, it just makes the way back one
+          click. */}
+      {showJumpToLatest ? (
+        <button type="button" className="jump-latest" onClick={jumpToLatest} aria-label="Jump to latest">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <path
+              d="M8 3v9m0 0 3.4-3.4M8 12 4.6 8.6"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : null}
     </div>
   )
 }

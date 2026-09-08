@@ -995,6 +995,17 @@ select.field-input {
   position: relative;
 }
 
+/* Holds the scroller and the jump-to-latest control in one positioned
+   box, so the control can float over the conversation without becoming a
+   sibling of the composer. */
+.transcript-viewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
 /* Column layout so a short conversation can settle just above the composer
    instead of clinging to the top of a tall empty canvas. Once the
    transcript outgrows the viewport this has no effect and it simply
@@ -1006,6 +1017,60 @@ select.field-input {
   display: flex;
   flex-direction: column;
   padding: var(--space-5) var(--content-gutter) var(--space-6);
+  /* Auto-follow writes scrollTop directly and must land instantly; a smooth
+     scroll here would turn every streamed frame into a queued animation.
+     The one deliberate animation, jump-to-latest, asks for it per call. */
+  scroll-behavior: auto;
+  overscroll-behavior-y: contain;
+}
+
+/* The sentinel the bottom observer watches. One pixel so it has a real box
+   to intersect with; it carries no content and adds no visible space. */
+.transcript-end {
+  flex: none;
+  height: 1px;
+  pointer-events: none;
+}
+
+/* Small, quiet, and out of the reading column's way: an offer to come back
+   down, not a banner announcing that something happened. */
+.jump-latest {
+  position: absolute;
+  bottom: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-round);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-float);
+  color: var(--text-secondary);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.34);
+  cursor: pointer;
+  animation: jump-latest-in 140ms ease-out;
+}
+
+.jump-latest:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.jump-latest:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes jump-latest-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 /* The transcript and the composer share one column width so a message and
@@ -1710,6 +1775,10 @@ select.field-input {
   color: var(--text-secondary);
 }
 
+.session-blank .transcript-viewport {
+  flex: 0 1 auto;
+}
+
 .session-blank .transcript {
   flex: 0 1 auto;
   padding-bottom: 0;
@@ -2346,6 +2415,10 @@ select.field-input {
   *::before,
   *::after {
     scroll-behavior: auto !important;
+  }
+
+  .jump-latest {
+    animation: none;
   }
 
   .reasoning-particle {
