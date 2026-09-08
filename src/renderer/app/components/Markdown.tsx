@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown'
 
 /** Renders parsed Markdown as React elements. Model output never becomes
  *  raw HTML — see lib/markdown.ts for why. */
-export function Markdown({ source }: { source: string }): JSX.Element {
-  const blocks = parseMarkdown(source)
+function MarkdownView({ source }: { source: string }): JSX.Element {
+  const blocks = useMemo(() => parseMarkdown(source), [source])
   return (
     <div className="prose">
       {blocks.map((block, index) => (
@@ -122,3 +122,5 @@ function CodeBlock({ language, value }: { language: string | null; value: string
     </figure>
   )
 }
+
+export const Markdown = memo(MarkdownView)

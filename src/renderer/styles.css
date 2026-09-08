@@ -1017,6 +1017,8 @@ select.field-input {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 
 .block {
@@ -2103,6 +2105,12 @@ select.field-input {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+
   .reasoning-particle {
     animation: none;
     opacity: 0.55;
@@ -2134,6 +2142,13 @@ select.field-input {
   }
 
   .session-indicator-running {
+    animation: none;
+  }
+
+  .activity-pip,
+  .stream-cursor,
+  .modal-backdrop,
+  .modal-panel {
     animation: none;
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useMemo, useRef } from 'react'
 import type { Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
 import type { ActivityState } from '../lib/activity'
@@ -50,6 +50,44 @@ export function WorkSession({
 }: WorkSessionProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
+  const runsById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
+  const projectFilesById = useMemo(() => new Map(projectFiles.map((file) => [file.id, file])), [projectFiles])
+  const attachmentsByRun = useMemo(() => {
+    const next = new Map<ID, ProjectFile[]>()
+    for (const run of runs) {
+      const ids = Array.isArray(run.metadata?.attachmentFileIds) ? (run.metadata.attachmentFileIds as ID[]) : []
+      next.set(
+        run.id,
+        ids.map((id) => projectFilesById.get(id)).filter((file): file is ProjectFile => Boolean(file))
+      )
+    }
+    return next
+  }, [projectFilesById, runs])
+  const resolvedByRun = useMemo(() => {
+    const next = new Map<ID, ResolvedRecord[]>()
+    for (const record of resolvedRecords) {
+      const records = next.get(record.runId)
+      if (records) records.push(record)
+      else next.set(record.runId, [record])
+    }
+    return next
+  }, [resolvedRecords])
+  const runIdByUserMessageId = useMemo(() => {
+    const next = new Map<ID, ID>()
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index]!
+      if (message.role !== 'user') continue
+      for (let cursor = index + 1; cursor < messages.length; cursor++) {
+        const candidate = messages[cursor]!
+        if (candidate.runId) {
+          next.set(message.id, candidate.runId)
+          break
+        }
+        if (candidate.role === 'user') break
+      }
+    }
+    return next
+  }, [messages])
 
   // Follow new output only when the reader is already at the bottom, so
   // scrolling back through a long session isn't yanked away.
@@ -67,24 +105,6 @@ export function WorkSession({
     )
   }
 
-  const attachmentsFor = (runId: ID | null): ProjectFile[] => {
-    if (!runId) return []
-    const run = runs.find((candidate) => candidate.id === runId)
-    const ids = Array.isArray(run?.metadata?.attachmentFileIds) ? (run.metadata.attachmentFileIds as ID[]) : []
-    return ids.map((id) => projectFiles.find((file) => file.id === id)).filter((file): file is ProjectFile => Boolean(file))
-  }
-
-  // A user message carries the attachments of the run it started, which is
-  // the next run in sequence rather than its own (user rows have no runId).
-  const runIdForUserMessage = (index: number): ID | null => {
-    for (let i = index + 1; i < messages.length; i++) {
-      const candidate = messages[i]!
-      if (candidate.runId) return candidate.runId
-      if (candidate.role === 'user') break
-    }
-    return null
-  }
-
   return (
     <div className="transcript" ref={scrollRef} onScroll={(event) => {
       const node = event.currentTarget
@@ -94,24 +114,21 @@ export function WorkSession({
         {messages.map((message, index) => {
           const previous = index > 0 ? messages[index - 1] : undefined
           const showRole = !previous || previous.role !== message.role
-          const runId = message.role === 'user' ? runIdForUserMessage(index) : message.runId
+          const runId = message.role === 'user' ? (runIdByUserMessageId.get(message.id) ?? null) : message.runId
           const activity = message.role === 'assistant' && message.runId ? activityByRun[message.runId] : undefined
-          const resolved = message.role === 'assistant' && message.runId ? resolvedRecords.filter((record) => record.runId === message.runId) : []
+          const resolved = message.role === 'assistant' && message.runId ? (resolvedByRun.get(message.runId) ?? EMPTY_RESOLVED) : EMPTY_RESOLVED
 
           return (
-            <div key={message.id} className="turn">
-              {activity ? <ActivitySummary activity={activity} /> : null}
-              {resolved.map((record) => (
-                <ResolvedInteraction key={record.interactionId} summary={record.summary} />
-              ))}
-              <MessageBlock
-                message={message}
-                showRole={showRole}
-                attachments={message.role === 'user' ? attachmentsFor(runId) : []}
-                thumbnails={thumbnails}
-                error={message.runId ? runs.find((run) => run.id === message.runId)?.error ?? null : null}
-              />
-            </div>
+            <MessageTurn
+              key={message.id}
+              message={message}
+              showRole={showRole}
+              attachments={message.role === 'user' && runId ? (attachmentsByRun.get(runId) ?? EMPTY_ATTACHMENTS) : EMPTY_ATTACHMENTS}
+              thumbnails={thumbnails}
+              error={message.runId ? (runsById.get(message.runId)?.error ?? null) : null}
+              activity={activity}
+              resolved={resolved}
+            />
           )
         })}
 
@@ -162,3 +179,34 @@ export function WorkSession({
     </div>
   )
 }
+
+const EMPTY_ATTACHMENTS: ProjectFile[] = []
+const EMPTY_RESOLVED: ResolvedRecord[] = []
+
+const MessageTurn = memo(function MessageTurn({
+  message,
+  showRole,
+  attachments,
+  thumbnails,
+  error,
+  activity,
+  resolved
+}: {
+  message: Message
+  showRole: boolean
+  attachments: ProjectFile[]
+  thumbnails: Record<string, string>
+  error: Run['error'] | null
+  activity: ActivityState | undefined
+  resolved: ResolvedRecord[]
+}): JSX.Element {
+  return (
+    <div className="turn">
+      {activity ? <ActivitySummary activity={activity} /> : null}
+      {resolved.map((record) => (
+        <ResolvedInteraction key={record.interactionId} summary={record.summary} />
+      ))}
+      <MessageBlock message={message} showRole={showRole} attachments={attachments} thumbnails={thumbnails} error={error} />
+    </div>
+  )
+})

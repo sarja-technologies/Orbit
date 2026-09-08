@@ -13,7 +13,7 @@ let runtime: OrbitRuntime | null = null
 let database: OrbitDatabase | null = null
 let quitting = false
 
-app.disableHardwareAcceleration()
+configureGpu()
 
 async function bootstrap(): Promise<void> {
   const gotLock = app.requestSingleInstanceLock()
@@ -23,6 +23,7 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.whenReady()
+  void logGpuStatus('app-ready')
   const dataDir = process.env.ORBIT_USER_DATA_DIR || app.getPath('userData')
   database = new OrbitDatabase({ dataDir })
   await database.init()
@@ -32,7 +33,12 @@ async function bootstrap(): Promise<void> {
   const provider = new AntigravityProvider()
   runtime = new OrbitRuntime(store, artifactService, provider, dataDir, app.getVersion())
   registerIpc(runtime)
-  createMainWindow()
+  const mainWindow = createMainWindow()
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(() => {
+      void logGpuStatus('renderer-loaded')
+    }, 1000)
+  })
 
   app.on('activate', () => {
     if (process.platform === 'darwin' && !runtime) return
@@ -75,3 +81,22 @@ async function shutdown(): Promise<void> {
 }
 
 export const __orbitMain = { appRoot: path.resolve('.') }
+
+function configureGpu(): void {
+  // Hardware acceleration is the Chromium default and is required for smooth
+  // Retina rendering on macOS. ORBIT_DISABLE_GPU is a diagnostic escape hatch,
+  // not a platform policy.
+  if (process.env.ORBIT_DISABLE_GPU === '1') {
+    console.warn('[orbit] hardware acceleration disabled by ORBIT_DISABLE_GPU=1')
+    app.disableHardwareAcceleration()
+  }
+}
+
+async function logGpuStatus(phase: string): Promise<void> {
+  try {
+    console.info(`[orbit] GPU feature status (${phase})`, app.getGPUFeatureStatus())
+    console.info(`[orbit] GPU info (${phase})`, await app.getGPUInfo('basic'))
+  } catch (error) {
+    console.warn('[orbit] unable to read GPU feature status', sanitizeError(error))
+  }
+}

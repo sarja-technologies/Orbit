@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
 import { describeRuntimeError } from '../lib/errorCopy'
@@ -28,7 +28,7 @@ function clockTime(iso: string): string {
   return new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
-export function MessageBlock({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
+function MessageBlockView({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
   // A turn can finish with nothing to show — Antigravity did the work in
@@ -54,6 +54,8 @@ export function MessageBlock({ message, showRole, attachments, thumbnails, error
     </article>
   )
 }
+
+export const MessageBlock = memo(MessageBlockView)
 
 function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile[]; thumbnails: Record<string, string> }): JSX.Element {
   return (

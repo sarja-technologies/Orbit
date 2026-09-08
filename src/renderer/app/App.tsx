@@ -30,6 +30,7 @@ import { ComposerHints, EmptySession, type Starter } from './components/EmptySes
 import { ContextPanel, type ContextTab } from './components/ContextPanel'
 import { ProviderLogoSprite } from './components/ProviderLogo'
 import { applyActivity, emptyActivity, type ActivityState } from './lib/activity'
+import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
 
@@ -145,7 +146,12 @@ export function App(): JSX.Element {
         detail: error instanceof Error ? error.stack : undefined
       })
     })
-    return orbit.runs.onEvent(applyRuntimeEvent)
+    const batcher = new RuntimeEventBatcher(flushRuntimeEventBatch, applyRuntimeEvent)
+    const unsubscribe = orbit.runs.onEvent((event) => batcher.push(event))
+    return () => {
+      unsubscribe()
+      batcher.dispose()
+    }
   }, [])
 
   useEffect(() => {
@@ -216,13 +222,32 @@ export function App(): JSX.Element {
     await openProject(workspace.activeProjectId, preferred ?? workspace.activeConversationId)
   }
 
+  function flushRuntimeEventBatch(batch: RuntimeEventBatch): void {
+    if (Object.keys(batch.textDeltas).length > 0) {
+      setStreamTextByRun((current) => {
+        let changed = false
+        const next = { ...current }
+        for (const [runId, delta] of Object.entries(batch.textDeltas)) {
+          if (!delta) continue
+          next[runId] = `${next[runId] ?? ''}${delta}`
+          changed = true
+        }
+        return changed ? next : current
+      })
+    }
+
+    if (batch.toolActivities.length > 0) {
+      setActivityByRun((current) => {
+        let next = current
+        for (const event of batch.toolActivities) {
+          next = { ...next, [event.runId]: applyActivity(next[event.runId] ?? emptyActivity(), event) }
+        }
+        return next
+      })
+    }
+  }
+
   function applyRuntimeEvent(event: RuntimeEvent): void {
-    if (event.type === 'text.delta') {
-      setStreamTextByRun((current) => ({ ...current, [event.runId]: `${current[event.runId] ?? ''}${event.delta}` }))
-    }
-    if (event.type === 'tool.activity') {
-      setActivityByRun((current) => ({ ...current, [event.runId]: applyActivity(current[event.runId] ?? emptyActivity(), event) }))
-    }
     if (event.type === 'interaction.required') {
       if (event.canRespond) {
         setPendingByRun((current) => ({ ...current, [event.runId]: event }))
