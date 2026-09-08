@@ -106,7 +106,15 @@ export function ensureNodePtyPermissions({ packageRoot, platform, arch, fs = fsD
         'The dependency install did not complete — reinstall with scripts enabled.'
     )
   }
+  // `spawn-helper` is a macOS-only build target — node-pty's binding.gyp
+  // guards it with `OS=="mac"`, and only the darwin prebuilds ship one. Every
+  // other Unix forks the PTY directly, so a Linux install legitimately has
+  // `pty.node` and no helper beside it, and demanding one there fails an
+  // install that is in fact perfectly healthy. The helper is still chmod'ed
+  // wherever it exists (above), so a cross-install carrying darwin prebuilds
+  // is fixed no matter which platform ran it.
   const runtimeHelper = path.join(packageRoot, runtimeDir, HELPER)
+  if (platform !== 'darwin') return { fixed, alreadyExecutable, runtimeHelper: fs.existsSync(runtimeHelper) ? runtimeHelper : null }
   if (!fs.existsSync(runtimeHelper)) {
     throw new Error(
       `node-pty loaded ${NATIVE_MODULE} from ${runtimeDir} but ${HELPER} is missing beside it (${runtimeHelper}). ` +

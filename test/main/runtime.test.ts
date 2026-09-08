@@ -89,6 +89,48 @@ class HeadlessDenialProvider extends FakeProvider {
   }
 }
 
+/** Mirrors the PTY session's deferred cancellation: the run is stopped while
+ *  it is waiting on a model-change retirement, so there is no live process to
+ *  interrupt and `run.cancelled` is emitted synchronously from cancelRun,
+ *  while OrbitRuntime is still inside its own cancelRun. */
+class DeferredCancelProvider implements AgentProvider {
+  private pending: { input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void } | null = null
+  listModels = vi.fn(async () => [])
+  respondToInteraction = vi.fn(async () => undefined)
+  releaseConversation = vi.fn(async () => undefined)
+  shutdown = vi.fn(async () => undefined)
+
+  async getStatus(): Promise<ProviderStatus> {
+    return { id: 'antigravity', state: 'ready', sdkAvailable: true, authConfigured: true, message: null, details: {} }
+  }
+
+  /** Deliberately silent, like the real thing: a model-change retirement
+   *  emits no `run.started` — the replacement that would have emitted it is
+   *  never spawned — so the run's only event is its cancellation. */
+  async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    this.pending = { input, onEvent }
+  }
+
+  async cancelRun(runId: string): Promise<void> {
+    const pending = this.pending
+    if (!pending || pending.input.runId !== runId) return
+    this.pending = null
+    pending.onEvent({ ...this.base(pending.input), type: 'run.cancelled' })
+  }
+
+  /** Nothing follows a cancellation — the replacement never spawns, so the
+   *  run neither completes nor fails afterwards. */
+  private base(input: ProviderSendInput) {
+    return {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+  }
+}
+
 class ArtifactProvider extends FakeProvider {
   constructor(private readonly artifactPath: string) {
     super()
@@ -215,6 +257,35 @@ describe('OrbitRuntime', () => {
     await runtime.cancelRun(run.id)
     expect(provider.cancelRun).toHaveBeenCalledWith(run.id)
     expect(store.requireRun(run.id).state).toBe('cancelling')
+  })
+
+  it('settles a run the provider cancels synchronously, rather than leaving it stopping forever', async () => {
+    // A PTY run stopped while it is waiting on a model-change retirement has
+    // no process to interrupt, so `run.cancelled` arrives while cancelRun is
+    // still on the stack. The run must end up cancelled — not stuck in the
+    // 'cancelling' state the Stop request set on its way in.
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new DeferredCancelProvider(), dir, '0.1.0')
+    const project = runtime.createProject('Deferred cancel')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Change the model and stop me' })
+    const returned = await runtime.cancelRun(run.id)
+
+    expect(returned.state, 'cancelRun must report what the store really holds').toBe('cancelled')
+    expect(store.requireRun(run.id).state).toBe('cancelled')
+
+    // Exactly one cancellation message, and no completion alongside it.
+    const messages = store.listMessages(project.id).filter((message) => message.runId === run.id)
+    expect(messages.filter((message) => message.status === 'cancelled')).toHaveLength(1)
+    expect(messages.some((message) => message.status === 'completed')).toBe(false)
+
+    // The cancelled run is no longer tracked as active, so a later run for
+    // the same conversation is unaffected by it.
+    expect((runtime as unknown as { activeRuns: Map<string, unknown> }).activeRuns.has(run.id)).toBe(false)
+
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new FakeProvider(), dir, '0.1.0')
+    const next = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'A later message' })
+    await vi.waitFor(() => expect(store.requireRun(next.id).state).toBe('completed'))
   })
 
   it('persists intelligible provider failures as failed assistant messages', async () => {

@@ -132,6 +132,20 @@ export class AntigravityPtySession {
   private pending: PendingInteraction | null = null
   private interactionCounter = 0
   private cancelRequested = false
+  /** Runs whose *deferred* work must never happen — see
+   *  `awaitingDeferredSpawn`. A run lands here when the user stops it while
+   *  it is waiting on a retirement rather than on a process of its own: the
+   *  only window in which a run is owed an agy process that does not exist
+   *  yet, and so the only window in which `cancelRequested` (which is read
+   *  by a live transport's own settle path) has nothing to act on.
+   *
+   *  Deliberately keyed by run id rather than by session state: the
+   *  retirement outcome arrives asynchronously, by which time a later run
+   *  may legitimately own the session, and that run must not inherit its
+   *  predecessor's cancellation — nor be able to consume it. Entries are
+   *  removed as they are consumed at the boundary, which always runs
+   *  because a retirement always settles within its bounds. */
+  private readonly cancelledDeferredRuns = new Set<ID>()
   private queuedPrompt: string | null = null
   private queuedImages: ImageAttachment[] = []
   private lastScreenLines: string[] = []
@@ -301,6 +315,11 @@ export class AntigravityPtySession {
    *  otherwise it would either become a second owner, or strand a process on
    *  a session the provider has already discarded. */
   private spawnAfterRetirement(exited: boolean, input: ProviderSendInput, images: ImageAttachment[], invocation: string): void {
+    // Same rule as retireThenSpawn: a run stopped while it waited here must
+    // not spawn, and must not be reported as anything but cancelled. `state`
+    // is deliberately left alone on this path — a later run may already own
+    // the session, and this boundary belongs to a run that no longer does.
+    if (this.deferredRunWasCancelled(input.runId)) return
     if (exited && !this.released) {
       this.spawn(input, images, invocation)
       return
@@ -329,7 +348,16 @@ export class AntigravityPtySession {
     images: ImageAttachment[],
     invocation: string
   ): Promise<void> {
-    if (!(await this.beginRetirement(retired))) {
+    const exited = await this.beginRetirement(retired)
+    // Stop was pressed while the predecessor was still being retired. It was
+    // acknowledged then, so this run is already cancelled: the replacement
+    // it was promised must never spawn, its prompt must never be delivered,
+    // and nothing further may be emitted for it — including the
+    // `retire_failed` below, which would otherwise convert a run the user
+    // cancelled into a failed one. Checked before the retirement outcome
+    // precisely so a blocked retirement cannot do that.
+    if (this.deferredRunWasCancelled(input.runId)) return
+    if (!exited) {
       this.state = 'idle'
       this.emit({ type: 'run.failed', error: { code: 'provider.retire_failed', message: RETIRE_FAILED_MESSAGE, retryable: true } })
       return
@@ -444,6 +472,23 @@ export class AntigravityPtySession {
   }
 
   cancel(): void {
+    // CRITICAL (real bug, review round 4): a run does not always have a
+    // process to interrupt. While a model change is retiring the previous
+    // agy, `transport` is deliberately null and the replacement is only
+    // *promised* to this run — yet `currentRunId` is still its own, so
+    // AntigravityProvider.cancelRun routes Stop here. Falling through to
+    // the transport-required path below returned silently: no
+    // `run.cancelled`, and once the predecessor exited the replacement
+    // spawned and delivered the very prompt the user had stopped.
+    //
+    // Stop is honoured instead by voiding the spawn that run is owed. The
+    // predecessor's retirement is not touched and runs to completion
+    // normally — reviving it was never an option, and it is still this
+    // conversation's owner until it genuinely exits.
+    if (this.awaitingDeferredSpawn()) {
+      this.cancelDeferredRun()
+      return
+    }
     if (this.state === 'idle' || !this.transport?.isRunning) return
     this.cancelRequested = true
     if (this.pending) {
@@ -456,6 +501,55 @@ export class AntigravityPtySession {
       this.emit({ type: 'interaction.resolved', interactionId: resolvedId, outcome: 'cancelled' })
     }
     this.transport.cancelTurn()
+  }
+
+  /** True while the current run has no process of its own and is waiting on
+   *  a retirement to hand one over. There are exactly two such windows, and
+   *  both promise this run a process that does not exist yet:
+   *
+   *  - `'retiring'`: this run's own model change is retiring the predecessor
+   *    (`retireThenSpawn`).
+   *  - `'bootstrapping'` with no transport: this run arrived while some
+   *    other retirement was in flight and queued behind it
+   *    (`spawnAfterRetirement`). Once it really spawns, `spawn()` sets
+   *    `transport` before `state`, so an ordinary bootstrap never matches. */
+  private awaitingDeferredSpawn(): boolean {
+    if (this.currentRunId === null || this.transport !== null) return false
+    return this.state === 'retiring' || this.state === 'bootstrapping'
+  }
+
+  /** Marks the current run cancelled across the asynchronous boundary it is
+   *  waiting on, and acknowledges the Stop immediately.
+   *
+   *  Immediately, not on the predecessor's exit: the run has nothing left to
+   *  do, and a predecessor that survives every escalation would otherwise
+   *  leave the Stop unanswered forever. Emitting here also makes
+   *  `run.cancelled` exactly-once by construction — the boundary consumes
+   *  the record and emits nothing, so there is only ever one emitter.
+   *
+   *  The session returns to `'idle'`, not `'ready'`: the promised
+   *  replacement is void so nothing is busy on this run's behalf, while the
+   *  `Retirement` record still holds ownership — so a later send waits on
+   *  it (or is refused if it became blocked) rather than spawning alongside
+   *  a predecessor that is still alive. */
+  private cancelDeferredRun(): void {
+    const runId = this.currentRunId
+    if (runId === null || this.cancelledDeferredRuns.has(runId)) return
+    this.cancelledDeferredRuns.add(runId)
+    this.clearTurnStartTimer()
+    this.state = 'idle'
+    this.emit({ type: 'run.cancelled' })
+  }
+
+  /** Whether `runId`'s deferred work was cancelled, consuming the record.
+   *
+   *  Every asynchronous boundary that could still spawn a process or
+   *  deliver a prompt for a run passes through here first, so a cancelled
+   *  run cannot cross one — and because the answer is keyed by run id, a
+   *  stale boundary belonging to a cancelled run can neither spawn for
+   *  itself nor disturb the run that has since taken the session over. */
+  private deferredRunWasCancelled(runId: ID): boolean {
+    return this.cancelledDeferredRuns.delete(runId)
   }
 
   /** Shuts the session down and reports whether it is safe to forget.

@@ -44,6 +44,7 @@ idle -> bootstrapping -> running -> waiting_for_interaction -> running -> ready 
 - `bootstrapping`: process just spawned, nothing written yet. May show agy's own workspace-trust prompt, surfaced as an ordinary `permission` interaction — Orbit never auto-approves it.
 - `running`: a real prompt is in flight (or an image-attachment sequence is delivering, see below).
 - `waiting_for_interaction`: a native menu is on screen; the run pauses (`Run.state = 'waiting_for_interaction'`), remembering which state to resume into.
+- `retiring`: a model change is retiring the predecessor and this run is owed the replacement. Counts as busy, and holds ownership through the `Retirement` record — see "Retiring a PTY process" and "Cancelling a run that does not have a process yet".
 - `ready`: idle between turns on a still-live process. The **same process** is reused for the next `send()` — this is what makes a native free-text question "just work": agy's interactive TUI has no distinct question modal (see below), so the user's next composer message is simply written into the same session.
 
 Interaction IDs (`${runId}:pty:${counter}`) are stable for the life of one on-screen menu; the transport deduplicates a redrawn/re-scanned identical menu by content signature before the session ever sees it, and a signature that was *just* answered is ignored for 3s to absorb a stale echo of the same screen.
@@ -393,19 +394,26 @@ run from the root package's `postinstall`, so a plain `npm install` or
 - It then **verifies**: it finds the directory node-pty will really load
   `pty.node` from — using the same search order as node-pty's own
   `loadNativeModule` (`build/Release`, `build/Debug`,
-  `prebuilds/<platform>-<arch>`) — and fails the install with a specific
-  message if the helper beside it is missing or still not executable. A
+  `prebuilds/<platform>-<arch>`) — and insists that `pty.node` is really
+  there, failing the install with a specific message if it is not. On macOS it
+  additionally requires the helper beside it to exist and be executable. A
   broken install is reported, never silently passed over.
-- Windows is skipped outright (no `spawn-helper`, no executable bit). Linux
-  publishes no prebuild at all, so node-pty compiles into `build/Release`,
-  where the linker already sets the bit — the script confirms it rather than
-  changing anything.
+- **`spawn-helper` is macOS-only.** node-pty's `binding.gyp` guards that
+  target with `OS=="mac"`, and only the darwin prebuilds ship one; every other
+  Unix forks the PTY directly and legitimately has `pty.node` and no helper
+  beside it. Requiring one everywhere failed an otherwise healthy Linux
+  install outright — `postinstall` throws, and takes `npm install` down with
+  it. The helper is still chmod'ed wherever it exists, so a cross-install
+  carrying darwin prebuilds is fixed no matter which platform ran it.
+- Windows is skipped outright (no `spawn-helper`, no executable bit).
 
 Unit-tested in `test/scripts/ensureNodePtyPermissions.test.ts` against
 throwaway node-pty-shaped layouts (both macOS prebuilds at `0644`, source
-build, mixed layout precedence, Windows skip, missing helper, missing native
-module, idempotency, mode preservation), plus an assertion against the real
-installed package.
+build, mixed layout precedence, Windows skip, a non-darwin platform that never
+builds a helper, a non-darwin install that still fixes darwin prebuilds,
+missing helper, missing native module, idempotency, mode preservation), plus
+assertions against the real installed package — including that the script
+itself runs clean on whatever platform the suite is running on.
 
 ## Permission prompts depend on agy's own allow-list
 
@@ -553,6 +561,85 @@ already queued when the conversation is released (refused with
 `provider.session_released` rather than spawning an orphan). Plus the blocked
 sequence end to end: polite timeout, SIGKILL timeout, `provider.retire_failed`,
 another send with no second process, then exit and a safe retry.
+
+### Cancelling a run that does not have a process yet
+
+Ownership answers "may this run spawn?". It does not, by itself, answer "has
+the user stopped this run?" — and there is one window where those come apart.
+
+Ordinary cancellation is agy's own native one: `cancel()` writes Escape into
+the live process, `cancelRequested` is latched, and the turn settles as
+`run.cancelled` on the next ready footer. That path needs a `transport`.
+
+A run waiting on a retirement has none. Two states qualify, and in both the run
+has been *promised* a process that does not exist yet:
+
+| State | Why the run has no transport | Boundary that would spawn it |
+| --- | --- | --- |
+| `'retiring'` | its own model change detached the predecessor | `retireThenSpawn` |
+| `'bootstrapping'`, `transport === null` | it arrived while a retirement was already in flight and queued behind it | `spawnAfterRetirement` |
+
+`cancel()` used to fall straight through both (`!this.transport?.isRunning`)
+and return silently: no `run.cancelled`, while `OrbitRuntime` had already moved
+the run to `cancelling`. Stop looked like it worked, and when the predecessor
+finally exited the replacement spawned and delivered the prompt the user had
+stopped.
+
+**Stop now voids the spawn the run is owed.** The run id is recorded in
+`cancelledDeferredRuns`, and every asynchronous boundary that could still spawn
+a process or deliver a prompt consumes that record before doing anything else.
+So a cancelled run cannot cross one — and because the record is keyed by *run*
+rather than by session state, a stale boundary belonging to a cancelled run can
+neither spawn for itself nor disturb whichever run has since taken the session
+over.
+
+`run.cancelled` is emitted immediately, from `cancel()` itself. Not on the
+predecessor's exit: the run has nothing left to do, and a predecessor that
+survives every escalation would otherwise leave the Stop unanswered forever.
+That also makes the event exactly-once by construction — the boundary consumes
+the record and emits nothing, so there is only ever one emitter.
+
+What is deliberately *not* done:
+
+- The predecessor is **not** revived or reused. Its retirement continues
+  normally, and it stays this conversation's owner until it genuinely exits.
+- The cancelled run is **not** converted into a `provider.retire_failed` run if
+  that retirement then becomes blocked. The cancellation check precedes the
+  retirement outcome for exactly that reason: the user stopped it, so it stays
+  stopped, and it never resurrects when the blocked process eventually exits.
+- The session returns to `'idle'`, not `'ready'` — the promised replacement is
+  void, so nothing is busy on this run's behalf, while the `Retirement` record
+  still holds ownership. A later send therefore waits on it (or is refused
+  while it is `blocked`) rather than spawning alongside a live predecessor, and
+  spawns normally once the real exit releases ownership.
+
+`OrbitRuntime.cancelRun` reads the run back from the store after the provider
+call instead of returning the `'cancelling'` snapshot it wrote on the way in,
+because this path settles the run synchronously.
+
+Regression coverage: `test/main/modelInvocation.test.ts` drives the full
+sequence — model change, retirement held in flight, one transport, Stop, then
+the genuine exit — asserting exactly one `run.cancelled`, no replacement, the
+prompt never delivered, no later `run.completed`, and a new run afterwards that
+spawns and completes normally. A second test does the same with the retirement
+becoming blocked (polite timeout, SIGKILL timeout, survivor retained), proving
+the cancelled run stays cancelled rather than failing, does not resurrect on
+the eventual exit, and that recovery afterwards is normal. Ordinary live-turn
+cancellation is pinned by its own test (Escape sent, no kill, run settles on
+the next ready footer, same process serves the next turn);
+`test/main/antigravityPtySession.test.ts` covers the queued-behind-a-retirement
+variant, and `test/main/runtime.test.ts` covers the runtime settling a
+synchronously-cancelled run instead of leaving it in `cancelling`.
+
+**Live-verified** against a real agy process (`AntigravityProvider live model
+change > stops a run that is waiting on a real model-change retirement`, opt-in
+via `ORBIT_REAL_AGY=1`): the predecessor is genuinely being terminated by the
+OS when Stop arrives, nothing about the timing is simulated, and the test
+samples the real process table throughout — **exactly one** agy process owns
+the conversation across the whole retirement-and-cancellation window. The
+cancelled prompt produces no `text.delta` at all, and the conversation still
+recalls its context on the next turn. It fails against the previous code with
+zero `run.cancelled` events.
 
 Regression coverage: `test/main/antigravityPtyTransportLifecycle.test.ts`
 drives a *real* PTY (a trivial `sh` that ignores `TERM`/`HUP`/`INT`) and

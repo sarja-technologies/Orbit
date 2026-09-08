@@ -194,9 +194,15 @@ export class OrbitRuntime extends EventEmitter {
   }
 
   async cancelRun(runId: ID): Promise<Run> {
-    const run = this.store.updateRunState(runId, 'cancelling')
+    this.store.updateRunState(runId, 'cancelling')
     await this.provider.cancelRun(runId)
-    return run
+    // Read back rather than returning the 'cancelling' snapshot above: a run
+    // stopped while it was waiting on a model-change retirement has no live
+    // process to interrupt, so the provider acknowledges it synchronously
+    // and `run.cancelled` has already been handled by the time this returns.
+    // Reporting the stale snapshot would tell the caller a settled run is
+    // still stopping.
+    return this.store.requireRun(runId)
   }
 
   /** 'pty' is sticky by design (see ConversationTransport's doc comment) —

@@ -73,7 +73,12 @@ class NoopTransport implements IAntigravityPtyTransport {
     return true
   }
   pasteClipboardImage(): void {}
-  cancelTurn(): void {}
+  /** agy's real cancellation is Escape into the live process, never a kill —
+   *  counted so a test can prove which path a Stop actually took. */
+  cancelTurnCalls = 0
+  cancelTurn(): void {
+    this.cancelTurnCalls++
+  }
   /** Mirrors the real transport: `kill()` only *requests* termination, and
    *  `isRunning` stays true until `exit()` is called to simulate the OS
    *  process actually going away. Tests that flip `isRunning` synchronously
@@ -342,6 +347,174 @@ describe('a live pty session honours a later model change', () => {
     expect(spawns).toHaveLength(2)
     expect(transports).toHaveLength(2)
     expect(spawns[1]![spawns[1]!.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
+  })
+
+  it('cancels a run that is waiting on a model-change retirement, and never spawns its replacement', async () => {
+    // The window the review found: during a model-change retirement the
+    // session has no `transport` (the predecessor is detached and dying)
+    // while `currentRunId` still belongs to the run that is owed the
+    // replacement. cancel() returned silently there, so Stop produced no
+    // `run.cancelled` and the replacement later spawned and delivered the
+    // very prompt the user had stopped.
+    const CANCELLED_PROMPT = 'this prompt must never reach agy'
+    const { instance, spawns, transports } = ptyHarness(() => 'cafe0000-1111-2222-3333-444444444444')
+    const events: RuntimeEvent[] = []
+
+    // 1-2. A resumable native conversation, so the model change is really
+    // applied rather than deferred.
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+    await settleTurn(transports[0]!)
+
+    // 3-4. The model changes: the predecessor is detached and retirement
+    // begins, deliberately held in flight.
+    await instance.sendMessage(
+      input({ transport: 'pty', runId: 'run_2', prompt: CANCELLED_PROMPT, model: 'gemini-3.8-flash', reasoningEffort: 'low' }),
+      (event) => events.push(event)
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // 5. Exactly one agy process — the one being retired.
+    expect(spawns).toHaveLength(1)
+    expect(transports).toHaveLength(1)
+    expect(transports[0]!.killCalls).toBe(1)
+    expect(transports[0]!.isRunning, 'still the owner').toBe(true)
+
+    // 6. Stop, before the predecessor has exited.
+    await instance.cancelRun('run_2')
+
+    // 7. Exactly one run.cancelled, for that run.
+    expect(events.filter((event) => event.type === 'run.cancelled' && event.runId === 'run_2')).toHaveLength(1)
+    // 8. Nothing spawned, and the predecessor is neither revived nor killed
+    // a second time — its retirement simply continues.
+    expect(spawns).toHaveLength(1)
+    expect(transports).toHaveLength(1)
+    expect(transports[0]!.killCalls).toBe(1)
+
+    // 9-12. The predecessor genuinely exits.
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(spawns, 'a cancelled run must not spawn its replacement').toHaveLength(1)
+    expect(transports).toHaveLength(1)
+    expect(transports.some((transport) => transport.sentPrompts.includes(CANCELLED_PROMPT)), 'the cancelled prompt must never be delivered').toBe(false)
+    expect(events.filter((event) => event.type === 'run.cancelled'), 'no duplicate cancellation').toHaveLength(1)
+    expect(events.some((event) => event.type === 'run.completed' && event.runId === 'run_2')).toBe(false)
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+
+    // 13-14. Ownership was released by that real exit, so a new run spawns
+    // normally and still resumes the same native conversation.
+    await instance.sendMessage(
+      input({ transport: 'pty', runId: 'run_3', prompt: 'a later message', model: 'gemini-3.8-flash', reasoningEffort: 'low' }),
+      (event) => events.push(event)
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(spawns).toHaveLength(2)
+    expect(spawns[1]).toContain('--conversation')
+    expect(spawns[1]![spawns[1]!.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
+    await settleTurn(transports[1]!)
+    expect(transports[1]!.sentPrompts).toContain('a later message')
+    expect(events.some((event) => event.type === 'run.completed' && event.runId === 'run_3')).toBe(true)
+    // Still exactly one cancellation, belonging to the run that asked for it.
+    expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+  })
+
+  it('keeps a run cancelled when the retirement it was waiting on becomes blocked, and never resurrects it', async () => {
+    vi.useFakeTimers()
+    try {
+      const BLOCKED_PROMPT = 'stopped while the predecessor refused to die'
+      const { instance, spawns, transports } = ptyHarness(() => 'd00dd00d-1111-2222-3333-444444444444')
+      const events: RuntimeEvent[] = []
+
+      await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+      await settleTurnFake(transports[0]!)
+
+      // 1. Model-change retirement begins.
+      await instance.sendMessage(
+        input({ transport: 'pty', runId: 'run_2', prompt: BLOCKED_PROMPT, model: 'gemini-3.8-flash', reasoningEffort: 'low' }),
+        (event) => events.push(event)
+      )
+      await vi.advanceTimersByTimeAsync(20)
+      expect(transports[0]!.killSignals).toEqual([undefined])
+
+      // 2. The owning run is stopped while the predecessor is still alive.
+      await instance.cancelRun('run_2')
+      expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+
+      // 3-5. Polite bound, then SIGKILL bound, both survived: the
+      // predecessor is now a blocked but still-owning process.
+      await vi.advanceTimersByTimeAsync(6_200)
+      expect(transports[0]!.killSignals).toEqual([undefined, 'SIGKILL'])
+      expect(transports[0]!.isRunning).toBe(true)
+
+      // 6. A run the user cancelled stays cancelled: it is not converted
+      // into the retire_failed run it never asked to fail.
+      expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+      expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+      // 7. No replacement exists.
+      expect(spawns).toHaveLength(1)
+      expect(transports).toHaveLength(1)
+
+      // The blocked predecessor still owns the conversation, so a send while
+      // it lives is refused rather than becoming its second owner.
+      await expect(
+        instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+      ).rejects.toMatchObject({ code: 'provider.retire_failed' })
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns).toHaveLength(1)
+
+      // 8-9. It finally, genuinely exits. Nothing belonging to the cancelled
+      // run may follow it out.
+      transports[0]!.exit(137)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns, 'the cancelled run must not resurrect on the real exit').toHaveLength(1)
+      expect(transports).toHaveLength(1)
+      expect(transports[0]!.sentPrompts).not.toContain(BLOCKED_PROMPT)
+      expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+      expect(events.some((event) => event.type === 'run.completed' && event.runId === 'run_2')).toBe(false)
+
+      // 10. Ownership is released, so a later run recovers normally.
+      await instance.sendMessage(
+        input({ transport: 'pty', runId: 'run_4', prompt: 'after recovery', model: 'gemini-3.8-flash', reasoningEffort: 'low' }),
+        (event) => events.push(event)
+      )
+      await vi.advanceTimersByTimeAsync(20)
+      expect(spawns, 'a fresh process is fine once the predecessor is really gone').toHaveLength(2)
+      expect(spawns[1]).toContain('--conversation')
+      await settleTurnFake(transports[1]!)
+      expect(transports[1]!.sentPrompts).toContain('after recovery')
+      expect(events.some((event) => event.type === 'run.completed' && event.runId === 'run_4')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still cancels an ordinary live turn through the transport rather than the deferred path', async () => {
+    // The regression guard for the fix above: when a run really does own a
+    // running process, Stop must stay agy's native cancellation (Escape),
+    // never a kill and never the retirement-aware path.
+    const { instance, spawns, transports } = ptyHarness(() => 'feedface-1111-2222-3333-444444444444')
+    const events: RuntimeEvent[] = []
+
+    await instance.sendMessage(input({ transport: 'pty', prompt: 'a live turn', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+    transports[0]!.handlers!.onReadyForInput() // bootstrap -> ready -> the prompt is delivered
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(transports[0]!.sentPrompts).toContain('a live turn')
+
+    await instance.cancelRun('run_1')
+    expect(transports[0]!.cancelTurnCalls, 'a live turn is cancelled with Escape').toBe(1)
+    expect(transports[0]!.killCalls, 'cancelling a turn must never kill the process').toBe(0)
+    // Unchanged behaviour: the run settles when agy reports itself ready
+    // again, not the instant Stop is pressed.
+    expect(events.some((event) => event.type === 'run.cancelled')).toBe(false)
+
+    transports[0]!.handlers!.onReadyForInput()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+    expect(events.some((event) => event.type === 'run.completed')).toBe(false)
+
+    // The same process is still healthy and serves the next turn.
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', prompt: 'the next turn', model: 'claude-sonnet-4-6' }), (event) => events.push(event))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(spawns, 'cancelling must not cost the conversation its process').toHaveLength(1)
+    expect(transports[0]!.sentPrompts).toContain('the next turn')
   })
 
   it('fails a send that waited on a retirement which then became unkillable', async () => {

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -356,6 +357,87 @@ describe('AntigravityProvider live model change', () => {
     },
     600_000
   )
+
+  it.runIf(live)(
+    'stops a run that is waiting on a real model-change retirement, and never runs the prompt it cancelled',
+    async () => {
+      // The same window the deterministic tests cover, against a real agy
+      // process: the predecessor is genuinely being terminated by the OS when
+      // Stop arrives, so nothing about the timing is simulated.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-cancel-live-'))
+      dirs.push(dir)
+      const secret = 'PELICAN-QUASAR-4'
+      const conversationId = 'pty-cancel-live'
+      const provider = new AntigravityProvider()
+      let turn = 0
+
+      const drive = (prompt: string, model: string, effort: 'low' | 'medium' | 'high' | null) =>
+        new Promise<{ text: string; nativeConversationId: string | null }>((resolve, reject) => {
+          let nativeConversationId: string | null = null
+          void provider
+            .sendMessage(
+              { ...input(dir, prompt), conversationId, runId: `cancel-run-${++turn}`, transport: 'pty', model, reasoningEffort: effort },
+              (event) => {
+                if (event.type === 'run.completed') {
+                  nativeConversationId = event.nativeConversationId ?? null
+                  resolve({ text: event.finalText, nativeConversationId })
+                }
+                if (event.type === 'run.failed') reject(new Error(event.error.message))
+                if (event.type === 'run.cancelled') reject(new Error('unexpected cancellation'))
+              }
+            )
+            .catch(reject)
+        })
+
+      // Two settled turns give agy a conversation id, so the next model
+      // change is really applied rather than deferred.
+      await drive(`Remember this secret word for later: ${secret}. Do not run any shell commands. Just acknowledge you noted it.`, 'claude-sonnet-4-6', null)
+      const second = await drive('What secret word did I ask you to remember? Reply with only that word.', 'claude-sonnet-4-6', null)
+      expect(second.nativeConversationId, 'the second prompt gives agy an id to resume').toMatch(/^[0-9a-f-]{20,}$/i)
+
+      // The model change retires the live process. `sendMessage` returns once
+      // the session is in `retiring` with the retirement installed, so Stop
+      // here always lands inside the window rather than racing it.
+      const cancelledPrompt = 'Write a 900 word essay about the history of the bicycle.'
+      const cancelledRunId = 'cancel-run-stopped'
+      const cancelledEvents: RuntimeEvent[] = []
+      await provider.sendMessage(
+        { ...input(dir, cancelledPrompt), conversationId, runId: cancelledRunId, transport: 'pty', model: 'gemini-3.8-flash', reasoningEffort: 'low' },
+        (event) => cancelledEvents.push(event)
+      )
+      // Sampled across the whole retirement+cancellation window: the
+      // single-owner invariant has to hold while a process is being killed
+      // and a replacement is (not) being started.
+      let peakProcesses = agyProcessesFor(dir)
+      const sampler = setInterval(() => {
+        peakProcesses = Math.max(peakProcesses, agyProcessesFor(dir))
+      }, 100)
+
+      await provider.cancelRun(cancelledRunId)
+
+      expect(cancelledEvents.filter((event) => event.type === 'run.cancelled'), 'Stop must be acknowledged exactly once').toHaveLength(1)
+
+      // Let the real predecessor finish exiting and the replacement spawn, if
+      // it were ever going to. It must not.
+      await new Promise((resolve) => setTimeout(resolve, 8_000))
+      clearInterval(sampler)
+      // Exactly one, not merely "at most one": a counter that saw nothing
+      // would make an at-most assertion pass vacuously.
+      expect(peakProcesses, 'exactly one agy process owns this conversation throughout').toBe(1)
+      expect(cancelledEvents.filter((event) => event.type === 'run.cancelled'), 'no duplicate cancellation').toHaveLength(1)
+      expect(cancelledEvents.some((event) => event.type === 'run.completed'), 'a cancelled run must never complete').toBe(false)
+      expect(cancelledEvents.some((event) => event.type === 'run.failed'), 'a cancelled run must not be reported as failed').toBe(false)
+      expect(cancelledEvents.some((event) => event.type === 'text.delta'), 'the cancelled prompt must never have run').toBe(false)
+
+      // Ownership was released by the predecessor's genuine exit, so the
+      // conversation is usable again — with its context intact.
+      const later = await drive('Once more: what was that secret word? Reply with only that word.', 'gemini-3.8-flash', 'low')
+      expect(later.text, 'the conversation must survive a cancelled model change').toContain(secret)
+
+      await provider.shutdown()
+    },
+    600_000
+  )
 })
 
 interface StreamingTrace {
@@ -442,4 +524,16 @@ function run(provider: AntigravityProvider, value: ProviderSendInput): Promise<{
     }
     void provider.sendMessage(value, onEvent).catch(reject)
   })
+}
+
+/** Live agy processes launched for one workspace, counted from the real
+ *  process table. Scoped by `--add-dir <workspace>` so an unrelated agy the
+ *  user happens to be running is never counted. */
+function agyProcessesFor(workspacePath: string): number {
+  try {
+    const listing = execFileSync('ps', ['-eo', 'args='], { encoding: 'utf8' })
+    return listing.split('\n').filter((line) => /(^|\/)agy\b/.test(line) && line.includes(`--add-dir ${workspacePath}`)).length
+  } catch {
+    return 0 // `ps` unavailable — the assertion this feeds is best-effort
+  }
 }

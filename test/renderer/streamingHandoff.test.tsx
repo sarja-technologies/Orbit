@@ -230,6 +230,33 @@ describe('streaming hand-off to the persisted assistant message', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
   })
 
+  it('returns the composer to Send once a stopped run reports itself cancelled', async () => {
+    // The renderer half of "Stop means Stop". The backend now answers a Stop
+    // pressed during a model-change retirement immediately, so `run.cancelled`
+    // can arrive without the run ever having produced a reply — the composer
+    // must leave the Stop state and the partial text must hand over to the
+    // persisted cancellation rather than lingering.
+    await startRun()
+    emit({ type: 'text.delta', delta: 'Half an answ' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    await screen.findByText('Half an answ')
+
+    await userEvent.click(screen.getByRole('button', { name: /stop generating/i }))
+    expect(api.runs.cancel).toHaveBeenCalledWith({ runId: 'run_1' })
+    // Nothing has come back yet, so the run is still live and still stoppable.
+    expect(screen.getByRole('button', { name: /stop generating/i })).toBeInTheDocument()
+
+    messages = [
+      message('m1', 'user', 'Tell me about bicycles'),
+      { ...message('m2', 'assistant', 'Request cancelled.'), status: 'cancelled' }
+    ]
+    emit({ type: 'run.cancelled' } as Partial<RuntimeEvent> & { type: 'run.cancelled' }, listener!)
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
+    expect(screen.queryByText('Half an answ'), 'the partial reply hands over to the stored cancellation').not.toBeInTheDocument()
+    // A cancelled turn renders as the transcript's own note, exactly once.
+    expect(screen.getAllByText('Cancelled')).toHaveLength(1)
+  })
+
   it('clears the live run once the refreshed transcript has taken over', async () => {
     await startRun()
     emit({ type: 'text.delta', delta: 'Answer.' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
