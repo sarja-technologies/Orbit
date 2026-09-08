@@ -233,23 +233,45 @@ describe('AntigravityProvider live streaming', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-stream-pty-live-'))
       dirs.push(dir)
       const provider = new AntigravityProvider()
-      const trace = await traceStreaming(provider, {
-        ...input(dir, 'Write a detailed 1200-word essay about the history of the bicycle, with several sections. Do not use any tools.'),
-        conversationId: 'pty-streaming-live',
-        transport: 'pty'
-      })
+      const subjects = [
+        'Write a detailed 1200-word essay about the history of the bicycle, with several sections. Do not use any tools.',
+        'Now write a detailed 1200-word essay about the history of the printing press, with several sections. Do not use any tools.'
+      ]
 
-      // How many deltas a live turn produces depends on how fast the model
-      // writes, so the assertion is on the property that actually matters:
-      // real text reached Orbit while the turn was still running. The
-      // multi-delta, no-duplication guarantees are asserted deterministically
-      // against recorded frames in antigravityPtyStreaming.test.ts.
-      expect(trace.deltas.length, 'expected assistant text before the result').toBeGreaterThan(0)
-      expect(trace.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(trace.completedAtMs)
-      expect(trace.completedAtMs - trace.firstDeltaAtMs).toBeGreaterThan(200)
-      expect(trace.finalText.length).toBeGreaterThan(500)
+      // agy paints its answer into the terminal at its own pace, and
+      // occasionally paints an entire one in a single repaint — in which
+      // case there is genuinely nothing incremental for Orbit to read, and
+      // `run.completed` carries the whole thing (see
+      // docs/antigravity-transports.md). Measured live: roughly one turn in
+      // eight. So this asks two consecutive turns of the same live session
+      // for progressive output and requires at least one to deliver it —
+      // enough that a real regression (which would stream nothing, ever)
+      // still fails, without pinning the suite to agy's pacing. The
+      // multi-delta, no-duplication and no-chrome guarantees are asserted
+      // deterministically against recorded frames in
+      // antigravityPtyStreaming.test.ts.
+      const traces: StreamingTrace[] = []
+      for (const [index, subject] of subjects.entries()) {
+        traces.push(
+          await traceStreaming(provider, {
+            ...input(dir, subject),
+            conversationId: 'pty-streaming-live',
+            runId: `pty-streaming-run-${index + 1}`,
+            transport: 'pty'
+          })
+        )
+        if (traces.at(-1)!.deltas.length > 0) break
+      }
+
+      // Every turn must produce a complete answer either way.
+      for (const trace of traces) expect(trace.finalText.length, 'expected a complete answer').toBeGreaterThan(500)
+
+      const streaming = traces.find((trace) => trace.deltas.length > 0)
+      expect(streaming, `no turn streamed any text (${traces.length} attempted)`).toBeDefined()
+      expect(streaming!.firstDeltaAtMs, 'expected text before the run completed').toBeLessThan(streaming!.completedAtMs)
+      expect(streaming!.completedAtMs - streaming!.firstDeltaAtMs).toBeGreaterThan(200)
       // No terminal chrome, tip line or account details ever reached the transcript.
-      const streamed = trace.deltas.join('')
+      const streamed = traces.flatMap((trace) => trace.deltas).join('')
       expect(streamed).not.toMatch(/[⠀-⣿]/)
       expect(streamed).not.toContain('for shortcuts')
       expect(streamed).not.toContain('Antigravity CLI')

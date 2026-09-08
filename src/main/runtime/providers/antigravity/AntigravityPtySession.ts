@@ -18,7 +18,7 @@ import type { ID, ProjectFile } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
-import { extractResponseText, progressiveAppendIndex } from '@main/terminal/TerminalInteractionDetector'
+import { extractResponseText, progressiveAppendIndex, promptHasBeenSubmitted } from '@main/terminal/TerminalInteractionDetector'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
@@ -44,6 +44,13 @@ const MAX_NATIVE_IMAGE_BYTES = 15 * 1024 * 1024
  *  beat after the raw `**` appears), and continuing to wait would freeze
  *  streaming for the rest of the turn. */
 const STREAM_RESYNC_AFTER_FRAMES = 3
+/** How long a turn may go without agy showing it as submitted before the
+ *  "has this turn started?" guard stops blocking. The real race that guard
+ *  exists for resolves in about a second; this is far above that and far
+ *  below any wait a user would tolerate. It exists purely so a guard can
+ *  never strand a turn: without it, a screen that somehow never shows the
+ *  submitted prompt would leave the run open forever. */
+const TURN_START_GRACE_MS = 10_000
 
 interface PendingInteraction {
   interactionId: string
@@ -119,6 +126,17 @@ export class AntigravityPtySession {
   /** Consecutive sampled frames that did not line up with `streamedText`.
    *  See STREAM_RESYNC_AFTER_FRAMES. */
   private divergedFrames = 0
+  /** Latched once this turn's own prompt has been seen echoed on screen.
+   *  Until then, a ready footer belongs to the screen as it was *before*
+   *  the prompt was submitted — see `turnHasStartedOnScreen`. */
+  private sawPromptEcho = false
+  /** A ready footer was refused because the turn had not started yet. The
+   *  transport is edge-triggered and will not report that same footer
+   *  again, so the refusal is remembered and settled from the grace timer
+   *  if nothing else resolves it. */
+  private refusedReady = false
+  private turnStartTimer: ReturnType<typeof setTimeout> | null = null
+  private graceExpired = false
   /** Checked once per session (the answer can't meaningfully change while
    *  Orbit is running) rather than on every attachment attempt. */
   private clipboardCapability: ClipboardCapability | null = null
@@ -237,7 +255,7 @@ export class AntigravityPtySession {
       onBusy: () => { if (isCurrent()) this.handleBusy() },
       onExit: (code, signal) => { if (isCurrent()) this.handleExit(code, signal) },
       onStreamText: (lines) => { if (isCurrent()) this.handleStreamText(lines) },
-      onScreenText: (lines) => { if (isCurrent()) this.lastScreenLines = lines }
+      onScreenText: (lines) => { if (isCurrent()) this.observeScreen(lines) }
     })
   }
 
@@ -272,6 +290,7 @@ export class AntigravityPtySession {
   }
 
   shutdown(): void {
+    this.clearTurnStartTimer()
     this.transport?.kill()
     this.state = 'idle'
   }
@@ -347,6 +366,68 @@ export class AntigravityPtySession {
     this.deliveredPrompt = prompt
     this.streamedText = ''
     this.divergedFrames = 0
+    this.sawPromptEcho = false
+    this.refusedReady = false
+    this.graceExpired = false
+    this.clearTurnStartTimer()
+    this.turnStartTimer = setTimeout(() => {
+      this.turnStartTimer = null
+      this.graceExpired = true
+      if (this.refusedReady && this.state === 'running') {
+        console.warn('[antigravity-pty] agy never showed this prompt as submitted; settling the turn on the ready footer that was held back.')
+        this.refusedReady = false
+        this.settleTurn()
+      }
+    }, TURN_START_GRACE_MS)
+    this.turnStartTimer.unref?.()
+  }
+
+  private clearTurnStartTimer(): void {
+    if (this.turnStartTimer) clearTimeout(this.turnStartTimer)
+    this.turnStartTimer = null
+  }
+
+  /** Whether the screen shows that agy has actually taken this turn on.
+   *
+   *  CRITICAL (real bug, captured live against agy 1.1.27): agy leaves its
+   *  ready footer on screen for a moment after a prompt is submitted —
+   *  sometimes longer than the transport's 450 ms idle debounce — and
+   *  `write()` deliberately clears the ready edge so the next footer counts
+   *  as a fresh transition. Together those mean the *pre-prompt* screen
+   *  could be read as "this turn is finished": the run settled roughly half
+   *  a second after being sent, with empty text, and the real answer was
+   *  then thrown away when it arrived. Captured evidence: two consecutive
+   *  idle snapshots, byte-identical, both the bare compose box and
+   *  `? for shortcuts`, with no echo of the prompt anywhere on screen.
+   *
+   *  A turn that has really started always shows its own prompt echoed
+   *  *and* an emptied compose box — agy echoes a prompt into the box as it
+   *  is typed, so the echo alone does not mean it was ever submitted (also
+   *  captured live: a run settled on exactly that half-typed screen). Once
+   *  seen, it is latched, so an answer long enough to scroll its own echo
+   *  out of the buffer still settles normally. With no screen to look
+   *  at (a transport that reports none), there is no evidence either way and
+   *  the previous behaviour stands. */
+  private turnHasStartedOnScreen(): boolean {
+    if (this.sawPromptEcho || this.graceExpired) return true
+    if (this.deliveredPrompt === null || this.lastScreenLines.length === 0) return true
+    return this.latchPromptEcho(this.lastScreenLines)
+  }
+
+  /** Records the latest idle snapshot, and notices this turn's prompt echo
+   *  on it. Every screen the session is shown goes through here so the
+   *  latch cannot be missed on the one frame that happened to carry it. */
+  private observeScreen(lines: string[]): void {
+    this.lastScreenLines = lines
+    this.latchPromptEcho(lines)
+  }
+
+  private latchPromptEcho(lines: string[]): boolean {
+    if (this.sawPromptEcho) return true
+    if (this.deliveredPrompt === null) return false
+    if (!promptHasBeenSubmitted(lines, this.deliveredPrompt)) return false
+    this.sawPromptEcho = true
+    return true
   }
 
   /** Turns the live terminal screen into ordinary Orbit `text.delta`
@@ -364,6 +445,7 @@ export class AntigravityPtySession {
     if (this.state !== 'running' || this.deliveringImages || this.cancelRequested) return
     const prompt = this.deliveredPrompt
     if (prompt === null) return
+    this.latchPromptEcho(lines)
     const candidate = extractResponseText(lines, { prompt, requirePromptEcho: true })
     if (!candidate || candidate === this.streamedText) return
     const appendAt = progressiveAppendIndex(this.streamedText, candidate)
@@ -432,10 +514,17 @@ export class AntigravityPtySession {
       }
       return
     }
-    if (this.state === 'running') this.settleTurn()
+    if (this.state === 'running') {
+      if (!this.turnHasStartedOnScreen()) {
+        this.refusedReady = true
+        return
+      }
+      this.settleTurn()
+    }
   }
 
   private settleTurn(): void {
+    this.clearTurnStartTimer()
     if (this.cancelRequested) {
       this.cancelRequested = false
       this.state = 'ready'
@@ -452,6 +541,7 @@ export class AntigravityPtySession {
   }
 
   private handleExit(code: number, signal?: number): void {
+    this.clearTurnStartTimer()
     const wasCancelled = this.cancelRequested
     this.cancelRequested = false
     this.transport = null

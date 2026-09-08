@@ -254,6 +254,12 @@ Both passed on three consecutive runs.
 - **A short answer cannot stream.** It arrives as one `DONE` delta (structured)
   or one screen repaint (PTY). There is nothing incremental to show, and
   Orbit does not invent any.
+- **Occasionally a whole PTY answer arrives in one repaint.** agy paints the
+  terminal at its own pace and sometimes lands an entire long answer between
+  two samples, leaving nothing incremental to read; `run.completed` carries
+  the complete text as always. Measured live at roughly one turn in eight,
+  which is why the live streaming test asks two consecutive turns for
+  progressive output and requires at least one to deliver it.
 - **PTY mid-flight text is not always byte-identical to the settled answer.**
   agy draws raw markdown first and resolves emphasis afterwards, so a
   resynchronized stretch is skipped mid-stream and arrives with the final
@@ -322,9 +328,11 @@ Three real bugs were found and fixed by this verification:
    send, where it was cleared within milliseconds. An attachment that can only
    be shared as a reference now says so while still in the composer.
 
-**Known limitation (not an attachment bug):** the *first* turn of a brand-new
-PTY session occasionally settles with empty extracted prose — observed once in
-three valid live runs. The attachment itself was still delivered in that run
+**Known limitation (not an attachment bug), since fixed:** the *first* turn of
+a brand-new PTY session occasionally settled with empty extracted prose —
+observed once in three valid live runs. Root-caused while verifying issue #2
+and fixed; see "A turn settling before it had started" under State-machine
+hardening below. The attachment itself was still delivered in that run
 (the sent thumbnail rendered, and the next turn in the same session answered
 correctly). This is the same first-turn extraction flake already recorded for
 the resume test above, not a regression in the attachment path.
@@ -456,6 +464,7 @@ Unit-tested (`test/main/clipboardCapability.test.ts`): Wayland/X11 detection fro
 
 Confirmed real bugs found and fixed via live testing, each now covered by a regression test:
 
+- **A turn settling before it had started** (found while verifying issue #2, pre-existing): agy can leave its `? for shortcuts` ready footer on screen for longer than the transport's 450 ms idle debounce after a prompt is submitted, and `write()` deliberately clears the ready edge so the next footer counts as a fresh transition. Together those let the *pre-prompt* screen be read as "this turn is finished": the run settled roughly half a second after being sent, with empty text, and the real answer was discarded when it arrived. This is the "first turn occasionally settles with empty extracted prose" flake recorded earlier in this document, now diagnosed. **Captured evidence**: two consecutive idle snapshots, byte-identical, both just the bare compose box and the ready footer, with no echo of the prompt anywhere. A second, subtler form was captured too — agy echoes a prompt into its compose box as it is *typed*, so the text is on screen before anything is submitted, and a screen caught mid-typing settled a run the same way. Fixed by requiring, before a running turn may settle, that the screen shows the prompt echoed **and** the compose box emptied (`promptHasBeenSubmitted`), latched once seen so a long answer that scrolls its own echo away still settles. Bounded by a 10 s grace so the guard can never strand a turn: measured live at 8 consecutive turns with no early settle and no hang, against roughly 1 in 7 before.
 - **Stale `wasReady`**: if a turn's response streams continuously with no idle gap, the transport's ready/busy edge-detection could latch a stale `true` from the *previous* ready state, so the real completion was silently never reported and the run hung forever. Fixed by resetting the edge flag on every `write()` into the PTY.
 - **`handleSnapshot` assignment ordering**: the edge flag's "new value" assignment happened *after* calling the handler, so a handler that itself wrote into the PTY synchronously (e.g. sending the next prompt) had its own reset immediately clobbered by the stale post-handler assignment. Fixed by latching the edge value before invoking the handler.
 - **`deliveringImages` / completion-during-image-paste race**: attaching an image via Ctrl+V returns to the same ready footer a real completed turn uses (pasting doesn't itself start generation) — without an explicit guard, this settled the run and left the text prompt unsent.

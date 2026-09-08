@@ -268,6 +268,48 @@ function stripComposeChrome(body: string[]): string[] {
   return body.slice(0, end)
 }
 
+/** Locates the on-screen echo of a known prompt: the `> ...` row it starts
+ *  on, and the first row after however many rows it word-wrapped onto.
+ *  Returns null when the screen's last echo is some *other* prompt — which
+ *  is how a screen still showing the previous turn, or one showing no turn
+ *  at all yet, is told apart from this turn's.
+ *
+ *  Comparison is whitespace-insensitive (the terminal re-wraps and pads) and
+ *  accepts a partially drawn echo, since a prompt is rendered a chunk at a
+ *  time. */
+export function findPromptEcho(lines: string[], prompt: string): { echoIdx: number; bodyStart: number } | null {
+  const echoIdx = findLastIndex(lines, (l) => PROMPT_ECHO_LINE.test(l))
+  if (echoIdx === -1) return null
+  const wanted = squashWhitespace(prompt)
+  let seen = squashWhitespace(lines[echoIdx]!.replace(/^>\s*/, ''))
+  if (!wanted.startsWith(seen)) return null
+  let bodyStart = echoIdx + 1
+  while (seen.length < wanted.length && bodyStart < lines.length) {
+    const next = squashWhitespace(lines[bodyStart]!)
+    if (!next) break
+    const merged = squashWhitespace(`${seen} ${next}`)
+    if (!wanted.startsWith(merged)) break
+    seen = merged
+    bodyStart++
+  }
+  return { echoIdx, bodyStart }
+}
+
+/** Whether the screen shows that `prompt` has actually been submitted, as
+ *  opposed to still sitting in the compose box waiting for Enter.
+ *
+ *  The two look alike — agy echoes a prompt into the box as it is typed, so
+ *  `> Write a detailed…` is on screen either way — and telling them apart
+ *  matters because a screen where nothing has been submitted yet still
+ *  carries the *previous* state's ready footer. Real captured difference:
+ *  once a prompt is submitted the input clears, so the last input row is a
+ *  bare `>`; while it is being typed, that same row still holds the text. */
+export function promptHasBeenSubmitted(lines: string[], prompt: string): boolean {
+  if (!findPromptEcho(lines, prompt)) return false
+  const lastInputIdx = findLastIndex(lines, (l) => l.trim().startsWith('>'))
+  return lastInputIdx !== -1 && lines[lastInputIdx]!.trim() === '>'
+}
+
 /** Best-effort extraction of "what agy actually said back" from the
  *  visible screen. agy's interactive TUI is a full-redraw display, not a
  *  text stream, so this reconstructs the reply from the screen: everything
@@ -288,26 +330,11 @@ export function extractResponseText(lines: string[], options: ExtractResponseOpt
   const echoIdx = findLastIndex(lines, (l) => PROMPT_ECHO_LINE.test(l))
   if (echoIdx === -1) return ''
 
-  let bodyStart = echoIdx + 1
-  let anchored = false
-  if (options.prompt) {
-    // Consume exactly the rows the known prompt wrapped onto. Comparison
-    // is whitespace-insensitive because the terminal re-wraps and pads.
-    const wanted = squashWhitespace(options.prompt)
-    let seen = squashWhitespace(lines[echoIdx]!.replace(/^>\s*/, ''))
-    if (wanted.startsWith(seen)) {
-      anchored = true
-      while (seen.length < wanted.length && bodyStart < lines.length) {
-        const next = squashWhitespace(lines[bodyStart]!)
-        if (!next) break
-        const merged = squashWhitespace(`${seen} ${next}`)
-        if (!wanted.startsWith(merged)) break
-        seen = merged
-        bodyStart++
-      }
-    }
-  }
-  if (!anchored) {
+  const anchor = options.prompt === undefined ? null : findPromptEcho(lines, options.prompt)
+  let bodyStart: number
+  if (anchor) {
+    bodyStart = anchor.bodyStart
+  } else {
     if (options.requirePromptEcho) return ''
     // A long prompt word-wraps across multiple physical rows with no blank
     // line between them (confirmed live) — without the prompt to match

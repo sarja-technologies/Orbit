@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AntigravityPtySession } from '../../src/main/runtime/providers/antigravity/AntigravityPtySession'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport, PtyInteraction } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
@@ -246,6 +246,73 @@ describe('AntigravityPtySession progressive response streaming', () => {
 
     expect(deltas(events)).toEqual([])
     expect(events.some((event) => event.type === 'interaction.required')).toBe(true)
+  })
+
+  it('does not settle a turn on the pre-prompt screen that is still showing when it is sent', () => {
+    // Captured live (agy 1.1.27): agy can leave its ready footer up for
+    // longer than the transport's idle debounce after a prompt is submitted,
+    // so the very next snapshot is the byte-identical *pre-prompt* screen —
+    // no echo, no answer. Reading that as completion settled the run about
+    // half a second after sending, with empty text, and the real answer was
+    // discarded when it finally arrived.
+    const { events, start } = harness()
+    const transport = start()
+    const prePrompt = [...BANNER, ...SETTLED_COMPOSE]
+
+    transport.snapshot(prePrompt)
+    transport.handlers!.onReadyForInput()
+
+    expect(events.some((event) => event.type === 'run.completed'), 'the turn had not started yet').toBe(false)
+
+    // The same is true one beat later, while agy is still echoing the prompt
+    // into its compose box: the text is on screen, but nothing has been
+    // submitted, and the ready footer is still the previous state's. This is
+    // the screen a real run was captured settling on, with an empty answer.
+    transport.snapshot([...BANNER, WIDE, `> ${PROMPT.slice(0, 30)}`, WIDE, '? for shortcuts                    Gemini 3.6 Flash · medium'])
+    transport.handlers!.onReadyForInput()
+
+    expect(events.some((event) => event.type === 'run.completed'), 'the prompt was still in the compose box').toBe(false)
+
+    // Once agy really takes the turn on, the ordinary flow settles it.
+    transport.stream(frame([P1, '⣽  Working...']))
+    transport.snapshot(frame([P1, P2], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+
+    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: [P1, P2].join('\n').trim() })
+  })
+
+  it('never strands a turn: a refused ready footer still settles once the grace period passes', async () => {
+    // The guard above must not be able to hold a run open forever. If agy
+    // somehow never shows the prompt as submitted, the held-back footer is
+    // honoured after a bounded wait rather than hanging.
+    vi.useFakeTimers()
+    try {
+      const { events, start } = harness()
+      const transport = start()
+      transport.snapshot([...BANNER, ...SETTLED_COMPOSE])
+      transport.handlers!.onReadyForInput()
+      expect(events.some((event) => event.type === 'run.completed')).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(11_000)
+      expect(events.some((event) => event.type === 'run.completed')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still settles a long answer whose own prompt echo has scrolled away', () => {
+    // The guard latches the moment the echo is seen, so an answer long
+    // enough to push its own echo out of the scrollback cannot hang.
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.snapshot(frame([P1]))
+    transport.stream(frame([P1, '⣽  Working...']))
+    // Echo gone; only the answer and the settled compose box remain.
+    transport.snapshot([P1, P2, P3, ...SETTLED_COMPOSE])
+    transport.handlers!.onReadyForInput()
+
+    expect(events.some((event) => event.type === 'run.completed')).toBe(true)
   })
 
   it('streams nothing before the prompt has actually been written into the session', () => {
