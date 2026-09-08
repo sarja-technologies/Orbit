@@ -11,21 +11,42 @@ class FakeTransport implements IAntigravityPtyTransport {
   mediaAttachedCount = 0
   handlers: AntigravityPtyHandlers | null = null
   sentPrompts: string[] = []
-  killCalls = 0
   start(handlers: AntigravityPtyHandlers): void {
     this.handlers = handlers
   }
   sendPrompt(prompt: string): void {
     this.sentPrompts.push(prompt)
+    // Real agy goes busy once a prompt is submitted; a fake that never does
+    // lets a test settle a turn the session has no evidence ever ran.
+    this.handlers?.onBusy()
   }
   respond(): boolean {
     return true
   }
   pasteClipboardImage(): void {}
   cancelTurn(): void {}
-  kill(): void {
+  /** Mirrors the real transport: `kill()` only *requests* termination, and
+   *  `isRunning` stays true until `exit()` is called to simulate the OS
+   *  process actually going away. Tests that flip `isRunning` synchronously
+   *  here cannot see the retirement race this models. */
+  killCalls = 0
+  killSignals: (string | undefined)[] = []
+  private markExited: () => void = () => undefined
+  private exited: Promise<void> = new Promise<void>((resolve) => {
+    this.markExited = resolve
+  })
+  kill(signal?: string): void {
     this.killCalls++
+    this.killSignals.push(signal)
+  }
+  whenExited(): Promise<void> {
+    return this.exited
+  }
+  /** Simulates the OS process finally exiting. */
+  exit(code = 0): void {
     this.isRunning = false
+    this.markExited()
+    this.handlers?.onExit(code)
   }
   resize(): void {}
 }

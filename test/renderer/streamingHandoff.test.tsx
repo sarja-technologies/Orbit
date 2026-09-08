@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/app/App'
@@ -163,6 +163,71 @@ describe('streaming hand-off to the persisted assistant message', () => {
     releaseOpen!()
     // And once the stored message lands, exactly one copy remains.
     await waitFor(() => expect(screen.getAllByText('A complete answer.')).toHaveLength(1))
+  })
+
+  it('keeps a late permission prompt visible when it arrives during the completion refresh', async () => {
+    // The exact ordering the review flagged. Antigravity reads the PTY screen
+    // asynchronously, so a prompt can arrive after the turn reported
+    // complete — while the refresh that completion started is still in
+    // flight. That refresh's cleanup used to retire the very run the prompt
+    // had just reclaimed, hiding a question the user has to answer and
+    // leaving the session wedged behind it.
+    await startRun()
+    emit({ type: 'text.delta', delta: 'Working on it.' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    await screen.findByText('Working on it.')
+
+    // 3. hold the refresh open.
+    releaseOpen = () => undefined
+    messages = [message('m1', 'user', 'Tell me about bicycles'), message('m2', 'assistant', 'Working on it.')]
+
+    // 4. completion starts the refresh.
+    emit({ type: 'run.completed', finalText: 'Working on it.', nativeConversationId: null } as Partial<RuntimeEvent> & { type: 'run.completed' }, listener!)
+    await waitFor(() => expect(releaseOpen).not.toBe(null))
+
+    // 5. the late prompt arrives before the refresh resolves.
+    emit(
+      {
+        type: 'interaction.required',
+        interactionId: 'run_1:pty:1',
+        kind: 'permission',
+        prompt: 'Requesting permission for:\nrm -rf build\n\nDo you want to proceed?',
+        options: [
+          { id: '1', label: 'Yes' },
+          { id: '2', label: 'No' }
+        ],
+        transport: 'pty',
+        canRespond: true,
+        sourceEvidence: 'native-prompt'
+      } as Partial<RuntimeEvent> & { type: 'interaction.required' },
+      listener!
+    )
+    const card = await screen.findByRole('group', { name: /approval/i })
+    expect(within(card).getByText('rm -rf build')).toBeInTheDocument()
+
+    // 6. release the refresh (and let later refreshes run unimpeded).
+    const release = releaseOpen!
+    releaseOpen = null
+    release()
+
+    // 7. the prompt must still be there, and still actionable.
+    await waitFor(() => expect(screen.getAllByText('Working on it.').length).toBeGreaterThan(0))
+    const survivor = screen.getByRole('group', { name: /approval/i })
+    expect(within(survivor).getByText('rm -rf build'), 'the late prompt must survive the completion refresh').toBeInTheDocument()
+    const approve = within(survivor).getAllByRole('button').find((button) => !(button as HTMLButtonElement).disabled)
+    expect(approve, 'an actionable option').toBeDefined()
+
+    // 8. answering it continues the normal lifecycle.
+    await userEvent.click(approve!)
+    await waitFor(() => expect(api.interactions.respond).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run_1', interactionId: 'run_1:pty:1' })))
+
+    emit({ type: 'interaction.resolved', interactionId: 'run_1:pty:1', outcome: 'approved' } as Partial<RuntimeEvent> & { type: 'interaction.resolved' }, listener!)
+    await waitFor(() => expect(screen.queryByRole('group', { name: /approval/i })).not.toBeInTheDocument())
+
+    // The run is still live (the turn resumed), and the following completion
+    // retires it for real.
+    messages = [message('m1', 'user', 'Tell me about bicycles'), message('m2', 'assistant', 'Done.')]
+    emit({ type: 'run.completed', finalText: 'Done.', nativeConversationId: null } as Partial<RuntimeEvent> & { type: 'run.completed' }, listener!)
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
   })
 
   it('clears the live run once the refreshed transcript has taken over', async () => {

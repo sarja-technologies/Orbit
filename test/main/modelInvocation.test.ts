@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ID, ModelOption } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
+import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 const spawnCalls: { command: string; args: string[] }[] = []
 
@@ -61,14 +62,40 @@ class NoopTransport implements IAntigravityPtyTransport {
   start(handlers: AntigravityPtyHandlers): void {
     this.handlers = handlers
   }
-  sendPrompt(): void {}
+  sentPrompts: string[] = []
+  sendPrompt(prompt: string): void {
+    this.sentPrompts.push(prompt)
+    // Real agy goes busy once a prompt is submitted; a fake that never does
+    // lets a test settle a turn the session has no evidence ever ran.
+    this.handlers?.onBusy()
+  }
   respond(): boolean {
     return true
   }
   pasteClipboardImage(): void {}
   cancelTurn(): void {}
-  kill(): void {
+  /** Mirrors the real transport: `kill()` only *requests* termination, and
+   *  `isRunning` stays true until `exit()` is called to simulate the OS
+   *  process actually going away. Tests that flip `isRunning` synchronously
+   *  here cannot see the retirement race this models. */
+  killCalls = 0
+  killSignals: (string | undefined)[] = []
+  private markExited: () => void = () => undefined
+  private exited: Promise<void> = new Promise<void>((resolve) => {
+    this.markExited = resolve
+  })
+  kill(signal?: string): void {
+    this.killCalls++
+    this.killSignals.push(signal)
+  }
+  whenExited(): Promise<void> {
+    return this.exited
+  }
+  /** Simulates the OS process finally exiting. */
+  exit(code = 0): void {
     this.isRunning = false
+    this.markExited()
+    this.handlers?.onExit(code)
   }
   resize(): void {}
 }
@@ -81,6 +108,16 @@ async function settleTurn(transport: NoopTransport): Promise<void> {
   transport.handlers?.onBusy()
   transport.handlers?.onReadyForInput()
   await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+/** settleTurn under fake timers: the same sequence, awaiting the timer
+ *  queue rather than real time. */
+async function settleTurnFake(transport: NoopTransport): Promise<void> {
+  transport.handlers?.onReadyForInput()
+  await vi.advanceTimersByTimeAsync(1)
+  transport.handlers?.onBusy()
+  transport.handlers?.onReadyForInput()
+  await vi.advanceTimersByTimeAsync(1)
 }
 
 function provider(): InstanceType<typeof AntigravityProvider> {
@@ -154,60 +191,161 @@ describe('model and effort reach the interactive PTY launch', () => {
   })
 })
 
-describe('a live pty session honours a later model change', () => {
-  it('retires the running process so the next turn respawns with the new flags', async () => {
-    const spawns: string[][] = []
-    const transports: NoopTransport[] = []
-    const instance = new AntigravityProvider(
-      (deps, conversationId) =>
-        new AntigravityPtySession(
-          {
-            ...deps,
-            createTransport: (_executable: string, _cwd: string, args: string[]) => {
-              spawns.push(args)
-              const transport = new NoopTransport()
-              transports.push(transport)
-              return transport
-            },
-            findConversationId: () => null
+/** Mirrors agy's real history.jsonl behaviour: a workspace gains a
+ *  conversation id only from its SECOND prompt onward (confirmed live — see
+ *  nativeConversationHistory.ts), so a conversation that has had exactly one
+ *  turn has no id to resume with. */
+function conversationIdFromSecondTurn(): () => string | null {
+  let turns = 0
+  return () => (++turns >= 2 ? 'ffffffff-1111-2222-3333-444444444444' : null)
+}
+
+function ptyHarness(findConversationId: () => string | null) {
+  const spawns: string[][] = []
+  const transports: NoopTransport[] = []
+  const instance = new AntigravityProvider(
+    (deps, conversationId) =>
+      new AntigravityPtySession(
+        {
+          ...deps,
+          createTransport: (_executable: string, _cwd: string, args: string[]) => {
+            spawns.push(args)
+            const transport = new NoopTransport()
+            transports.push(transport)
+            return transport
           },
-          conversationId
-        ),
-      async () => RAW_CATALOG
+          findConversationId
+        },
+        conversationId
+      ),
+    async () => RAW_CATALOG
+  )
+  return { instance, spawns, transports }
+}
+
+describe('a live pty session honours a later model change', () => {
+  it('does not discard conversation context when the model changes before a resumable id exists', async () => {
+    // The dangerous sequence: a brand-new conversation has had exactly one
+    // turn, so agy has recorded no conversation id for it, and the live
+    // process is the ONLY thing carrying its context. Retiring it here would
+    // silently start the conversation over under the new model.
+    const { instance, spawns, transports } = ptyHarness(() => null)
+    const events: RuntimeEvent[] = []
+
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), (event) =>
+      events.push(event)
     )
+    await new Promise((resolve) => setTimeout(resolve, 120))
+
+    // No second process, and the first one is untouched and still serving.
+    expect(spawns).toHaveLength(1)
+    expect(transports).toHaveLength(1)
+    expect(transports[0]!.killCalls).toBe(0)
+    expect(transports[0]!.isRunning).toBe(true)
+    // The turn still runs — on the model the session already had.
+    expect(transports[0]!.sentPrompts.length).toBeGreaterThan(0)
+    // And the user is told, rather than being shown a model that is not
+    // actually in use.
+    const notice = events.find((event) => event.type === 'run.notice')
+    expect(notice, 'expected an honest notice that the model change was deferred').toBeDefined()
+    expect((notice as { code: string }).code).toBe('model.deferred')
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+  })
+
+  it('applies the deferred model on the next turn, once a resumable id exists', async () => {
+    const { instance, spawns, transports } = ptyHarness(conversationIdFromSecondTurn())
+
+    await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    // Turn 2: no id yet, so the change is deferred and this turn reuses the
+    // live process. Settling it is what gives agy a second prompt, and
+    // therefore an id.
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await settleTurn(transports[0]!)
+    expect(spawns).toHaveLength(1)
+
+    // Turn 3: an id exists, so the change is finally applied — by retiring
+    // the old process and resuming the same native conversation.
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(spawns).toHaveLength(2)
+    expect(spawns[1]![spawns[1]!.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
+    expect(spawns[1]![spawns[1]!.indexOf('--effort') + 1]).toBe('low')
+    // Context is carried over rather than abandoned.
+    expect(spawns[1]).toContain('--conversation')
+    expect(spawns[1]![spawns[1]!.indexOf('--conversation') + 1]).toBe('ffffffff-1111-2222-3333-444444444444')
+  })
+
+  it('does not spawn the replacement until the retired process has really exited', async () => {
+    // The regression the review caught: `kill()` only requests termination.
+    // Until the OS process is genuinely gone, a second agy must not exist
+    // against the same native conversation.
+    const { instance, spawns, transports } = ptyHarness(() => 'aaaaaaaa-1111-2222-3333-444444444444')
 
     await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
     await settleTurn(transports[0]!)
 
     await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
-    await new Promise((resolve) => setTimeout(resolve, 120))
+    await new Promise((resolve) => setTimeout(resolve, 200))
 
+    // Termination was requested, the process is deliberately still alive —
+    // and crucially no replacement has been created.
+    expect(transports[0]!.killCalls).toBe(1)
+    expect(transports[0]!.isRunning).toBe(true)
+    expect(spawns).toHaveLength(1)
+    expect(transports).toHaveLength(1)
+
+    // Only the real exit releases the replacement.
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
     expect(spawns).toHaveLength(2)
-    expect(spawns[0]).toContain('claude-sonnet-4-6')
-    expect(spawns[1]?.[spawns[1].indexOf('--model') + 1]).toBe('gemini-3.8-flash')
-    expect(spawns[1]?.[spawns[1].indexOf('--effort') + 1]).toBe('low')
-    expect(transports[0]?.isRunning).toBe(false)
+    expect(transports[1]!.isRunning).toBe(true)
+  })
+
+  it('escalates to SIGKILL, and refuses to start a second owner if the process still will not exit', async () => {
+    vi.useFakeTimers()
+    try {
+      const { instance, spawns, transports } = ptyHarness(() => 'bbbbbbbb-1111-2222-3333-444444444444')
+      const events: RuntimeEvent[] = []
+
+      await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+      await settleTurnFake(transports[0]!)
+
+      await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), (event) =>
+        events.push(event)
+      )
+      await vi.advanceTimersByTimeAsync(20)
+      expect(transports[0]!.killSignals).toEqual([undefined])
+
+      // Past the polite bound: escalate.
+      await vi.advanceTimersByTimeAsync(4_100)
+      expect(transports[0]!.killSignals).toEqual([undefined, 'SIGKILL'])
+      expect(spawns).toHaveLength(1)
+
+      // Past the forced bound with the process still alive: fail the turn
+      // rather than run two agy processes against one conversation.
+      await vi.advanceTimersByTimeAsync(2_100)
+      expect(spawns, 'a second owner must never be created').toHaveLength(1)
+      const failure = events.find((event) => event.type === 'run.failed')
+      expect(failure).toBeDefined()
+      expect((failure as { error: { code: string; retryable: boolean } }).error.code).toBe('provider.retire_failed')
+      expect((failure as { error: { retryable: boolean } }).error.retryable).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not fail the new run when the retired process exits late', async () => {
-    const transports: NoopTransport[] = []
+    const { instance, transports } = ptyHarness(() => 'cccccccc-1111-2222-3333-444444444444')
     const events: string[] = []
-    const instance = new AntigravityProvider(
-      (deps, conversationId) =>
-        new AntigravityPtySession(
-          {
-            ...deps,
-            createTransport: () => {
-              const transport = new NoopTransport()
-              transports.push(transport)
-              return transport
-            },
-            findConversationId: () => null
-          },
-          conversationId
-        ),
-      async () => RAW_CATALOG
-    )
 
     await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
     await settleTurn(transports[0]!)
@@ -215,13 +353,13 @@ describe('a live pty session honours a later model change', () => {
     await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), (event) =>
       events.push(event.type)
     )
-    await new Promise((resolve) => setTimeout(resolve, 120))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // The old process exits, releasing the replacement; its exit callback
+    // must be silent rather than failing the new run.
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
 
-    // The old process only notices it was killed after the replacement is
-    // already live; that must be silent, not a failed run.
-    transports[0]?.handlers?.onExit(0)
     expect(events).not.toContain('run.failed')
-
     await settleTurn(transports[1]!)
     expect(events).toContain('run.completed')
   })

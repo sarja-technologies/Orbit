@@ -297,6 +297,67 @@ describe('AntigravityProvider live streaming', () => {
   )
 })
 
+// Issue: changing the model on a live PTY conversation must never silently
+// start that conversation over. agy records no conversation id for a
+// workspace until its SECOND prompt, so a change requested after turn one
+// has nothing to resume with — Orbit defers it rather than killing the only
+// process carrying the context. This drives the whole sequence against the
+// real CLI and checks the context actually survives.
+describe('AntigravityProvider live model change', () => {
+  it.runIf(live)(
+    'defers a model change until the conversation can be resumed, then applies it without losing context',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-model-live-'))
+      dirs.push(dir)
+      const secret = 'BANANA-COMET-7'
+      const conversationId = 'pty-model-change-live'
+      const provider = new AntigravityProvider()
+      let turn = 0
+
+      const drive = (prompt: string, model: string, effort: 'low' | 'medium' | 'high' | null) =>
+        new Promise<{ text: string; notices: string[]; nativeConversationId: string | null }>((resolve, reject) => {
+          const notices: string[] = []
+          let nativeConversationId: string | null = null
+          void provider
+            .sendMessage(
+              { ...input(dir, prompt), conversationId, runId: `model-run-${++turn}`, transport: 'pty', model, reasoningEffort: effort },
+              (event) => {
+                if (event.type === 'run.notice') notices.push(event.code)
+                if (event.type === 'run.completed') {
+                  nativeConversationId = event.nativeConversationId ?? null
+                  resolve({ text: event.finalText, notices, nativeConversationId })
+                }
+                if (event.type === 'run.failed') reject(new Error(event.error.message))
+                if (event.type === 'run.cancelled') reject(new Error('unexpected cancellation'))
+              }
+            )
+            .catch(reject)
+        })
+
+      // Turn 1 establishes context. agy has no conversation id for this
+      // workspace yet.
+      const first = await drive(`Remember this secret word for later: ${secret}. Do not run any shell commands. Just acknowledge you noted it.`, 'claude-sonnet-4-6', null)
+      expect(first.nativeConversationId, 'agy records no id until the second prompt').toBeNull()
+
+      // Turn 2 changes the model. There is still nothing to resume with, so
+      // the change must be deferred rather than destroying the only process
+      // holding the conversation — and the context must survive.
+      const second = await drive('What secret word did I ask you to remember? Reply with only that word.', 'gemini-3.8-flash', 'low')
+      expect(second.notices, 'the deferred model change must be reported honestly').toContain('model.deferred')
+      expect(second.text, 'context must survive a model change requested too early').toContain(secret)
+      expect(second.nativeConversationId, 'the second prompt gives agy an id').toMatch(/^[0-9a-f-]{20,}$/i)
+
+      // Turn 3: an id now exists, so the change is applied for real — the
+      // old process is retired and the same native conversation resumed.
+      const third = await drive('Once more: what was that secret word? Reply with only that word.', 'gemini-3.8-flash', 'low')
+      expect(third.text, 'context must survive the retire-and-resume').toContain(secret)
+
+      await provider.shutdown()
+    },
+    600_000
+  )
+})
+
 interface StreamingTrace {
   deltas: string[]
   firstDeltaAtMs: number

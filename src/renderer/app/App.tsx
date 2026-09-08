@@ -89,6 +89,13 @@ export function App(): JSX.Element {
   /** Sessions whose reasoning tier has already been settled this launch, so
    *  seeding a migrated session can never turn into a write loop. */
   const seededEffortIds = useRef(new Set<ID>())
+  /** Runs that currently owe the user an answer to a native prompt.
+   *
+   *  A ref rather than derived state because it is read from inside the
+   *  completion refresh's `finally`, which runs long after that refresh was
+   *  started and must see what is true *now*, not what was true when the run
+   *  completed — see `refreshAfterRun`. */
+  const runsAwaitingInteraction = useRef(new Set<ID>())
 
   const projects = useMemo(() => tree.map((group) => group.project), [tree])
   const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
@@ -256,6 +263,15 @@ export function App(): JSX.Element {
     } finally {
       setRunningRunByConversation((current) => {
         if (current[conversationId] !== runId) return current
+        // CRITICAL: Antigravity can raise a prompt *after* reporting the turn
+        // complete, and this refresh may still have been in flight when it
+        // did. That prompt puts the run back in charge of the conversation,
+        // and retiring it here — merely because the id still matches the run
+        // this refresh was started for — would hide a question the user has
+        // to answer and leave the session wedged behind it. A run that owes
+        // the user an answer keeps the conversation; the next completion
+        // retires it.
+        if (runsAwaitingInteraction.current.has(runId)) return current
         const next = { ...current }
         delete next[conversationId]
         return next
@@ -272,6 +288,7 @@ export function App(): JSX.Element {
   function applyRuntimeEvent(event: RuntimeEvent): void {
     if (event.type === 'interaction.required') {
       if (event.canRespond) {
+        runsAwaitingInteraction.current.add(event.runId)
         setPendingByRun((current) => ({ ...current, [event.runId]: event }))
         // Antigravity can raise a prompt after it has already reported the
         // turn complete (the PTY screen is read asynchronously). Without
@@ -283,6 +300,7 @@ export function App(): JSX.Element {
       } else setUnavailableByRun((current) => ({ ...current, [event.runId]: event }))
     }
     if (event.type === 'interaction.resolved') {
+      runsAwaitingInteraction.current.delete(event.runId)
       setPendingByRun((current) => {
         const pending = current[event.runId]
         if (pending && pending.interactionId === event.interactionId) {
@@ -303,7 +321,12 @@ export function App(): JSX.Element {
       setSelectedArtifactId(event.artifact.id)
       void openProject(event.projectId, event.conversationId)
     }
+    if (event.type === 'run.notice') setNotice(event.message)
     if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
+      // The turn is over; anything it was waiting on is stale. A prompt that
+      // arrives *after* this re-adds itself above, and the refresh below then
+      // leaves the run alone.
+      runsAwaitingInteraction.current.delete(event.runId)
       setPendingByRun((current) => {
         const next = { ...current }
         delete next[event.runId]

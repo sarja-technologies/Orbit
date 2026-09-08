@@ -83,6 +83,9 @@ export interface AntigravityPtyHandlers {
 /** Structural interface the PTY session programs against — lets tests
  *  inject a fake transport without spawning a real `agy` process. */
 export interface IAntigravityPtyTransport {
+  /** True until the OS process has *actually* exited — never merely because
+   *  termination was requested. Retirement correctness depends on this: a
+   *  replacement `agy` must not exist while its predecessor still does. */
   readonly isRunning: boolean
   readonly mediaAttachedCount: number
   start(handlers: AntigravityPtyHandlers): void
@@ -90,7 +93,13 @@ export interface IAntigravityPtyTransport {
   respond(pending: PtyInteraction, optionId: string): boolean
   pasteClipboardImage(): void
   cancelTurn(): void
-  kill(): void
+  /** Requests termination. Returns once the request has been made, NOT once
+   *  the process is gone — await `whenExited()` for that. `signal` escalates
+   *  (e.g. 'SIGKILL') when a polite request was not honoured. */
+  kill(signal?: string): void
+  /** Resolves when the process has genuinely exited (or immediately if it
+   *  was never started, or has already exited). */
+  whenExited(): Promise<void>
   resize(cols: number, rows: number): void
 }
 
@@ -107,6 +116,11 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
   private lastRespondedAtMs = 0
   private mediaAttached = 0
   private lastStreamSampleAtMs = 0
+  /** Termination has been requested but the process may still be alive.
+   *  Kept separate from `running` on purpose — see `kill`. */
+  private terminating = false
+  private exited: Promise<void> = Promise.resolve()
+  private markExited: () => void = () => undefined
 
   constructor(
     private readonly executable: string,
@@ -116,6 +130,9 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
 
   start(handlers: AntigravityPtyHandlers): void {
     this.handlers = handlers
+    this.exited = new Promise<void>((resolve) => {
+      this.markExited = resolve
+    })
     this.proc = pty.spawn(this.executable, this.args, {
       name: 'xterm-256color',
       cols: 120,
@@ -132,7 +149,12 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
       this.scheduleSnapshot()
     })
     this.proc.onExit(({ exitCode, signal }) => {
+      // The single point at which this process is known to be gone. Settled
+      // before the handler runs, so a throwing handler cannot leave a
+      // retirement waiting forever.
       this.running = false
+      this.terminating = false
+      this.markExited()
       if (this.idleTimer) clearTimeout(this.idleTimer)
       this.screen.dispose()
       handlers.onExit(exitCode, signal)
@@ -161,7 +183,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
    *  currently pending interaction's own options (never accepts an
    *  arbitrary renderer-supplied payload). */
   respond(pending: PtyInteraction, optionId: string): boolean {
-    if (!this.running || this.pendingSignature !== pending.signature) return false
+    if (!this.running || this.terminating || this.pendingSignature !== pending.signature) return false
     const option = pending.options.find((candidate) => candidate.id === optionId)
     if (!option) return false
     this.lastRespondedSignature = pending.signature
@@ -193,9 +215,31 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     this.write(ESCAPE)
   }
 
-  kill(): void {
-    this.proc?.kill()
-    this.running = false
+  /** CRITICAL (correctness, not tidiness): this only *requests* termination.
+   *  It deliberately does not flip `isRunning`, because the OS process
+   *  outlives the request — and `AntigravityPtySession` retires a process
+   *  before spawning its replacement against the same native conversation.
+   *  Reporting "not running" here let the replacement start while the
+   *  predecessor was still alive, which is exactly the single-owner
+   *  invariant the PTY transport exists to keep. Only the real exit callback
+   *  clears `running`; `whenExited()` is how callers wait for it. */
+  kill(signal?: string): void {
+    if (!this.proc) {
+      this.running = false
+      this.markExited()
+      return
+    }
+    this.terminating = true
+    try {
+      this.proc.kill(signal)
+    } catch {
+      // Already gone, or the signal was refused; the exit callback (or the
+      // caller's bounded wait) is the authority either way.
+    }
+  }
+
+  whenExited(): Promise<void> {
+    return this.exited
   }
 
   resize(cols: number, rows: number): void {
@@ -208,7 +252,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
   }
 
   private write(value: string): void {
-    if (!this.running) return
+    if (!this.running || this.terminating) return
     // CRITICAL (real bug, confirmed live against agy 1.1.27): whenever we
     // write anything, the terminal is expected to change and the NEXT
     // observed ready-for-input footer must count as a fresh transition —
@@ -226,7 +270,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
    *  parsed, so callers only ever see complete frames. */
   private sampleStreamText(): void {
     const onStreamText = this.handlers?.onStreamText
-    if (!onStreamText || !this.running) return
+    if (!onStreamText || !this.running || this.terminating) return
     if (!this.screen.isDrained) return
     const now = Date.now()
     if (now - this.lastStreamSampleAtMs < STREAM_SAMPLE_MS) return

@@ -29,12 +29,15 @@ type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'waiting_fo
 const MEDIA_PASTE_CONFIRM_TIMEOUT_MS = 8000
 const MEDIA_PASTE_POLL_INTERVAL_MS = 200
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
+/** How long a retired process gets to exit after a polite request, and then
+ *  again after SIGKILL. A replacement is only ever spawned once the
+ *  predecessor is *proven* gone. */
+const RETIRE_TIMEOUT_MS = 4_000
+const RETIRE_FORCE_TIMEOUT_MS = 2_000
+
 /** Orbit application policy, not a proven `agy`/clipboard limit — see
  *  docs/antigravity-transports.md. Reused from AgentDock Pro's identical
  *  application-level cap. */
-const RETIRE_POLL_MS = 50
-const RETIRE_TIMEOUT_MS = 4_000
-
 const MAX_NATIVE_IMAGE_BYTES = 15 * 1024 * 1024
 /** How many consecutive frames may fail to line up with what has already
  *  been streamed before the reader gives up on matching and resynchronizes
@@ -135,8 +138,15 @@ export class AntigravityPtySession {
    *  again, so the refusal is remembered and settled from the grace timer
    *  if nothing else resolves it. */
   private refusedReady = false
+  /** Latched when agy showed its busy footer during this turn. */
+  private sawBusy = false
   private turnStartTimer: ReturnType<typeof setTimeout> | null = null
   private graceExpired = false
+  /** Set while a process this session detached is still exiting. A spawn
+   *  waits on it, so a replacement can never overlap a predecessor holding
+   *  the same native conversation — whichever path retired it. Null in the
+   *  ordinary case, where spawning stays synchronous. */
+  private retiring: Promise<unknown> | null = null
   /** Checked once per session (the answer can't meaningfully change while
    *  Orbit is running) rather than on every attachment attempt. */
   private clipboardCapability: ClipboardCapability | null = null
@@ -194,6 +204,28 @@ export class AntigravityPtySession {
     // lost: the replacement resumes with `--conversation`.
     const invocation = (this.deps.invocationArgs?.(input) ?? []).join(' ')
     if (this.transport?.isRunning && this.state === 'ready' && this.spawnedInvocation !== invocation) {
+      // CRITICAL: retiring this process is only safe if the conversation can
+      // actually be resumed afterwards. agy does not record a conversation
+      // id for a workspace until its SECOND prompt (confirmed live — see
+      // nativeConversationHistory.ts), so a conversation that has had
+      // exactly one turn has none, and the live process is the *only* thing
+      // carrying its context. Killing it there would silently start the
+      // conversation over under the new model. The selection is kept, and
+      // applied on a later turn once there is an id to resume with.
+      if (!this.nativeConversationId) {
+        // `spawnedInvocation` is deliberately left alone, so the mismatch
+        // is re-evaluated — and acted on — on the next turn.
+        this.state = 'running'
+        this.emit({ type: 'run.started', nativeConversationId: this.nativeConversationId })
+        this.emit({
+          type: 'run.notice',
+          code: 'model.deferred',
+          message:
+            'Antigravity is still using the model this session started with. A new model can only be applied once this conversation can be resumed, which takes one more turn — it will apply automatically from the next message.'
+        })
+        void this.deliverPrompt(input.prompt, images)
+        return
+      }
       const retired = this.transport
       // Detach first: its exit callback must not be read as this session
       // dying, and the screen it leaves behind must not be mistaken for the
@@ -201,12 +233,13 @@ export class AntigravityPtySession {
       this.transport = null
       this.state = 'idle'
       this.lastScreenLines = []
-      retired.kill()
       // Two agy processes must never hold the same native conversation at
       // once — the replacement resumes it, and a still-exiting predecessor
       // makes that resume replay into a screen the extractor then reads as
-      // the answer. Wait for the old process to actually be gone.
-      void this.awaitExit(retired).then(() => this.spawn(input, images, invocation))
+      // the answer. The replacement is spawned only once the old process is
+      // proven gone; if it cannot be, the turn fails rather than creating a
+      // second owner.
+      void this.retireThenSpawn(retired, input, images, invocation)
       return
     }
 
@@ -217,15 +250,69 @@ export class AntigravityPtySession {
       return
     }
 
+    const retiring = this.retiring
+    if (retiring) {
+      // A process this session detached is still exiting (see shutdown).
+      // Claim the session first so a second send cannot interleave, then
+      // wait it out rather than running two agy processes at once.
+      this.state = 'bootstrapping'
+      void retiring.then(() => this.spawn(input, images, invocation))
+      return
+    }
     this.spawn(input, images, invocation)
   }
 
-  /** Polls rather than listening: the retired transport's callbacks are
-   *  deliberately detached by then. Bounded so a wedged process can never
-   *  strand the conversation. */
-  private async awaitExit(transport: IAntigravityPtyTransport): Promise<void> {
-    for (let waited = 0; waited < RETIRE_TIMEOUT_MS && transport.isRunning; waited += RETIRE_POLL_MS) {
-      await wait(RETIRE_POLL_MS)
+  /** Retires the previous process and only then spawns its replacement.
+   *
+   *  Waiting is on the transport's real exit acknowledgement, not on a
+   *  request-to-terminate: `kill()` returns long before the OS process is
+   *  gone. A polite request is given RETIRE_TIMEOUT_MS, then SIGKILL is
+   *  given RETIRE_FORCE_TIMEOUT_MS. If the process still has not exited,
+   *  Orbit refuses to spawn a second owner of the same native conversation
+   *  and fails the turn instead — a failed turn is recoverable, two agy
+   *  processes writing into one conversation is not. */
+  private async retireThenSpawn(
+    retired: IAntigravityPtyTransport,
+    input: ProviderSendInput,
+    images: ImageAttachment[],
+    invocation: string
+  ): Promise<void> {
+    retired.kill()
+    if (!(await this.awaitExit(retired, RETIRE_TIMEOUT_MS))) {
+      console.warn('[antigravity-pty] the previous agy process did not exit when asked; escalating to SIGKILL.')
+      retired.kill('SIGKILL')
+      if (!(await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS))) {
+        this.state = 'idle'
+        this.emit({
+          type: 'run.failed',
+          error: {
+            code: 'provider.retire_failed',
+            message:
+              'The previous Antigravity process for this session would not exit, so Orbit stopped rather than run a second one against the same conversation. Close and reopen this session, or restart Orbit, then try again.',
+            retryable: true
+          }
+        })
+        return
+      }
+    }
+    this.spawn(input, images, invocation)
+  }
+
+  /** True once the transport reports a real exit; false if the bound passed
+   *  first. Races the transport's own exit acknowledgement against a timer
+   *  rather than polling a flag that termination alone can flip. */
+  private async awaitExit(transport: IAntigravityPtyTransport, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timedOut = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs)
+    })
+    try {
+      const exited = await Promise.race([transport.whenExited().then(() => true as const), timedOut])
+      // `whenExited` resolving is the authority, but a transport that
+      // resolves early would still be caught by the live flag.
+      return exited === true && !transport.isRunning
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
@@ -291,8 +378,23 @@ export class AntigravityPtySession {
 
   shutdown(): void {
     this.clearTurnStartTimer()
-    this.transport?.kill()
+    const retired = this.transport
+    // Detached and recorded, not just killed: `kill()` returns before the
+    // process is gone, and a later send() must not spawn a second owner of
+    // the same native conversation on top of it.
+    this.transport = null
     this.state = 'idle'
+    if (!retired) return
+    retired.kill()
+    const retirement = this.awaitExit(retired, RETIRE_TIMEOUT_MS).then(async (exited) => {
+      if (exited) return
+      retired.kill('SIGKILL')
+      await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)
+    })
+    this.retiring = retirement
+    void retirement.finally(() => {
+      if (this.retiring === retirement) this.retiring = null
+    })
   }
 
   /** Real, verified clipboard-paste choreography (see nativeClipboardImage
@@ -367,6 +469,7 @@ export class AntigravityPtySession {
     this.streamedText = ''
     this.divergedFrames = 0
     this.sawPromptEcho = false
+    this.sawBusy = false
     this.refusedReady = false
     this.graceExpired = false
     this.clearTurnStartTimer()
@@ -408,6 +511,37 @@ export class AntigravityPtySession {
    *  out of the buffer still settles normally. With no screen to look
    *  at (a transport that reports none), there is no evidence either way and
    *  the previous behaviour stands. */
+  /** Whether the ready footer on screen really means *this* turn is over.
+   *
+   *  Two things have to be true, and each was a real captured failure:
+   *
+   *  1. agy has taken the prompt on at all (`turnHasStartedOnScreen`).
+   *  2. it has actually done something with it — either it was seen working,
+   *     or there is a reply on screen to settle with. Captured live on a
+   *     freshly resumed process (`--conversation`): agy echoes the submitted
+   *     prompt and is still showing the ready footer from the replayed
+   *     history, so condition 1 alone settled the turn instantly with an
+   *     empty answer and the real reply was thrown away.
+   *
+   *  Requiring the busy footer *alone* would not do: a turn whose answer
+   *  streams continuously never produces an idle snapshot while it works, so
+   *  the first one arrives at the end with the whole reply already on it.
+   *  Hence "seen working OR has something to say", bounded by the grace
+   *  timer so neither can strand the run. */
+  private turnMaySettle(): boolean {
+    // A cancelled turn is settled by the user, not by evidence of work — it
+    // may have been stopped before agy ever started (mid image-paste, say).
+    if (this.cancelRequested || this.graceExpired) return true
+    if (!this.turnHasStartedOnScreen()) return false
+    return this.sawBusy || this.settleText().length > 0
+  }
+
+  /** The reply as `settleTurn` will read it, so the decision to settle and
+   *  the text settled with can never disagree. */
+  private settleText(): string {
+    return extractResponseText(this.lastScreenLines, this.deliveredPrompt === null ? {} : { prompt: this.deliveredPrompt })
+  }
+
   private turnHasStartedOnScreen(): boolean {
     if (this.sawPromptEcho || this.graceExpired) return true
     if (this.deliveredPrompt === null || this.lastScreenLines.length === 0) return true
@@ -496,6 +630,7 @@ export class AntigravityPtySession {
   }
 
   private handleBusy(): void {
+    this.sawBusy = true
     if (this.state === 'bootstrapping') this.state = 'running'
   }
 
@@ -515,7 +650,7 @@ export class AntigravityPtySession {
       return
     }
     if (this.state === 'running') {
-      if (!this.turnHasStartedOnScreen()) {
+      if (!this.turnMaySettle()) {
         this.refusedReady = true
         return
       }
@@ -532,7 +667,7 @@ export class AntigravityPtySession {
       return
     }
     this.state = 'ready'
-    this.text = extractResponseText(this.lastScreenLines, this.deliveredPrompt === null ? {} : { prompt: this.deliveredPrompt })
+    this.text = this.settleText()
     if (!this.nativeConversationId && this.currentInput) {
       const lookup = this.deps.findConversationId ?? findRecentConversationId
       this.nativeConversationId = lookup(this.currentInput.workspacePath)

@@ -252,7 +252,7 @@ behave differently. Measured across this branch's verification (macOS, agy
 | `streams a long PTY answer` | ~1 turn in 8 paints its whole answer in one repaint | agy's pacing; the test asks two turns and requires one to stream |
 | `streams a long structured answer` | occasionally flushes a whole answer in one delta | same, same mitigation |
 | `uses the installed signed-in agy runtime` | ~1 run in 8 fails a strict `toBe('ORBIT_AGENTDOCK_AGY_OK')` | pre-existing test asserting exact model output; left as is |
-| `resumes a real native conversation` | ~1 run in 8 settles with empty text | the pre-existing resume flake already recorded above; one such run was observed taking the 10 s grace path, i.e. agy never showed the prompt as submitted at all |
+| `resumes a real native conversation` | was ~1 run in 8 settling with empty text | **root-caused and fixed** — it was the resume form of the premature-settle race (see State-machine hardening). 2/2 full live suites green since. |
 
 None of these are deterministic-suite failures: `npm run verify` (369 tests)
 is green, and every guarantee they probe is also asserted deterministically
@@ -467,6 +467,71 @@ Unit-tested (`test/main/clipboardCapability.test.ts`): Wayland/X11 detection fro
 
 `@xterm/headless@6.0.0`'s `package.json` `"module"` field points at a file that does not exist in the published package (`lib/xterm.mjs`); the real ESM entry is `lib-headless/xterm-headless.mjs`. Left unaliased, this either fails Vite/Rollup resolution outright, or — if naively marked `external` to work around that — produces a real production bundle that does `import { Terminal } from "@xterm/headless"` against Node's own ESM loader, which cannot synthesize that named export from the package's CJS build and **crashes the whole Electron app on launch**. Both failure modes were reproduced live. Fixed in `electron.vite.config.ts` with an explicit `resolve.alias` pointing straight at the real file, letting Rollup bundle it (and perform CJS/ESM interop) instead of externalizing it.
 
+## Retiring a PTY process (single ownership)
+
+Two `agy` processes must never hold the same native conversation at once: the
+replacement resumes it, and a still-live predecessor makes that resume replay
+into a screen the extractor then reads as the answer.
+
+`AntigravityPtyTransport.kill()` therefore only *requests* termination. It
+deliberately does **not** flip `isRunning` — an earlier version did, which
+meant a wait-for-exit returned immediately and a replacement could be spawned
+while its predecessor was still alive. Only the real `onExit` callback clears
+it, and `whenExited()` is how callers wait for that. `kill(signal)` takes an
+optional signal so a polite request can be escalated.
+
+Retirement (`AntigravityPtySession.retireThenSpawn`) is therefore:
+
+```text
+kill()  →  wait up to 4 s for the real exit
+        →  still alive? kill('SIGKILL')  →  wait up to 2 s
+        →  still alive? DO NOT SPAWN — fail the turn (provider.retire_failed)
+```
+
+A failed turn is recoverable; two agy processes writing into one conversation
+is not. `shutdown()` follows the same rule: it detaches and records the
+retirement, and a later `send()` waits for it before spawning, so no path can
+produce an overlap. Verified live by sampling the process table across a real
+model change — the count for the workspace never exceeded 1.
+
+Regression coverage: `test/main/antigravityPtyTransportLifecycle.test.ts`
+drives a *real* PTY (a trivial `sh` that ignores `TERM`/`HUP`/`INT`) and
+asserts `isRunning` stays true after `kill()`, that `whenExited()` does not
+resolve on request alone, and that SIGKILL actually ends it. The fake
+transports in every other suite now model the same distinction — the previous
+fakes flipped `isRunning` synchronously in `kill()`, which is exactly what hid
+the bug.
+
+## Changing model on a live PTY conversation
+
+A live `agy` process is bound to the flags it was launched with, so changing
+model or effort means retiring it and resuming with `--conversation`. That is
+only safe when there *is* something to resume with — and agy records no
+conversation id for a workspace until its **second** prompt.
+
+So a conversation that has had exactly one turn has no id, and the live
+process is the only thing carrying its context. Retiring it there would
+silently start the conversation over under the new model, losing everything
+said so far. Orbit refuses:
+
+| State when the model changes | What happens |
+| --- | --- |
+| No native conversation id yet | The change is **deferred**. The turn runs on the process the session already has, and a `run.notice` (`model.deferred`) tells the user in plain words that the new model applies from the next message. `spawnedInvocation` is left alone, so the mismatch is re-evaluated next turn. |
+| A native id exists | The process is retired (above) and the replacement resumes the same conversation with the new flags. |
+| No live process at all | A fresh spawn with the new flags, resuming by id when one is known. Nothing is lost that could have been kept. |
+
+Because settling a turn is what lets Orbit read agy's history file, the
+deferral resolves itself: the deferred turn *is* the second prompt, so the
+next turn applies the change for real. Worst case, a model change takes effect
+one message later — stated honestly, rather than pretended.
+
+**Live-verified end to end** (`AntigravityProvider live model change`, and
+again through the real Electron app): a secret established on turn 1 under
+`claude-sonnet-4-6` was still recalled on turn 2 after switching to
+`gemini-3.8-flash --effort low` (deferred, notice shown), and again on turn 3
+after the change was really applied — with the live process observably running
+`--model gemini-3.8-flash --effort low --conversation <id>`.
+
 ## Transport continuity
 
 | From → To | Status |
@@ -481,7 +546,7 @@ Unit-tested (`test/main/clipboardCapability.test.ts`): Wayland/X11 detection fro
 
 Confirmed real bugs found and fixed via live testing, each now covered by a regression test:
 
-- **A turn settling before it had started** (found while verifying issue #2, pre-existing): agy can leave its `? for shortcuts` ready footer on screen for longer than the transport's 450 ms idle debounce after a prompt is submitted, and `write()` deliberately clears the ready edge so the next footer counts as a fresh transition. Together those let the *pre-prompt* screen be read as "this turn is finished": the run settled roughly half a second after being sent, with empty text, and the real answer was discarded when it arrived. This is the "first turn occasionally settles with empty extracted prose" flake recorded earlier in this document, now diagnosed. **Captured evidence**: two consecutive idle snapshots, byte-identical, both just the bare compose box and the ready footer, with no echo of the prompt anywhere. A second, subtler form was captured too — agy echoes a prompt into its compose box as it is *typed*, so the text is on screen before anything is submitted, and a screen caught mid-typing settled a run the same way. Fixed by requiring, before a running turn may settle, that the screen shows the prompt echoed **and** the compose box emptied (`promptHasBeenSubmitted`), latched once seen so a long answer that scrolls its own echo away still settles. Bounded by a 10 s grace so the guard can never strand a turn: measured live at 8 consecutive turns with no early settle and no hang, against roughly 1 in 7 before.
+- **A turn settling before it had started** (found while verifying issue #2, pre-existing): agy can leave its `? for shortcuts` ready footer on screen for longer than the transport's 450 ms idle debounce after a prompt is submitted, and `write()` deliberately clears the ready edge so the next footer counts as a fresh transition. Together those let the *pre-prompt* screen be read as "this turn is finished": the run settled roughly half a second after being sent, with empty text, and the real answer was discarded when it arrived. This is the "first turn occasionally settles with empty extracted prose" flake recorded earlier in this document, now diagnosed. **Captured evidence**: two consecutive idle snapshots, byte-identical, both just the bare compose box and the ready footer, with no echo of the prompt anywhere. A second, subtler form was captured too — agy echoes a prompt into its compose box as it is *typed*, so the text is on screen before anything is submitted, and a screen caught mid-typing settled a run the same way. Fixed by requiring, before a running turn may settle, that the screen shows the prompt echoed **and** the compose box emptied (`promptHasBeenSubmitted`), latched once seen so a long answer that scrolls its own echo away still settles. Bounded by a 10 s grace so the guard can never strand a turn. A **third** shape was captured later, on a `--conversation` resume: agy replays the previous conversation, echoes the newly submitted prompt, and is *still* showing the ready footer from that replayed history — so "the prompt was submitted" was itself not enough, and the turn settled instantly with an empty answer while the replayed screen even carried the *previous* turn's reply. A turn may now settle only once it has also been seen working (the busy footer) **or** has a reply on screen to settle with. Requiring the busy footer alone would not do: an answer that streams continuously never produces an idle snapshot while it is being written, so the first one arrives at the end with the whole reply already on it. Measured live afterwards at 3/3 model-change runs and 2/2 full live suites, against roughly 1 in 2 for the resume case before.
 - **Stale `wasReady`**: if a turn's response streams continuously with no idle gap, the transport's ready/busy edge-detection could latch a stale `true` from the *previous* ready state, so the real completion was silently never reported and the run hung forever. Fixed by resetting the edge flag on every `write()` into the PTY.
 - **`handleSnapshot` assignment ordering**: the edge flag's "new value" assignment happened *after* calling the handler, so a handler that itself wrote into the PTY synchronously (e.g. sending the next prompt) had its own reset immediately clobbered by the stale post-handler assignment. Fixed by latching the edge value before invoking the handler.
 - **`deliveringImages` / completion-during-image-paste race**: attaching an image via Ctrl+V returns to the same ready footer a real completed turn uses (pasting doesn't itself start generation) — without an explicit guard, this settled the run and left the text prompt unsent.

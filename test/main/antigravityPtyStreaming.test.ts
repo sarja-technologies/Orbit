@@ -43,8 +43,14 @@ class FakeTransport implements IAntigravityPtyTransport {
   start(handlers: AntigravityPtyHandlers): void {
     this.handlers = handlers
   }
+  /** Real agy goes busy once a prompt is submitted, and a fake that never
+   *  does lets a test settle a turn the session has no evidence ever ran.
+   *  Switched off to model the captured resume case, where the busy footer
+   *  is never observed because no idle snapshot lands while agy works. */
+  autoBusyOnPrompt = true
   sendPrompt(prompt: string): void {
     this.sentPrompts.push(prompt)
+    if (this.autoBusyOnPrompt) this.handlers?.onBusy()
   }
   respond(_pending: PtyInteraction, _optionId: string): boolean {
     return true
@@ -53,8 +59,28 @@ class FakeTransport implements IAntigravityPtyTransport {
   cancelTurn(): void {
     this.cancelCalls++
   }
-  kill(): void {
+  /** Mirrors the real transport: `kill()` only *requests* termination, and
+   *  `isRunning` stays true until `exit()` is called to simulate the OS
+   *  process actually going away. Tests that flip `isRunning` synchronously
+   *  here cannot see the retirement race this models. */
+  killCalls = 0
+  killSignals: (string | undefined)[] = []
+  private markExited: () => void = () => undefined
+  private exited: Promise<void> = new Promise<void>((resolve) => {
+    this.markExited = resolve
+  })
+  kill(signal?: string): void {
+    this.killCalls++
+    this.killSignals.push(signal)
+  }
+  whenExited(): Promise<void> {
+    return this.exited
+  }
+  /** Simulates the OS process finally exiting. */
+  exit(code = 0): void {
     this.isRunning = false
+    this.markExited()
+    this.handlers?.onExit(code)
   }
   resize(): void {}
   /** What AntigravityPtyTransport does on its throttled, drained sample. */
@@ -100,9 +126,10 @@ function harness() {
     'conversation_1'
   )
   const events: RuntimeEvent[] = []
-  const start = (overrides: Partial<ProviderSendInput> = {}): FakeTransport => {
+  const start = (overrides: Partial<ProviderSendInput> = {}, options: { autoBusy?: boolean } = {}): FakeTransport => {
     session.send(input(overrides), (event) => events.push(event))
     const transport = transports.at(-1)!
+    if (options.autoBusy === false) transport.autoBusyOnPrompt = false
     transport.handlers!.onReadyForInput() // bootstrap complete -> the prompt is written
     return transport
   }
@@ -279,6 +306,42 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.handlers!.onReadyForInput()
 
     expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: [P1, P2].join('\n').trim() })
+  })
+
+  it('does not settle on the echo alone when a resumed process is still idle', () => {
+    // Captured live on a `--conversation` resume: agy replays the previous
+    // conversation, echoes the newly submitted prompt, and is *still*
+    // showing the ready footer from that replayed history. Treating "the
+    // prompt was submitted" as sufficient settled the turn instantly with an
+    // empty answer and discarded the real reply when it arrived.
+    const { events, start } = harness()
+    const transport = start({}, { autoBusy: false })
+
+    // Echo present, compose box emptied, ready footer — but no reply yet and
+    // agy has not been seen working.
+    transport.snapshot(frame([], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+    expect(events.some((event) => event.type === 'run.completed'), 'nothing has been answered yet').toBe(false)
+
+    // The reply arrives; now the ready footer really does mean finished.
+    transport.snapshot(frame([P1, P2], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: [P1, P2].join('\n').trim() })
+  })
+
+  it('does not settle on the previous turn\u2019s replayed answer after a resume', () => {
+    // The same replay carries the *old* answer on screen. Anchoring on this
+    // turn's own prompt is what stops that being reported as this turn's
+    // reply — which would look like a pass while silently answering from
+    // stale history.
+    const { events, start } = harness()
+    const transport = start({}, { autoBusy: false })
+    const previousAnswer = '  The secret word is BANANA-COMET-7.'
+    transport.snapshot([...BANNER, '> An older question', '', previousAnswer, ...SETTLED_COMPOSE])
+    transport.handlers!.onReadyForInput()
+
+    expect(events.some((event) => event.type === 'run.completed')).toBe(false)
+    expect(deltas(events)).toEqual([])
   })
 
   it('never strands a turn: a refused ready footer still settles once the grace period passes', async () => {
