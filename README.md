@@ -21,6 +21,14 @@ npm install
 npm run dev
 ```
 
+`npm install` runs `scripts/ensureNodePtyPermissions.mjs`, which restores the
+executable bit on `node-pty`'s `spawn-helper`. The published node-pty tarball
+records it as mode `0644`, and without the fix every PTY spawn on macOS fails
+with `posix_spawnp failed` — i.e. interactive mode never starts. Installing
+with `--ignore-scripts` skips it (and node-pty's own install too); run
+`npm run postinstall` afterwards if you do. See
+`docs/antigravity-transports.md`.
+
 For isolated development data:
 
 ```bash

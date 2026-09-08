@@ -329,27 +329,99 @@ three valid live runs. The attachment itself was still delivered in that run
 correctly). This is the same first-turn extraction flake already recorded for
 the resume test above, not a regression in the attachment path.
 
-## macOS environment notes (from the issue #2 verification)
+## `node-pty`'s `spawn-helper` must be executable (fixed at install time)
 
-This was the first pass run on macOS (Darwin 25.6, x64 Node/Electron). Two
-things worth recording:
+**Confirmed against the registry artifact itself**, not inferred from a local
+install:
 
-- **`node-pty`'s prebuilt `spawn-helper` arrives without the executable
-  bit.** `node_modules/node-pty/prebuilds/darwin-{x64,arm64}/spawn-helper` is
-  mode `644` after a plain `npm install`, and every `pty.spawn` then fails
-  with `Error: posix_spawnp failed.` — i.e. the whole PTY transport is dead
-  on arrival until `chmod +x` is applied. This is an upstream packaging /
-  install-time issue, not an Orbit one; it is noted here because it makes the
-  interactive transport look broken for reasons that have nothing to do with
-  agy.
-- **The `answers native questions, approves and denies real permission
-  prompts` live PTY test does not pass on this machine**, with or without the
-  issue #2 changes (verified by running it against the unmodified code): agy
-  never raises the expected command-permission prompt for the shell command
-  the test asks for, so `expect(approval).toBeDefined()` fails. The
-  interaction *machinery* is unchanged and its unit tests pass; this looks
-  like a platform/permission-mode difference in agy itself, and is recorded
-  as an open item rather than fixed blind.
+```text
+$ tar -tvf node-pty-1.1.0.tgz | grep spawn-helper
+-rw-r--r--  …  package/prebuilds/darwin-arm64/spawn-helper
+-rw-r--r--  …  package/prebuilds/darwin-x64/spawn-helper
+```
+
+The published npm tarball records both macOS helper binaries as mode `0644`,
+so this is not a umask, cache or extraction artifact — **every** clean
+`npm install` lands a non-executable helper. node-pty passes that path
+straight to `posix_spawnp`, which fails with the entirely unhelpful
+`Error: posix_spawnp failed.`, and Orbit's interactive (PTY) transport is
+dead on arrival. Reproduced and re-proved end to end: `chmod 644` → spawn
+fails; run the fix → spawn succeeds.
+
+Fixed deterministically in this repo by `scripts/ensureNodePtyPermissions.mjs`,
+run from the root package's `postinstall`, so a plain `npm install` or
+`npm ci` is all anyone needs:
+
+- node-pty's location is resolved with `require.resolve('node-pty/package.json')`
+  — never a hardcoded `node_modules/node-pty`, so hoisting and workspaces are
+  fine.
+- It adds `0o111` (preserving the rest of the mode) to the `spawn-helper` in
+  **every** layout the package ships: `build/Release`, `build/Debug`, and each
+  directory under `prebuilds/`, read from disk rather than hardcoded — so no
+  node-pty version, and no CPU architecture, is baked in.
+- Fixing every prebuild rather than only the current one is deliberate: the
+  Node that runs the install and the Electron that later loads node-pty need
+  not share an architecture (an x64 Node under Rosetta installing for an
+  arm64 Electron, or an `--arch` cross-install), so keying the fix on
+  `process.arch` alone would leave the binary that actually gets used broken.
+  Apple Silicon and Intel are both covered by the same run.
+- It then **verifies**: it finds the directory node-pty will really load
+  `pty.node` from — using the same search order as node-pty's own
+  `loadNativeModule` (`build/Release`, `build/Debug`,
+  `prebuilds/<platform>-<arch>`) — and fails the install with a specific
+  message if the helper beside it is missing or still not executable. A
+  broken install is reported, never silently passed over.
+- Windows is skipped outright (no `spawn-helper`, no executable bit). Linux
+  publishes no prebuild at all, so node-pty compiles into `build/Release`,
+  where the linker already sets the bit — the script confirms it rather than
+  changing anything.
+
+Unit-tested in `test/scripts/ensureNodePtyPermissions.test.ts` against
+throwaway node-pty-shaped layouts (both macOS prebuilds at `0644`, source
+build, mixed layout precedence, Windows skip, missing helper, missing native
+module, idempotency, mode preservation), plus an assertion against the real
+installed package.
+
+## Permission prompts depend on agy's own allow-list
+
+The live PTY test's approve/deny half is conditional, and this is why.
+
+agy keeps a user-level standing allow-list in
+`~/.gemini/antigravity-cli/settings.json`. On the machine this branch was
+verified on it contains:
+
+```json
+"permissions": { "allow": ["command(*)", "write_file(*)", "read_file(*)", …] }
+```
+
+`command(*)` grants every shell command up front, so agy never asks.
+Confirmed by capturing the raw terminal for three separate commands —
+`touch` inside the workspace, `rm -rf` on a path *outside* it, and a network
+`curl` — all three ran with **no** permission prompt, no trust dialog, and
+zero occurrences of `Requesting permission` / `Do you want to proceed` /
+`do you trust` anywhere in the captured screens.
+
+So there is nothing on screen for Orbit to detect, and the earlier failure of
+that test was neither an agy version change nor an Orbit regression — it was
+a stale assumption about the machine's permission posture. The test now
+asserts everything about a prompt **when one appears**, and when none does it
+requires the allow-list to explain the absence and logs which half it could
+not exercise. Nothing was weakened to make it pass: a prompt that appeared
+and was *missed* still cannot slip through, because the turn would stall
+waiting on a response that never comes and the test would time out. Orbit
+still never passes `--dangerously-skip-permissions` and never auto-approves
+anything; detection of the two real captured menu shapes remains covered
+deterministically in `test/main/terminalInteractionDetector.test.ts`.
+
+## Electron's own installer on Node 24 (environment note)
+
+Unrelated to Orbit, but worth knowing before deleting `node_modules` on this
+machine: `electron@33`'s `install.js` can exit `0` having extracted only a
+220 KB skeleton of `dist/`, leaving no `path.txt`, after which anything that
+`require('electron')` fails with "Electron failed to install correctly". The
+cached zip itself is intact (`unzip -t` passes, 255 files, 258 MB), and
+`extract-zip@2.0.1` simply ends without settling its promise. Recovery is to
+restore or re-extract `node_modules/electron/dist` and write `path.txt`.
 
 ## Cross-platform clipboard notes and capability detection
 
