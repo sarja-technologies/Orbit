@@ -338,6 +338,68 @@ describe('a live pty session honours a later model change', () => {
       expect(failure).toBeDefined()
       expect((failure as { error: { code: string; retryable: boolean } }).error.code).toBe('provider.retire_failed')
       expect((failure as { error: { retryable: boolean } }).error.retryable).toBe(true)
+
+      // The predecessor is still alive. Refusing once is not enough — the
+      // session must keep owning it, or the very next turn quietly becomes
+      // the second owner it just refused to be.
+      expect(transports[0]!.isRunning).toBe(true)
+      // The turn is refused with a coded error — which OrbitRuntime turns
+      // into the same retryable `run.failed` the user sees.
+      await expect(
+        instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+      ).rejects.toMatchObject({ code: 'provider.retire_failed' })
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns, 'no new process while the predecessor is alive').toHaveLength(1)
+      expect(transports).toHaveLength(1)
+
+      // 6-8. The stubborn process finally exits; ownership is released and a
+      // retry spawns normally, still resuming the same native conversation.
+      transports[0]!.exit(137)
+      await vi.advanceTimersByTimeAsync(50)
+      await instance.sendMessage(input({ transport: 'pty', runId: 'run_4', model: 'gemini-3.8-flash', reasoningEffort: 'low' }), () => undefined)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns, 'a replacement is fine once the predecessor is really gone').toHaveLength(2)
+      expect(spawns[1]![spawns[1]!.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
+      expect(spawns[1]).toContain('--conversation')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps owning a process that survives shutdown, and releases it on its real exit', async () => {
+    // shutdown() escalates the same way; if the process still will not die,
+    // forgetting it would let the next send() start a second owner just as
+    // surely as the model-change path would.
+    vi.useFakeTimers()
+    try {
+      const { instance, spawns, transports } = ptyHarness(() => 'dddddddd-1111-2222-3333-444444444444')
+
+      await instance.sendMessage(input({ transport: 'pty', model: 'claude-sonnet-4-6' }), () => undefined)
+      await settleTurnFake(transports[0]!)
+
+      // Release the conversation: shutdown asks the process to stop, and it
+      // refuses through both bounds. The release cannot be awaited before
+      // the timers move — it is waiting on them.
+      const released = instance.releaseConversation('conversation_1')
+      await vi.advanceTimersByTimeAsync(6_200)
+      await released
+      expect(transports[0]!.killSignals).toEqual([undefined, 'SIGKILL'])
+      expect(transports[0]!.isRunning).toBe(true)
+
+      // A brand-new session for the same conversation must not spawn on top
+      // of it. (releaseConversation drops the session, so this is the
+      // provider creating a fresh one — the invariant has to survive that.)
+      await expect(
+        instance.sendMessage(input({ transport: 'pty', runId: 'run_2', model: 'claude-sonnet-4-6' }), () => undefined)
+      ).rejects.toMatchObject({ code: 'provider.retire_failed' })
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns.length, 'no second owner while the shut-down process lives').toBe(1)
+
+      transports[0]!.exit(137)
+      await vi.advanceTimersByTimeAsync(50)
+      await instance.sendMessage(input({ transport: 'pty', runId: 'run_3', model: 'claude-sonnet-4-6' }), () => undefined)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(spawns.length, 'once it is gone, a fresh session is fine').toBe(2)
     } finally {
       vi.useRealTimers()
     }

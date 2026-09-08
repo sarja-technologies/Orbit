@@ -34,6 +34,8 @@ const SUPPORTED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.w
  *  predecessor is *proven* gone. */
 const RETIRE_TIMEOUT_MS = 4_000
 const RETIRE_FORCE_TIMEOUT_MS = 2_000
+const RETIRE_FAILED_MESSAGE =
+  'Orbit could not stop this session\u2019s previous Antigravity process, and will not run a second one against the same conversation. It will recover on its own if that process exits; otherwise close and reopen this session, or restart Orbit.'
 
 /** Orbit application policy, not a proven `agy`/clipboard limit — see
  *  docs/antigravity-transports.md. Reused from AgentDock Pro's identical
@@ -147,6 +149,15 @@ export class AntigravityPtySession {
    *  the same native conversation — whichever path retired it. Null in the
    *  ordinary case, where spawning stays synchronous. */
   private retiring: Promise<unknown> | null = null
+  /** A detached process that survived termination *and* SIGKILL and is
+   *  still, as far as this session can tell, alive.
+   *
+   *  Retaining it is the whole point: `this.transport` has already been
+   *  cleared by then, so without this the session would simply forget a
+   *  process it knows is running and let the next send() start a second
+   *  owner of the same native conversation. Ownership is released only by
+   *  the predecessor's genuine exit. */
+  private unkillable: IAntigravityPtyTransport | null = null
   /** Checked once per session (the answer can't meaningfully change while
    *  Orbit is running) rather than on every attachment attempt. */
   private clipboardCapability: ClipboardCapability | null = null
@@ -179,6 +190,13 @@ export class AntigravityPtySession {
         code: 'provider.session_busy'
       })
       throw error
+    }
+    // A predecessor that refused to die still owns this conversation. Refuse
+    // the turn rather than becoming its second owner; the block lifts by
+    // itself the moment that process really exits, so retrying works.
+    if (this.unkillable) {
+      if (this.unkillable.isRunning) throw codedError('provider.retire_failed', RETIRE_FAILED_MESSAGE)
+      this.unkillable = null
     }
     this.currentRunId = input.runId
     this.currentInput = input
@@ -277,25 +295,34 @@ export class AntigravityPtySession {
     images: ImageAttachment[],
     invocation: string
   ): Promise<void> {
-    retired.kill()
-    if (!(await this.awaitExit(retired, RETIRE_TIMEOUT_MS))) {
-      console.warn('[antigravity-pty] the previous agy process did not exit when asked; escalating to SIGKILL.')
-      retired.kill('SIGKILL')
-      if (!(await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS))) {
-        this.state = 'idle'
-        this.emit({
-          type: 'run.failed',
-          error: {
-            code: 'provider.retire_failed',
-            message:
-              'The previous Antigravity process for this session would not exit, so Orbit stopped rather than run a second one against the same conversation. Close and reopen this session, or restart Orbit, then try again.',
-            retryable: true
-          }
-        })
-        return
-      }
+    if (!(await this.forceRetire(retired))) {
+      this.state = 'idle'
+      this.emit({ type: 'run.failed', error: { code: 'provider.retire_failed', message: RETIRE_FAILED_MESSAGE, retryable: true } })
+      return
     }
     this.spawn(input, images, invocation)
+  }
+
+  /** Terminates a detached process, escalating once, and reports whether it
+   *  is genuinely gone.
+   *
+   *  A process that survives everything is *kept* — see `unkillable`. The
+   *  bounded waits exist so a caller is never left hanging, not so the
+   *  session can pretend a live process stopped existing. */
+  private async forceRetire(retired: IAntigravityPtyTransport): Promise<boolean> {
+    retired.kill()
+    if (await this.awaitExit(retired, RETIRE_TIMEOUT_MS)) return true
+    console.warn('[antigravity-pty] the previous agy process did not exit when asked; escalating to SIGKILL.')
+    retired.kill('SIGKILL')
+    if (await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)) return true
+    console.warn('[antigravity-pty] the previous agy process survived SIGKILL; this conversation is blocked until it exits.')
+    this.unkillable = retired
+    void retired.whenExited().then(() => {
+      // The only thing that releases ownership: the predecessor is really
+      // gone, so the next send() may spawn normally again.
+      if (this.unkillable === retired) this.unkillable = null
+    })
+    return false
   }
 
   /** True once the transport reports a real exit; false if the bound passed
@@ -376,6 +403,18 @@ export class AntigravityPtySession {
     this.transport.cancelTurn()
   }
 
+  /** Shuts the session down and reports whether it is safe to forget.
+   *
+   *  False means a process this session owns is still alive after every
+   *  escalation. The caller must keep the session — dropping it would put a
+   *  fresh one, with no knowledge of that process, in charge of the same
+   *  native conversation. */
+  async release(): Promise<boolean> {
+    this.shutdown()
+    await this.retiring
+    return this.unkillable === null
+  }
+
   shutdown(): void {
     this.clearTurnStartTimer()
     const retired = this.transport
@@ -385,12 +424,10 @@ export class AntigravityPtySession {
     this.transport = null
     this.state = 'idle'
     if (!retired) return
-    retired.kill()
-    const retirement = this.awaitExit(retired, RETIRE_TIMEOUT_MS).then(async (exited) => {
-      if (exited) return
-      retired.kill('SIGKILL')
-      await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)
-    })
+    // Same rule as a model-change retirement: if it will not die, it is
+    // remembered (`unkillable`) rather than forgotten, so a later send()
+    // cannot start a second owner on top of it.
+    const retirement = this.forceRetire(retired)
     this.retiring = retirement
     void retirement.finally(() => {
       if (this.retiring === retirement) this.retiring = null

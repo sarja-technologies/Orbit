@@ -489,10 +489,33 @@ kill()  →  wait up to 4 s for the real exit
 ```
 
 A failed turn is recoverable; two agy processes writing into one conversation
-is not. `shutdown()` follows the same rule: it detaches and records the
-retirement, and a later `send()` waits for it before spawning, so no path can
-produce an overlap. Verified live by sampling the process table across a real
-model change — the count for the workspace never exceeded 1.
+is not.
+
+**Refusing once is not enough.** A predecessor that survives everything is
+*retained* (`AntigravityPtySession.unkillable`), not forgotten — `this.transport`
+has already been cleared by then, so without that the very next `send()` would
+see no transport and no retirement and quietly become the second owner it had
+just refused to be. While that process is still alive every send is rejected
+with the same retryable `provider.retire_failed`, and ownership is released by
+exactly one thing: its genuine exit, observed through `whenExited()`. A later
+retry then spawns normally, still resuming by `--conversation`.
+
+`shutdown()` goes through the same `forceRetire`, so it records a survivor the
+same way. And `releaseConversation` no longer drops a session that still owns a
+live process — dropping it would put a fresh session, with no knowledge of that
+process, in charge of the same native conversation. The session is discarded
+only once it reports itself safe to forget (`release()`).
+
+Verified live by sampling the process table across a real model change — the
+count for the workspace never exceeded 1, and the surviving process was
+observably running the new `--model`/`--effort` with `--conversation <id>`.
+
+Regression coverage for the blocked state (`test/main/modelInvocation.test.ts`)
+drives the whole sequence: force the polite timeout, force the SIGKILL timeout,
+assert `provider.retire_failed`, **send another turn and assert no second
+process appears**, then let the stubborn process finally exit and prove a retry
+spawns safely. The shutdown path has its own equivalent through
+`releaseConversation`.
 
 Regression coverage: `test/main/antigravityPtyTransportLifecycle.test.ts`
 drives a *real* PTY (a trivial `sh` that ignores `TERM`/`HUP`/`INT`) and

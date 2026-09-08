@@ -152,8 +152,11 @@ export class AntigravityProvider implements AgentProvider {
   async releaseConversation(conversationId: ID): Promise<void> {
     const session = this.ptySessions.get(conversationId)
     if (!session) return
-    session.shutdown()
-    this.ptySessions.delete(conversationId)
+    // Kept rather than dropped when it still owns a live process: a fresh
+    // session for this conversation would know nothing about that process
+    // and would happily become its second owner. The session releases
+    // itself once the process really exits.
+    if (await session.release()) this.ptySessions.delete(conversationId)
   }
 
   async shutdown(): Promise<void> {
