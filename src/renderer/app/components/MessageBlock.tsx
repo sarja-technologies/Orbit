@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
+import { ChatRow } from './ChatRow'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
 
@@ -17,17 +18,10 @@ interface MessageBlockProps {
   error?: RuntimeErrorInfo | null
 }
 
-/** One block in the work-session transcript. Everything is left-aligned
- *  document flow — role is carried by a label and type weight, never by
- *  alignment or a filled bubble. */
-/** Local wall-clock time, or nothing at all if the stored value cannot be
- *  parsed — an empty slot beats a made-up timestamp. */
-function clockTime(iso: string): string {
-  const parsed = Date.parse(iso)
-  if (Number.isNaN(parsed)) return ''
-  return new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-}
-
+/** One message in the work-session transcript. Side carries the speaker:
+ *  the reader's own turns sit right in a sent bubble, Antigravity's sit
+ *  left in its own surface. The label and timestamp confirm that read
+ *  rather than being the only thing that provides it. */
 function MessageBlockView({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
@@ -41,17 +35,11 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error }:
 
   const isUser = message.role === 'user'
   return (
-    <article className={`block block-${message.role}`}>
-      {showRole ? (
-        <div className="block-role">
-          <span>{isUser ? 'You' : 'Antigravity'}</span>
-          {/* Real send time from the stored message — never a placeholder. */}
-          <time dateTime={message.createdAt}>{clockTime(message.createdAt)}</time>
-        </div>
-      ) : null}
-      {isUser ? <div className="block-user-text">{message.content}</div> : <Markdown source={message.content} />}
+    // Real send time from the stored message — never a placeholder.
+    <ChatRow role={isUser ? 'user' : 'assistant'} showIdentity={showRole} timestamp={message.createdAt}>
+      {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
-    </article>
+    </ChatRow>
   )
 }
 

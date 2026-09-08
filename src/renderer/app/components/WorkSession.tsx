@@ -4,6 +4,7 @@ import type { InteractionRequiredEvent } from '@shared/runtime-events'
 import type { ActivityState } from '../lib/activity'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
+import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
 import { ActivitySummary, LiveActivity } from './ActivityLine'
 import { InactiveInteraction, InteractionCard, ResolvedInteraction } from './InteractionCard'
 
@@ -137,23 +138,34 @@ export function WorkSession({
             {resolvedRecords
               .filter((record) => record.runId === activeRunId)
               .map((record) => (
-                <ResolvedInteraction key={record.interactionId} summary={record.summary} />
+                <div className="chat-aside" key={record.interactionId}>
+                  <ResolvedInteraction summary={record.summary} />
+                </div>
               ))}
 
+            {/* Text has started arriving. The bubble is the real assistant
+                surface, plus a live badge and a moving edge so a reply
+                mid-flight never reads as a finished one. */}
             {streamText ? (
-              <article className="block block-assistant">
-                <div className="block-role">Antigravity</div>
+              <ChatRow role="assistant" showIdentity status={<ReplyingBadge />} bubbleClassName="is-streaming">
                 <Markdown source={streamText} />
                 <span className="stream-cursor" aria-hidden="true" />
-              </article>
+              </ChatRow>
             ) : null}
 
-            {!pendingInteraction && activityByRun[activeRunId] ? <LiveActivity activity={activityByRun[activeRunId]!} /> : null}
+            {/* Nothing to read yet: a real assistant bubble holding animated
+                dots, so the wait happens where the answer will appear.
+                A run opens with an empty activity state, which is not yet
+                evidence of tool work — only real steps earn "working". */}
+            {!pendingInteraction && !streamText ? (
+              <PendingReply label={hasSteps(activityByRun[activeRunId]) ? 'Antigravity is working' : 'Antigravity is replying'} />
+            ) : null}
 
-            {!pendingInteraction && !streamText && !activityByRun[activeRunId] ? (
-              <div className="activity activity-live" aria-live="polite">
-                <span className="activity-pip" aria-hidden="true" />
-                <span className="activity-label">Working</span>
+            {/* Tool work is subordinate to the reply: indented onto the
+                assistant rail, never competing with the message itself. */}
+            {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
+              <div className="chat-aside">
+                <LiveActivity activity={activityByRun[activeRunId]!} />
               </div>
             ) : null}
 
@@ -183,6 +195,13 @@ export function WorkSession({
 const EMPTY_ATTACHMENTS: ProjectFile[] = []
 const EMPTY_RESOLVED: ResolvedRecord[] = []
 
+/** A run is given an activity state the moment it starts, so the state
+ *  existing says nothing. Only recorded steps do — and without this the
+ *  subordinate rail draws itself with nothing on it. */
+function hasSteps(activity: ActivityState | undefined): boolean {
+  return Boolean(activity && activity.items.length > 0)
+}
+
 const MessageTurn = memo(function MessageTurn({
   message,
   showRole,
@@ -202,10 +221,17 @@ const MessageTurn = memo(function MessageTurn({
 }): JSX.Element {
   return (
     <div className="turn">
-      {activity ? <ActivitySummary activity={activity} /> : null}
-      {resolved.map((record) => (
-        <ResolvedInteraction key={record.interactionId} summary={record.summary} />
-      ))}
+      {/* What the turn did sits on the assistant rail above what it said,
+          one step quieter, so scanning the conversation never means
+          reading past a tool log. */}
+      {hasSteps(activity) || resolved.length > 0 ? (
+        <div className="chat-aside">
+          {hasSteps(activity) ? <ActivitySummary activity={activity!} /> : null}
+          {resolved.map((record) => (
+            <ResolvedInteraction key={record.interactionId} summary={record.summary} />
+          ))}
+        </div>
+      ) : null}
       <MessageBlock message={message} showRole={showRole} attachments={attachments} thumbnails={thumbnails} error={error} />
     </div>
   )

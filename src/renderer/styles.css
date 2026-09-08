@@ -75,6 +75,19 @@
   --content-width: 780px;
   --content-gutter: var(--space-8);
 
+  /* Conversation surfaces. Both bubbles are defined against --bg-canvas
+     (#24282f): the assistant's is a calm lift that a thousand-word answer
+     can sit in without glare, the reader's is an accent tint that reads as
+     sent at a glance. Kept as tokens so the two stay in relation. */
+  --chat-mark: 26px;
+  --chat-rail: calc(var(--chat-mark) + var(--space-3));
+  --chat-user-max: min(78%, 560px);
+  --chat-assistant-bg: #2b3138;
+  --chat-assistant-border: rgba(255, 255, 255, 0.085);
+  --chat-user-bg: rgba(76, 141, 255, 0.15);
+  --chat-user-border: rgba(76, 141, 255, 0.3);
+  --chat-user-text: #f1f5fb;
+
   --text-meta: 13px;
   --text-ui: 14px;
   --text-body: 15px;
@@ -1003,7 +1016,9 @@ select.field-input {
   margin: auto auto 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-8);
+  /* Tighter than the old flat log: the bubbles now carry the separation,
+     so this only has to keep turns from touching. */
+  gap: var(--space-5);
 }
 
 .transcript-empty {
@@ -1016,37 +1031,252 @@ select.field-input {
 .turn {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
   content-visibility: auto;
   contain-intrinsic-size: auto 160px;
 }
 
-.block {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+/* ---------- conversation rows ---------- */
+
+/* Every row — sent, received, streaming, pending — goes through this one
+   grid. The two roles differ by grid definition, not by overrides: the
+   assistant keeps a mark gutter on the left that its bubble and its
+   subordinate activity both align to, and the reader's collapses to a
+   single right-justified column. */
+.chat-row {
+  display: grid;
+  grid-template-columns: var(--chat-mark) minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
+  align-items: start;
 }
 
-.block-role {
+.chat-row-user {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: end;
+}
+
+.chat-mark {
+  grid-column: 1;
+  /* Sits against the top of the bubble, not the identity line above it. */
+  grid-row: 2;
+  justify-self: start;
+  width: var(--chat-mark);
+  height: var(--chat-mark);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-round);
+  background: radial-gradient(circle at 34% 28%, rgba(107, 160, 255, 0.34), rgba(76, 141, 255, 0.1) 72%);
+  border: 1px solid rgba(76, 141, 255, 0.32);
+  color: var(--accent);
+  flex: none;
+}
+
+.chat-meta {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
   font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.01em;
 }
 
-.block-role time {
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
+/* Reversed so the name lands on the bubble's own edge and the timestamp
+   trails inward — the same reading order as the left side, mirrored. */
+.chat-row-user .chat-meta {
+  grid-column: 1;
+  flex-direction: row-reverse;
 }
 
-.block-user-text {
+.chat-name {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.chat-meta time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+
+.chat-bubble {
+  position: relative;
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* Bubble contents are block flow, so rhythm between the text, attachments
+   and the streaming caret is owned here — the same child-combinator
+   pattern .prose uses one level down. */
+.chat-bubble > * + * {
+  margin-top: var(--space-3);
+}
+
+/* Received. A quiet lift rather than a hard card, because long answers
+   live here and the prose has to stay the loudest thing in the block. */
+.chat-bubble-assistant {
+  background: var(--chat-assistant-bg);
+  border: 1px solid var(--chat-assistant-border);
+  /* One squared corner points back at the mark, so the bubble reads as
+     spoken from that side without resorting to a tail. */
+  border-top-left-radius: var(--radius-xs);
+  padding: var(--space-4);
+}
+
+/* Sent. Accent-tinted and raised so a turn the reader typed is instantly
+   findable when scrolling back through a long session. */
+.chat-row-user .chat-bubble {
+  grid-column: 1;
+  max-width: var(--chat-user-max);
+}
+
+.chat-bubble-user {
+  background: var(--chat-user-bg);
+  border: 1px solid var(--chat-user-border);
+  border-top-right-radius: var(--radius-xs);
+  box-shadow: var(--shadow-raised);
+  color: var(--chat-user-text);
+}
+
+.chat-user-text {
   font-size: var(--text-body);
-  font-weight: 550;
   line-height: 1.6;
   white-space: pre-wrap;
-  color: #f4f6fa;
+  overflow-wrap: anywhere;
+}
+
+/* Grouped rows: no mark, no identity line. The gutter still holds, so a
+   run of assistant bubbles stays on one left edge. */
+.chat-row-assistant .chat-bubble:first-child {
+  border-top-left-radius: var(--radius-md);
+}
+
+.chat-row-user .chat-bubble:first-child {
+  border-top-right-radius: var(--radius-md);
+}
+
+/* ---------- live reply state ---------- */
+
+/* Rides in the identity line while tokens are still arriving, so a reply
+   that has already started reading well is still visibly unfinished. */
+.chat-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px var(--space-2) 1px 6px;
+  border-radius: var(--radius-round);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.015em;
+}
+
+.chat-live-pip {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-round);
+  background: currentColor;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.chat-bubble-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-self: start;
+  width: auto;
+  padding: var(--space-3) var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+}
+
+.chat-pending-label {
+  letter-spacing: 0.01em;
+}
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.typing-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  animation: typing-bounce 1.3s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  62%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  31% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* A light sweeping the bubble's top edge while it streams. Subtle enough
+   to ignore while reading, impossible to mistake for a settled reply. */
+.chat-bubble-assistant.is-streaming {
+  border-color: rgba(76, 141, 255, 0.3);
+}
+
+.chat-bubble-assistant.is-streaming::before {
+  content: '';
+  position: absolute;
+  inset: -1px -1px auto;
+  height: 2px;
+  border-radius: var(--radius-xs) var(--radius-md) 0 0;
+  background: linear-gradient(90deg, transparent 12%, var(--accent) 50%, transparent 88%);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: stream-sweep 1.9s ease-in-out infinite;
+}
+
+@keyframes stream-sweep {
+  0% {
+    background-position: -60% 0;
+  }
+  100% {
+    background-position: 160% 0;
+  }
+}
+
+/* ---------- subordinate turn detail ---------- */
+
+/* Tool work, resolved permissions — everything that explains a turn
+   rather than being it. Indented onto the assistant's rail and hung off a
+   hairline so it reads as a margin note against the reply. */
+.chat-aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-left: var(--chat-rail);
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+  font-size: var(--text-meta);
 }
 
 /* ---------- prose ---------- */
@@ -1171,6 +1401,13 @@ select.field-input {
   vertical-align: text-bottom;
   background: var(--accent);
   animation: blink 1.05s steps(2, start) infinite;
+}
+
+/* The caret follows the prose as a sibling block, so the bubble's default
+   child rhythm would strand it a full line below the last word. It has to
+   read as the next character, not the next paragraph. */
+.chat-bubble > .stream-cursor {
+  margin-top: 2px;
 }
 
 @keyframes blink {
@@ -2148,8 +2385,34 @@ select.field-input {
   .activity-pip,
   .stream-cursor,
   .modal-backdrop,
-  .modal-panel {
+  .modal-panel,
+  .chat-live-pip,
+  .typing-dot,
+  .chat-bubble-assistant.is-streaming::before {
     animation: none;
+  }
+
+  /* The dots still have to read as a "replying" glyph once they stop
+     moving, so the motion is replaced by a fixed fall-off rather than
+     leaving three identical faint pips. The meaning itself never lived in
+     the animation — the adjacent "Antigravity is replying" text carries
+     it either way. */
+  .typing-dot {
+    opacity: 0.9;
+  }
+
+  .typing-dot:nth-child(2) {
+    opacity: 0.6;
+  }
+
+  .typing-dot:nth-child(3) {
+    opacity: 0.35;
+  }
+
+  /* Keep the streamed bubble's accent edge, just static. */
+  .chat-bubble-assistant.is-streaming::before {
+    background: var(--accent);
+    opacity: 0.55;
   }
 }
 
