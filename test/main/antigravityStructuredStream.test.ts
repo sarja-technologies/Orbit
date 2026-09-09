@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { RAW_CATALOGUE } from '../support/catalogue'
 
 // Real `agy 1.1.27 --print … --output-format stream-json` output, captured
 // from live turns while investigating issue #2 (see
@@ -119,7 +120,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
 async function replay(lines: unknown[]): Promise<RuntimeEvent[]> {
   process.env.ORBIT_AGY_PATH = fakeAgy(lines)
   // Never spawn the real `agy models` from a unit test.
-  const provider = new AntigravityProvider(undefined, async () => [])
+  const provider = new AntigravityProvider(undefined, async () => RAW_CATALOGUE)
   const events: RuntimeEvent[] = []
   await new Promise<void>((resolve, reject) => {
     void provider
@@ -288,7 +289,7 @@ describe('structured transport streaming (real captured agy event shapes)', () =
     process.env.ORBIT_AGY_PATH = fakeAgy([INIT, USER_INPUT_STEP, activeDelta('Partial answer')])
     const file = process.env.ORBIT_AGY_PATH
     fs.appendFileSync(file, 'setTimeout(() => {}, 60_000)\n')
-    const provider = new AntigravityProvider(undefined, async () => [])
+    const provider = new AntigravityProvider(undefined, async () => RAW_CATALOGUE)
     const events: RuntimeEvent[] = []
     const settled = new Promise<void>((resolve) => {
       void provider.sendMessage(input(), (event) => {
@@ -318,7 +319,7 @@ describe('structured transport streaming (real captured agy event shapes)', () =
 setTimeout(() => {}, 60_000)
 `
     )
-    const provider = new AntigravityProvider(undefined, async () => [])
+    const provider = new AntigravityProvider(undefined, async () => RAW_CATALOGUE)
     const events: RuntimeEvent[] = []
     await new Promise<void>((resolve) => {
       void provider.sendMessage(input(), (event) => {

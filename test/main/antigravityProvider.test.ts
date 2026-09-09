@@ -8,6 +8,7 @@ import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src
 import type { ID } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { RAW_CATALOGUE } from '../support/catalogue'
 
 let workspaceRoot: string
 beforeEach(() => {
@@ -103,7 +104,7 @@ function harness() {
       conversationId
     ),
     // Never spawn the real `agy models` from a unit test.
-    async () => []
+    async () => RAW_CATALOGUE
   )
   return { provider, transportsByConversation }
 }

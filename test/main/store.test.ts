@@ -139,20 +139,20 @@ describe('OrbitStore', () => {
   })
 
   it('round trips reasoning preferences across database instances', async () => {
-    expect(store.readPreferences()).toEqual({ lastReasoningEffort: null, modelReasoningEfforts: {} })
-    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
+    expect(store.readPreferences()).toEqual({ defaultModel: null, lastReasoningEffort: null, modelReasoningEfforts: {} })
+    store.writePreferences({ defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
 
     db.close()
     db = new OrbitDatabase({ dataDir: dir })
     await db.init()
     store = new OrbitStore(db)
 
-    expect(store.readPreferences()).toEqual({ lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
+    expect(store.readPreferences()).toEqual({ defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
   })
 
   it('overwrites preferences in place rather than accumulating rows', () => {
-    store.writePreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: {} })
-    store.writePreferences({ lastReasoningEffort: 'medium', modelReasoningEfforts: {} })
+    store.writePreferences({ defaultModel: null, lastReasoningEffort: 'low', modelReasoningEfforts: {} })
+    store.writePreferences({ defaultModel: null, lastReasoningEffort: 'medium', modelReasoningEfforts: {} })
     expect(store.readPreferences().lastReasoningEffort).toBe('medium')
   })
 

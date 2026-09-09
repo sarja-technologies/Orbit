@@ -8,7 +8,7 @@ import { ProviderLogo } from './ProviderLogo'
 interface ModelBrowserProps {
   models: ModelOption[]
   selectedModel: string | null
-  onSelect: (modelId: string | null) => void
+  onSelect: (modelId: string) => void
   onClose: () => void
 }
 
@@ -44,23 +44,6 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
       </ModalHeader>
 
       <div className="modal-body model-browser">
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={selectedModel === null}
-          className={selectedModel === null ? 'model-row selected' : 'model-row'}
-          onClick={() => onSelect(null)}
-        >
-          <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-            <AutoGlyph />
-          </span>
-          <span className="model-row-text">
-            <span className="model-row-name">Default model</span>
-            <span className="model-row-hint">Antigravity’s own choice</span>
-          </span>
-          <Tick checked={selectedModel === null} />
-        </button>
-
         {groups.map((group) => (
           <section key={group.provider.key} className="model-group">
             <h3 className="model-group-title">

@@ -23,7 +23,8 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
-import { effortForNewSession } from '@shared/reasoningPolicy'
+import { effortForModel, effortForNewSession, supportedEfforts } from '@shared/reasoningPolicy'
+import { isRunnableSelection, resolveDefaultSelection } from '@shared/defaultModel'
 import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 
@@ -128,6 +129,14 @@ export class OrbitRuntime extends EventEmitter {
     if (conversation.projectId !== project.id) throw new Error('Conversation does not belong to this project.')
     if (!input.content.trim()) throw new Error('Message cannot be empty.')
 
+    // Orbit owns the model choice. Before anything is persisted for this
+    // turn, the session is resolved to a concrete id from the real
+    // catalogue — so the model Orbit stores and shows is exactly the model
+    // it is about to name on agy's command line. This is also what
+    // migrates a legacy session that still carries the old "let
+    // Antigravity decide" null.
+    const resolved = await this.resolveConversationModel(conversation)
+
     this.store.createMessage({
       projectId: project.id,
       conversationId: conversation.id,
@@ -183,8 +192,8 @@ export class OrbitRuntime extends EventEmitter {
           attachments,
           referencedArtifacts,
           transport,
-          model: conversation.model,
-          reasoningEffort: conversation.reasoningEffort
+          model: resolved.model,
+          reasoningEffort: resolved.reasoningEffort
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -203,6 +212,49 @@ export class OrbitRuntime extends EventEmitter {
       })
 
     return run
+  }
+
+  /** The concrete model this session will run on, persisted so that what
+   *  Orbit stores and displays is the same thing it passes to agy.
+   *
+   *  Three cases, and none of them ends with Antigravity choosing:
+   *
+   *   - the session already names a model the catalogue still lists: kept
+   *     exactly as it is (the user chose it), with only its reasoning tier
+   *     corrected if the model does not publish the stored one;
+   *   - the session names nothing — a brand-new session, or a legacy one
+   *     carrying the old "Default" null — or names a model the catalogue no
+   *     longer has: resolved to Orbit's own default (shared/defaultModel.ts)
+   *     and written back;
+   *   - the catalogue could not be read at all: a real error, not a quiet
+   *     fall back to agy's own default. */
+  private async resolveConversationModel(conversation: Conversation): Promise<{ model: string; reasoningEffort: ReasoningEffort | null }> {
+    const models = await this.provider.listModels()
+    const preferences = this.store.readPreferences()
+
+    if (isRunnableSelection(models, conversation.model)) {
+      const option = models.find((candidate) => candidate.id === conversation.model) ?? null
+      const tiers = supportedEfforts(option)
+      const stored = conversation.reasoningEffort
+      const valid = tiers.length === 0 ? stored === null : stored !== null && tiers.includes(stored)
+      if (valid) return { model: conversation.model, reasoningEffort: stored }
+      const corrected = effortForModel(option, preferences)
+      this.store.setConversationModel(conversation.id, conversation.model, corrected)
+      return { model: conversation.model, reasoningEffort: corrected }
+    }
+
+    const selection = resolveDefaultSelection(models, preferences)
+    if (!selection) {
+      throw codedError(
+        'provider.model_unresolved',
+        'Orbit could not read Antigravity’s model list, so it cannot name the model to run. Orbit never lets Antigravity choose one for it. Check that `agy models` works, then try again.'
+      )
+    }
+    // Persisted first, then reported from the selection itself: what the
+    // provider is handed and what the store now holds are the same values,
+    // by construction rather than by reading one back.
+    this.store.setConversationModel(conversation.id, selection.model, selection.reasoningEffort)
+    return selection
   }
 
   /** Gives a still-unnamed session a name from the prompt the user just
@@ -224,7 +276,18 @@ export class OrbitRuntime extends EventEmitter {
     }
   }
 
+  /** Stop.
+   *
+   *  Accepting a Stop is what makes a run interrupted, and it is recorded
+   *  before the provider is even asked — `'cancelling'` IS "Stop accepted"
+   *  (see handleProviderEvent, which converts anything that lands
+   *  afterwards). A run that has ALREADY finished is not stopped: a Stop
+   *  that loses the race to a real completion changes nothing, rather than
+   *  dragging a finished turn back into a stopping state it can never
+   *  leave. */
   async cancelRun(runId: ID): Promise<Run> {
+    const current = this.store.requireRun(runId)
+    if (isTerminalState(current.state)) return current
     this.store.updateRunState(runId, 'cancelling')
     await this.provider.cancelRun(runId)
     // Read back rather than returning the 'cancelling' snapshot above: a run
@@ -313,7 +376,10 @@ export class OrbitRuntime extends EventEmitter {
     return managed
   }
 
-  private handleProviderEvent(event: RuntimeEvent): void {
+  private handleProviderEvent(incoming: RuntimeEvent): void {
+    // Rebindable: the Stop-precedence rule below can rewrite a terminal
+    // event into the interruption it really is.
+    let event = incoming
     const active = this.activeRuns.get(event.runId)
     const run = safeRequireRun(this.store, event.runId)
     if (!run || run.projectId !== event.projectId || run.conversationId !== event.conversationId) return
@@ -330,6 +396,24 @@ export class OrbitRuntime extends EventEmitter {
     // provider, and it is deliberately about *terminality*, not about
     // cancellation specifically — a completed run cannot be failed either.
     if (isTerminalEvent(event) && isTerminalState(run.state)) return
+
+    // STOP PRECEDENCE. Once a Stop has been accepted for a run that was
+    // still active, that run is interrupted — whatever the transport goes
+    // on to say. agy can finish the turn it was already most of the way
+    // through and report SUCCESS, or die from the signal and report a
+    // failure; both arrive after the user has already decided. Converting
+    // them here (rather than dropping them) is what keeps the interruption
+    // a real terminal state instead of leaving the run stuck 'cancelling'.
+    //
+    // A completion that lands after a Stop still carries the authoritative
+    // text for what Antigravity produced, and it is kept on exactly the
+    // terms the ordinary completion path uses (`finalText || streamed`).
+    // The point is to preserve everything Antigravity actually said, not to
+    // punish the turn for having been stopped.
+    if (isTerminalEvent(event) && event.type !== 'run.cancelled' && run.state === 'cancelling') {
+      if (event.type === 'run.completed' && active && event.finalText) active.text = event.finalText
+      event = { ...baseOf(event), type: 'run.cancelled' }
+    }
 
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
@@ -438,6 +522,22 @@ function isTerminalEvent(event: RuntimeEvent): boolean {
 
 function isTerminalState(state: Run['state']): boolean {
   return state === 'completed' || state === 'failed' || state === 'cancelled'
+}
+
+/** The routing fields every runtime event carries, so one can be rebuilt as
+ *  a different type without inventing any of them. */
+function baseOf(event: RuntimeEvent): Pick<RuntimeEvent, 'projectId' | 'conversationId' | 'runId' | 'providerId' | 'createdAt'> {
+  return {
+    projectId: event.projectId,
+    conversationId: event.conversationId,
+    runId: event.runId,
+    providerId: event.providerId,
+    createdAt: event.createdAt
+  }
+}
+
+function codedError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code })
 }
 
 function isDirectory(candidate: string): boolean {

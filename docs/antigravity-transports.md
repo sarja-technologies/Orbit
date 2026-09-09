@@ -8,6 +8,67 @@ renderer → preload → validated IPC → OrbitRuntime → AntigravityProvider 
 
 ## Model and reasoning effort
 
+**Orbit owns its default model.** There is no state in which Orbit invokes
+`agy` without naming a model and then waits to discover what `agy` chose.
+Every run passes an explicit `--model`, the id is a real entry from the live
+`agy models` catalogue, and the id Orbit stores and displays is the same id
+it passed.
+
+Source of truth: `src/shared/defaultModel.ts`. Precedence is
+
+1. `OrbitPreferences.defaultModel` when the live catalogue still lists it —
+   this is the hook a future "default model" setting writes to, and nothing
+   else needs to change for it to become one;
+2. the first of `ORBIT_PREFERRED_DEFAULT_MODELS` the catalogue contains
+   (`gemini-3.8-flash` on the current one);
+3. the catalogue's own first entry — so a future catalogue that renames
+   everything still resolves concretely rather than deferring to `agy`.
+
+It is enforced at three depths, each independently sufficient for what it
+covers:
+
+- **`OrbitRuntime.sendMessage`** resolves the session against the live
+  catalogue *before* the turn is persisted or dispatched, and writes the
+  resolved id back onto the conversation. This is the guarantee: no run
+  begins on an unresolved session, whatever route reached it.
+- **`AntigravityProvider.sendMessage`** refuses to spawn at all if the
+  resolution produced no model (`provider.model_unresolved`), so no code
+  path can reach `agy` without one.
+- **The renderer** settles the active session the moment the catalogue
+  loads, so the picker shows the real model from the session's first frame
+  rather than after its first turn.
+
+**What was removed.** `conversation.model === null` used to mean "let
+Antigravity decide", and it was the state every new session started in. It
+was surfaced as a selectable **"Default model" / "Antigravity's own
+choice"** row in both the popover and the full browser, backed by a
+`DEFAULT_MODEL_OPTION` sentinel (`antigravity:default`) that claimed all
+three reasoning tiers. `resolveInvocation` then emitted no `--model` at all
+for it. All of that is gone: `null` is now only the brief pre-resolution
+moment, the picker offers real catalogue models exclusively, and
+`resolveInvocation` never produces a model-less invocation while a catalogue
+exists.
+
+Two further cases used to end in `agy` choosing, and no longer do:
+
+| case | before | now |
+| --- | --- | --- |
+| nothing selected | no `--model`, `agy` picks | `--model <Orbit's default> --effort <tier>` |
+| multi-tier base with a missing or invalid tier | **model dropped entirely**, `agy` picks | model kept, tier resolved to the nearest one it genuinely publishes |
+
+**Legacy sessions** carrying the old `null` (and any session naming a model
+the catalogue has since dropped) are migrated the first time they are opened
+or run, whichever comes first, and the migration is persisted. A session
+holding a raw *combined* id (`gemini-3.8-flash-medium`) is left alone — `agy`
+accepts it directly, so re-resolving it would silently move the user off a
+model that works.
+
+**Deliberate trade-off:** if `agy models` cannot be read at all there is
+nothing concrete to name, and Orbit fails the turn
+(`provider.model_unresolved`) rather than falling back to `agy`'s own
+default. The catalogue fetch does not latch an empty result, so a transient
+failure recovers on the next attempt.
+
 Both transports append the same `--model`/`--effort` flags, resolved in one place (`modelCatalog.resolveInvocation`) from the **real** `agy models` catalogue — Orbit never ships a hard-coded model list.
 
 The catalogue encodes reasoning in the model id itself, with uneven coverage (verified against agy 1.1.27): `gemini-3.8-flash-{low,medium,high}`, `gemini-3.1-pro-{low,high}` (no medium), `claude-sonnet-4-6` and `claude-opus-4-6-thinking` (no tiers at all), `gpt-oss-120b-medium` (one tier). `normalizeModels` collapses variants into one base model carrying exactly the tiers that exist, so the UI's reasoning control only appears when the selected model genuinely has one.
@@ -472,10 +533,32 @@ read… Your conversation is safe…`, and the partial answer was thrown away.
   failures keep their real code, their product copy and their diagnostics
   disclosure, untouched.
 
-**Deliberately not changed:** a `result` with `status: SUCCESS` that arrives
-after a Stop is still reported as a completion. agy genuinely finished; the
-answer is complete and keeping it loses nothing. Only *failures* are
-converted.
+### Stop precedence
+
+Accepting a Stop for a run that is still active decides the outcome. The run
+is interrupted, and nothing the transport says afterwards changes that.
+
+`'cancelling'` is not a waiting room — it **is** "Stop accepted", recorded
+before the provider is even asked. `handleProviderEvent` then converts any
+terminal event that lands while a run is in that state into the
+interruption:
+
+| ordering | outcome |
+| --- | --- |
+| SUCCESS finalized, then Stop pressed | **Completed** — `cancelRun` no-ops on an already-terminal run rather than dragging it into a stopping state it can never leave |
+| Stop accepted while the run was active | **Interrupted** |
+| Stop accepted, then a late SUCCESS | **Interrupted**, keeping the completion's own `finalText` |
+| Stop accepted, then the exit/error the stop caused | **Interrupted**, keeping whatever had streamed |
+| a genuine failure with no Stop | **Failure**, with its real code and diagnostics |
+
+A converted completion keeps its `finalText` on exactly the terms the
+ordinary completion path uses (`finalText || streamed`): the point is to
+preserve everything Antigravity actually produced, not to punish the turn
+for having been stopped.
+
+This supersedes the earlier decision to let a post-Stop `SUCCESS` report a
+completion. Both readings preserve the text; this one respects the user's
+action, which is the behaviour the product wants.
 
 ## Native image attachment
 

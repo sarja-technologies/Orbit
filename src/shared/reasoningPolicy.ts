@@ -16,34 +16,33 @@ export const EFFORT_RANK: Record<ReasoningEffort, number> = { low: 0, medium: 1,
  *  nearestSupportedEffort rather than gaining a fabricated one. */
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium'
 
-export const EMPTY_PREFERENCES: OrbitPreferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
+export const EMPTY_PREFERENCES: OrbitPreferences = { defaultModel: null, lastReasoningEffort: null, modelReasoningEfforts: {} }
 
-/** Stands in for "Antigravity's own default model" wherever a model option is
- *  needed. Its tier set is a documented CLI fact rather than a guess about
- *  which model agy defaults to: `agy --effort <tier>` with no `--model` is a
- *  verified-valid invocation (see modelCatalog.ts's header), so all three
- *  tiers really are selectable there. The id is a namespaced sentinel that
- *  cannot collide with a catalogue id. */
-export const DEFAULT_MODEL_OPTION: ModelOption = {
-  id: 'antigravity:default',
-  label: 'Default model',
-  supportedReasoningEfforts: ['low', 'medium', 'high']
-}
+/** The key an unresolved selection's remembered tier is filed under.
+ *
+ *  A session should never be here — Orbit resolves a concrete model before
+ *  any run (see shared/defaultModel.ts) — but a tier chosen in the moment
+ *  before that resolution lands still has to go somewhere, and it must not
+ *  be filed under a real model's id. Deliberately namespaced so it can never
+ *  collide with a catalogue id.
+ *
+ *  This replaces the old `antigravity:default` sentinel, which was not just
+ *  a key: it was a *selectable option* meaning "let Antigravity choose",
+ *  which Orbit no longer offers. */
+export const UNRESOLVED_MODEL_KEY = 'orbit:unresolved'
 
-/** The model option a selection refers to. `null` means the user is on
- *  Antigravity's own default. An id the catalogue does not contain resolves
- *  to null rather than to the default's tier set — a stale selection must
- *  not inherit tiers it was never shown to have. */
+/** The model option a selection refers to, or null when the catalogue does
+ *  not contain it. A stale or unresolved selection resolves to null rather
+ *  than to some stand-in's tier set — it must not inherit tiers it was never
+ *  shown to have. */
 export function modelForSelection(models: readonly ModelOption[], selectedModelId: string | null): ModelOption | null {
-  if (selectedModelId === null) return DEFAULT_MODEL_OPTION
+  if (selectedModelId === null) return null
   return models.find((model) => model.id === selectedModelId) ?? null
 }
 
-/** The preference key an explicit choice is remembered under. The default
- *  model gets its own slot, so leaving it and coming back is as stable as
- *  any named model. */
+/** The preference key an explicit tier choice is remembered under. */
 export function preferenceKeyFor(selectedModelId: string | null): string {
-  return selectedModelId ?? DEFAULT_MODEL_OPTION.id
+  return selectedModelId ?? UNRESOLVED_MODEL_KEY
 }
 
 /** Tiers a model genuinely publishes, ascending. Empty when the model has no
@@ -100,12 +99,15 @@ export function effortForModel(model: ModelOption | null, preferences: OrbitPref
   return nearestSupportedEffort(model, desired)
 }
 
-/** The tier a brand-new session starts on before any model is chosen.
- *  Antigravity accepts `--effort` with no `--model` (it applies the tier to
- *  its own default model — see modelCatalog.ts), so carrying the user's
- *  remembered level here is real, not decorative. */
+/** The tier a brand-new session starts on before its model has been
+ *  resolved against the live catalogue.
+ *
+ *  A provisional value only: `OrbitRuntime` resolves the session's real
+ *  model and re-derives the tier from what that model genuinely publishes
+ *  (see shared/defaultModel.ts), so a model without this tier never keeps
+ *  it. It exists so a session is never persisted with no tier at all. */
 export function effortForNewSession(preferences: OrbitPreferences): ReasoningEffort {
-  return effortForModel(DEFAULT_MODEL_OPTION, preferences) ?? DEFAULT_REASONING_EFFORT
+  return preferences.lastReasoningEffort ?? DEFAULT_REASONING_EFFORT
 }
 
 /** Folds an explicit user choice into the stored preferences. Clearing a
@@ -123,6 +125,7 @@ export function rememberEffort(
     else delete modelReasoningEfforts[modelId]
   }
   return {
+    defaultModel: preferences.defaultModel,
     lastReasoningEffort: effort ?? preferences.lastReasoningEffort,
     modelReasoningEfforts
   }
@@ -134,6 +137,7 @@ export function normalizePreferences(value: unknown): OrbitPreferences {
   if (!value || typeof value !== 'object') return EMPTY_PREFERENCES
   const raw = value as Record<string, unknown>
   const last = isEffort(raw.lastReasoningEffort) ? raw.lastReasoningEffort : null
+  const defaultModel = typeof raw.defaultModel === 'string' && raw.defaultModel.trim() ? raw.defaultModel.trim() : null
   const efforts: Record<string, ReasoningEffort> = {}
   const map = raw.modelReasoningEfforts
   if (map && typeof map === 'object' && !Array.isArray(map)) {
@@ -141,7 +145,7 @@ export function normalizePreferences(value: unknown): OrbitPreferences {
       if (modelId && isEffort(effort)) efforts[modelId] = effort
     }
   }
-  return { lastReasoningEffort: last, modelReasoningEfforts: efforts }
+  return { defaultModel, lastReasoningEffort: last, modelReasoningEfforts: efforts }
 }
 
 function isEffort(value: unknown): value is ReasoningEffort {

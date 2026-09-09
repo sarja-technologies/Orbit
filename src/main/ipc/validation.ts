@@ -44,6 +44,7 @@ export const pickFolderSchema = z
 const reasoningEffortSchema = z.enum(['low', 'medium', 'high'])
 
 export const preferencesSchema = z.object({
+  defaultModel: z.string().trim().min(1).max(200).nullable().default(null),
   lastReasoningEffort: reasoningEffortSchema.nullable(),
   modelReasoningEfforts: z.record(z.string().min(1).max(200), reasoningEffortSchema)
 })

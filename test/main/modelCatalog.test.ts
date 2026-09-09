@@ -67,8 +67,26 @@ describe('normalizeModels', () => {
 describe('resolveInvocation', () => {
   const raw = parseModelList(REAL_OUTPUT)
 
-  it('sends nothing when nothing was chosen', () => {
-    expect(resolveInvocation(null, null, raw)).toEqual({})
+  // PRODUCT RULE: Orbit owns its default model. There is no invocation that
+  // omits --model while a catalogue exists, because omitting it is what
+  // hands the choice to agy.
+  it('names Orbit’s own default model when nothing was chosen', () => {
+    expect(resolveInvocation(null, null, raw)).toEqual({ model: 'gemini-3.8-flash', effort: 'medium' })
+  })
+
+  it('never produces a model-less invocation, whatever it is asked', () => {
+    const cases: Array<[string | null, string | null]> = [
+      [null, null],
+      [null, 'high'],
+      ['gemini-3.1-pro', null],
+      ['gemini-3.1-pro', 'medium'],
+      ['gemini-3.8-flash', null],
+      ['', ''],
+      ['some-future-model', null]
+    ]
+    for (const [model, effort] of cases) {
+      expect(resolveInvocation(model, effort, raw).model, `${String(model)}/${String(effort)}`).toBeTruthy()
+    }
   })
 
   it('passes a raw catalogue id through without inventing an effort flag', () => {
@@ -83,19 +101,27 @@ describe('resolveInvocation', () => {
     expect(resolveInvocation('gemini-3.8-flash', 'medium', raw)).toEqual({ model: 'gemini-3.8-flash', effort: 'medium' })
   })
 
-  it('omits the model entirely rather than guessing a tier', () => {
-    // gemini-3.1-pro has no plain variant in the catalogue, so sending it
-    // alone would be rejected — and picking a tier for the user would be a
-    // silent behaviour change they never asked for.
-    expect(resolveInvocation('gemini-3.1-pro', null, raw)).toEqual({})
+  it('keeps the chosen model and resolves a tier it really has', () => {
+    // gemini-3.1-pro has no plain variant, so sending it alone would be
+    // rejected. Orbit picks the tier the model genuinely publishes nearest
+    // to the documented default rather than dropping the user's model and
+    // letting agy choose the whole thing.
+    expect(resolveInvocation('gemini-3.1-pro', null, raw)).toEqual({ model: 'gemini-3.1-pro', effort: 'low' })
   })
 
-  it('omits the model when the requested tier is not one the model offers', () => {
-    expect(resolveInvocation('gemini-3.1-pro', 'medium', raw)).toEqual({})
+  it('corrects a tier the model does not offer instead of abandoning the model', () => {
+    // 3.1 Pro publishes low and high only; medium resolves downward.
+    expect(resolveInvocation('gemini-3.1-pro', 'medium', raw)).toEqual({ model: 'gemini-3.1-pro', effort: 'low' })
   })
 
-  it('keeps a bare effort when no model was chosen', () => {
-    expect(resolveInvocation(null, 'high', raw)).toEqual({ effort: 'high' })
+  it('names a concrete model even when only a bare effort was chosen', () => {
+    expect(resolveInvocation(null, 'high', raw)).toEqual({ model: 'gemini-3.8-flash', effort: 'high' })
+  })
+
+  it('reports nothing to run only when the catalogue could not be read', () => {
+    // The one model-less result left. Callers must treat it as the failure
+    // it is, never as "let agy decide" — see AntigravityProvider.sendMessage.
+    expect(resolveInvocation(null, null, [])).toEqual({})
   })
 
   it('passes an unrecognized model through untouched', () => {

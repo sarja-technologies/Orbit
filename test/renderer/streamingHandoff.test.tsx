@@ -109,7 +109,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn() },
-      preferences: { get: vi.fn(async () => ({ lastReasoningEffort: null, modelReasoningEfforts: {} })), set: vi.fn(async (next) => next) },
+      preferences: { get: vi.fn(async () => ({ defaultModel: null, lastReasoningEffort: null, modelReasoningEfforts: {} })), set: vi.fn(async (next) => next) },
       conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setWorkingDirectory: vi.fn() },
       models: { list: vi.fn(async () => []) },
       messages: { send: vi.fn(async () => RUN) },
@@ -379,6 +379,28 @@ describe('streaming hand-off to the persisted assistant message', () => {
     emit({ type: 'text.delta', delta: 'Here is what I found.' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
     expect(await screen.findByText('Here is what I found.')).toBeInTheDocument()
     expect(screen.getByText('Reading App.tsx')).toBeInTheDocument()
+  })
+
+  it('keeps the composer usable when a SUCCESS lands after the user stopped', async () => {
+    // The renderer half of Stop precedence. The runtime converts the late
+    // completion into the interruption; the UI must land on that state and
+    // stay usable, not flip back to a finished-looking turn.
+    await startRun()
+    emit({ type: 'text.delta', delta: 'Half an answ' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    await screen.findByText('Half an answ')
+    await userEvent.click(screen.getByRole('button', { name: /stop generating/i }))
+
+    messages = [
+      message('m1', 'user', 'Tell me about bicycles'),
+      { ...message('m2', 'assistant', 'Half an answer, finished after the stop.'), status: 'cancelled' }
+    ]
+    emit({ type: 'run.cancelled' } as Partial<RuntimeEvent> & { type: 'run.cancelled' }, listener!)
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
+    expect(screen.getByText('You stopped this response')).toBeInTheDocument()
+    expect(screen.getByText('Half an answer, finished after the stop.')).toBeInTheDocument()
+    // The conversation is resumable straight away.
+    expect(screen.getByRole('textbox', { name: /message/i })).not.toBeDisabled()
   })
 
   it('clears the live run once the refreshed transcript has taken over', async () => {

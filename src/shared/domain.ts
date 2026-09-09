@@ -171,6 +171,12 @@ export interface ProjectGroup {
  *  than the renderer, so they survive a reinstall of the window state and
  *  are readable by the runtime when it seeds a new session. */
 export interface OrbitPreferences {
+  /** The model Orbit starts every new session on, as a normalized
+   *  catalogue id. null means "whichever of Orbit's preferred models this
+   *  machine's catalogue actually has" (see shared/defaultModel.ts) — it
+   *  never means "let Antigravity choose". This is the hook a future
+   *  default-model setting writes to. */
+  defaultModel: string | null
   /** The last reasoning tier the user explicitly chose, on any model. null
    *  until they have ever chosen one — see reasoningPolicy.ts, which
    *  defaults that case to medium. */

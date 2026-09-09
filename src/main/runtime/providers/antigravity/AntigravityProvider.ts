@@ -94,6 +94,16 @@ export class AntigravityProvider implements AgentProvider {
     // Resolve the model/effort choice against the real catalogue before
     // either transport spawns, so both launch paths agree.
     await this.loadModels()
+    // PRODUCT RULE, enforced at the only boundary that spawns agy: Orbit
+    // always names a concrete model. A catalogue that could not be read
+    // leaves nothing to name, and running anyway would mean agy picking —
+    // so the turn fails honestly instead of silently deferring the choice.
+    if (!resolveInvocation(input.model, input.reasoningEffort, this.rawModels).model) {
+      throw codedError(
+        'provider.model_unresolved',
+        'Orbit could not read Antigravity’s model list, so it cannot name the model to run. Orbit never lets Antigravity choose one for it. Check that `agy models` works, then try again.'
+      )
+    }
     if (input.transport === 'pty') {
       let session = this.ptySessions.get(input.conversationId)
       if (!session) {

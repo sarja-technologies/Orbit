@@ -161,10 +161,18 @@ describe('model and effort reach the structured launch', () => {
     spawnCalls.length = 0
   })
 
-  it('passes neither flag when the conversation has no selection', async () => {
+  // PRODUCT RULE: Orbit owns its default model. agy is always told which
+  // concrete model to run; it is never left to choose.
+  it('names Orbit’s own default model when the conversation has no selection', async () => {
     const args = await structuredArgs({})
-    expect(args).not.toContain('--model')
-    expect(args).not.toContain('--effort')
+    expect(args.slice(args.indexOf('--model'))).toEqual(['--model', 'gemini-3.8-flash', '--effort', 'medium'])
+  })
+
+  it('never launches agy without --model', async () => {
+    for (const selection of [{}, { reasoningEffort: 'high' as const }, { model: 'gemini-3.1-pro' }, { model: 'gemini-3.8-flash' }]) {
+      const args = await structuredArgs(selection)
+      expect(args, JSON.stringify(selection)).toContain('--model')
+    }
   })
 
   it('passes a single-tier model without an effort flag', async () => {
@@ -180,10 +188,11 @@ describe('model and effort reach the structured launch', () => {
     expect(args[args.indexOf('--effort') + 1]).toBe('medium')
   })
 
-  it('never guesses a tier for a multi-tier model left on default effort', async () => {
+  it('keeps a multi-tier model and resolves a tier it really publishes', async () => {
+    // 3.1 Pro offers low and high only, and agy rejects it without --effort.
+    // Orbit resolves the tier rather than dropping the model.
     const args = await structuredArgs({ model: 'gemini-3.1-pro', reasoningEffort: null })
-    expect(args).not.toContain('--model')
-    expect(args).not.toContain('--effort')
+    expect(args.slice(args.indexOf('--model'))).toEqual(['--model', 'gemini-3.1-pro', '--effort', 'low'])
   })
 })
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_MODEL_OPTION,
+  UNRESOLVED_MODEL_KEY,
   DEFAULT_REASONING_EFFORT,
   EMPTY_PREFERENCES,
   effortForModel,
@@ -92,22 +92,22 @@ describe('choosing a tier for a newly selected model', () => {
   })
 })
 
-describe('Antigravity’s own default model', () => {
-  it('has all three tiers, because `agy --effort <tier>` with no --model is valid', () => {
-    expect(supportedEfforts(DEFAULT_MODEL_OPTION)).toEqual(['low', 'medium', 'high'])
-  })
-
-  it('is what a null selection resolves to', () => {
-    expect(modelForSelection([FLASH], null)).toBe(DEFAULT_MODEL_OPTION)
+describe('an unresolved selection', () => {
+  // Orbit no longer offers "let Antigravity choose". A null model is a
+  // session whose concrete model has not been resolved yet, not a standing
+  // choice — see shared/defaultModel.ts.
+  it('resolves to no model at all, rather than to a stand-in with tiers', () => {
+    expect(modelForSelection([FLASH], null)).toBeNull()
     expect(modelForSelection([FLASH], FLASH.id)).toBe(FLASH)
   })
 
-  it('does not lend its tiers to a selection the catalogue has dropped', () => {
+  it('does not lend tiers to a selection the catalogue has dropped', () => {
     expect(modelForSelection([FLASH], 'gemini-9-imaginary')).toBeNull()
   })
 
-  it('gets its own preference slot, so leaving it and returning is stable', () => {
-    expect(preferenceKeyFor(null)).toBe(DEFAULT_MODEL_OPTION.id)
+  it('files a tier chosen before resolution under a key no model can own', () => {
+    expect(preferenceKeyFor(null)).toBe(UNRESOLVED_MODEL_KEY)
+    expect(UNRESOLVED_MODEL_KEY).not.toBe(FLASH.id)
     expect(preferenceKeyFor(FLASH.id)).toBe(FLASH.id)
   })
 

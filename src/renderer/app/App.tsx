@@ -18,6 +18,7 @@ import type {
 } from '@shared/domain'
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor, rememberEffort } from '@shared/reasoningPolicy'
+import { isRunnableSelection, resolveDefaultSelection } from '@shared/defaultModel'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
@@ -194,15 +195,32 @@ export function App(): JSX.Element {
     setFocusPendingId(null)
   }, [focusPendingId, workspace.activeConversationId])
 
-  // A session carried over from before Orbit had a reasoning preference has
-  // no tier at all. Rather than leaving it on "Auto" forever, settle it once
-  // from the same policy a new session uses — the user's remembered level.
+  // Settles a session onto a concrete model the moment the real catalogue is
+  // known.
+  //
+  // Orbit owns its default model: there is no "Default" the user can sit on
+  // and no state in which Antigravity picks (see shared/defaultModel.ts).
+  // `OrbitRuntime` guarantees this before any run regardless, but doing it
+  // here too means the picker shows the actual model from the moment the
+  // session is opened rather than after its first turn — and it is what
+  // migrates a legacy session still carrying the old null.
+  //
+  // Also settles a session that has a real model but no tier (carried over
+  // from before Orbit had a reasoning preference), from the same policy.
   useEffect(() => {
     if (!activeConversation || models.length === 0) return
-    if (activeConversation.reasoningEffort !== null) return
     if (seededEffortIds.current.has(activeConversation.id)) return
-    const target = modelForSelection(models, activeConversation.model)
-    const effort = effortForModel(target, preferences)
+
+    if (!isRunnableSelection(models, activeConversation.model)) {
+      const selection = resolveDefaultSelection(models, preferences)
+      if (!selection) return
+      seededEffortIds.current.add(activeConversation.id)
+      void persistModel(activeConversation.id, selection.model, selection.reasoningEffort)
+      return
+    }
+
+    if (activeConversation.reasoningEffort !== null) return
+    const effort = effortForModel(modelForSelection(models, activeConversation.model), preferences)
     if (!effort) return
     seededEffortIds.current.add(activeConversation.id)
     void persistModel(activeConversation.id, activeConversation.model, effort)
@@ -459,7 +477,7 @@ export function App(): JSX.Element {
   /** Choosing a model does not choose a tier: the tier comes from what this
    *  user has chosen before, mapped onto what the new model genuinely
    *  offers. A model with no tiers lands on none. */
-  function selectModel(modelId: string | null): void {
+  function selectModel(modelId: string): void {
     if (!activeConversation) return
     const target = modelForSelection(models, modelId)
     void persistModel(activeConversation.id, modelId, effortForModel(target, preferences))
