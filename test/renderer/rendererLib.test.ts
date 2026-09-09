@@ -3,7 +3,10 @@ import { applyActivity, currentActivityLine, elapsedLabel, emptyActivity, hasFai
 import { describeProviderProblem, describeRuntimeError } from '../../src/renderer/app/lib/errorCopy'
 import { imageItemsFromClipboard, isNativeImage, projectedState, stateLabel, type DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import { parseInline, parseMarkdown } from '../../src/renderer/app/lib/markdown'
+import { RuntimeEventBatcher } from '../../src/renderer/app/lib/runtimeEventBatcher'
 import type { ToolActivityEvent } from '../../src/shared/runtime-events'
+import { relativeTime } from '../../src/renderer/app/lib/relativeTime'
+import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 function activityEvent(label: string, status: ToolActivityEvent['status'], providerStepId?: string): ToolActivityEvent {
   return {
@@ -189,5 +192,79 @@ describe('markdown', () => {
 
   it('returns plain text unchanged when there is no markup', () => {
     expect(parseInline('just words')).toEqual([{ type: 'text', value: 'just words' }])
+  })
+})
+
+describe('relativeTime', () => {
+  const now = Date.parse('2026-09-07T12:00:00Z')
+
+  it('reads as a mail client would', () => {
+    expect(relativeTime('2026-09-07T11:59:40Z', now)).toBe('Now')
+    expect(relativeTime('2026-09-07T11:20:00Z', now)).toBe('40m ago')
+    expect(relativeTime('2026-09-07T09:00:00Z', now)).toBe('3h ago')
+    expect(relativeTime('2026-09-05T12:00:00Z', now)).toBe('2d ago')
+    expect(relativeTime('2026-08-24T12:00:00Z', now)).toBe('2w ago')
+    expect(relativeTime('2026-06-07T12:00:00Z', now)).toBe('3mo ago')
+  })
+
+  it('says nothing rather than guessing for an unusable timestamp', () => {
+    expect(relativeTime('not-a-date', now)).toBe('')
+  })
+})
+
+describe('RuntimeEventBatcher', () => {
+  const base = {
+    projectId: 'p',
+    conversationId: 'c',
+    runId: 'r',
+    providerId: 'antigravity' as const,
+    createdAt: 'now'
+  }
+
+  it('coalesces tiny streamed deltas into one paint-frame batch', () => {
+    const batches: Array<Record<string, string>> = []
+    const immediate: RuntimeEvent[] = []
+    let scheduled = (): void => {
+      throw new Error('flush was not scheduled')
+    }
+    const batcher = new RuntimeEventBatcher(
+      (batch) => batches.push(batch.textDeltas),
+      (event) => immediate.push(event),
+      (callback) => {
+        scheduled = callback
+        return 1
+      },
+      () => undefined
+    )
+
+    batcher.push({ ...base, type: 'text.delta', delta: 'Hel' })
+    batcher.push({ ...base, type: 'text.delta', delta: 'lo' })
+
+    expect(batches).toHaveLength(0)
+    scheduled()
+    expect(batches).toEqual([{ r: 'Hello' }])
+    expect(immediate).toHaveLength(0)
+  })
+
+  it('flushes pending stream output before immediate run events', () => {
+    const order: string[] = []
+    let scheduled = false
+    const batcher = new RuntimeEventBatcher(
+      (batch) => order.push(`batch:${batch.textDeltas.r}`),
+      (event) => order.push(`event:${event.type}`),
+      () => {
+        scheduled = true
+        return 1
+      },
+      () => {
+        scheduled = false
+      }
+    )
+
+    batcher.push({ ...base, type: 'text.delta', delta: 'done' })
+    batcher.push({ ...base, type: 'run.completed', finalText: 'done' })
+
+    expect(scheduled).toBe(false)
+    expect(order).toEqual(['batch:done', 'event:run.completed'])
   })
 })

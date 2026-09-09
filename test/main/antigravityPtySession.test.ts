@@ -13,7 +13,6 @@ class FakeTransport implements IAntigravityPtyTransport {
   respondCalls: Array<{ pending: PtyInteraction; optionId: string }> = []
   respondResult = true
   cancelCalls = 0
-  killCalls = 0
   pasteCalls = 0
 
   start(handlers: AntigravityPtyHandlers): void {
@@ -21,6 +20,9 @@ class FakeTransport implements IAntigravityPtyTransport {
   }
   sendPrompt(prompt: string): void {
     this.sentPrompts.push(prompt)
+    // Real agy goes busy once a prompt is submitted; a fake that never does
+    // lets a test settle a turn the session has no evidence ever ran.
+    this.handlers?.onBusy()
   }
   respond(pending: PtyInteraction, optionId: string): boolean {
     this.respondCalls.push({ pending, optionId })
@@ -35,9 +37,28 @@ class FakeTransport implements IAntigravityPtyTransport {
   cancelTurn(): void {
     this.cancelCalls++
   }
-  kill(): void {
+  /** Mirrors the real transport: `kill()` only *requests* termination, and
+   *  `isRunning` stays true until `exit()` is called to simulate the OS
+   *  process actually going away. Tests that flip `isRunning` synchronously
+   *  here cannot see the retirement race this models. */
+  killCalls = 0
+  killSignals: (string | undefined)[] = []
+  private markExited: () => void = () => undefined
+  private exited: Promise<void> = new Promise<void>((resolve) => {
+    this.markExited = resolve
+  })
+  kill(signal?: string): void {
     this.killCalls++
+    this.killSignals.push(signal)
+  }
+  whenExited(): Promise<void> {
+    return this.exited
+  }
+  /** Simulates the OS process finally exiting. */
+  exit(code = 0): void {
     this.isRunning = false
+    this.markExited()
+    this.handlers?.onExit(code)
   }
   resize(): void {}
 }
@@ -54,6 +75,8 @@ function baseInput(overrides: Partial<ProviderSendInput> = {}): ProviderSendInpu
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
+    model: null,
+    reasoningEffort: null,
     ...overrides
   }
 }
@@ -254,6 +277,41 @@ describe('AntigravityPtySession state machine', () => {
     expect(events.some((e) => e.type === 'run.completed')).toBe(false)
   })
 
+  it('cancels a run that is queued behind a retirement, and never spawns the process it was owed', async () => {
+    // The second window where a run has no process of its own: it arrived
+    // while a retirement was already in flight, so it is waiting on that
+    // retirement rather than on a transport. Stop must void the spawn it is
+    // owed, exactly as it does for a model-change retirement.
+    const { session, transports, events, onEvent } = harness({ findConversationId: () => 'known-id' })
+    session.send(baseInput({ nativeConversationId: 'known-id' }), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onBusy()
+    transports[0]!.handlers!.onReadyForInput() // first turn settles
+
+    session.shutdown() // detaches and retires the process; it stays alive
+    session.send(baseInput({ runId: 'run_2', prompt: 'queued behind the retirement', nativeConversationId: 'known-id' }), onEvent)
+    expect(transports, 'the queued send must wait, not spawn').toHaveLength(1)
+
+    session.cancel()
+    expect(events.filter((e) => e.type === 'run.cancelled' && e.runId === 'run_2')).toHaveLength(1)
+
+    // The predecessor genuinely exits, releasing ownership. The cancelled
+    // run must not follow it out.
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(transports, 'a cancelled run must not spawn the process it was owed').toHaveLength(1)
+    expect(events.filter((e) => e.type === 'run.cancelled')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'run.completed' && e.runId === 'run_2')).toBe(false)
+    expect(events.some((e) => e.type === 'run.failed')).toBe(false)
+
+    // A later run is unaffected: it spawns and resumes normally.
+    session.send(baseInput({ runId: 'run_3', prompt: 'a later message', nativeConversationId: 'known-id' }), onEvent)
+    expect(transports).toHaveLength(2)
+    transports[1]!.handlers!.onReadyForInput()
+    expect(transports[1]!.sentPrompts).toContain('a later message')
+    expect(transports.some((transport) => transport.sentPrompts.includes('queued behind the retirement'))).toBe(false)
+  })
+
   it('reports run.failed with a pending interaction cancelled when the process exits unexpectedly', () => {
     const { session, transports, events, onEvent } = harness()
     session.send(baseInput({ nativeConversationId: 'known-id' }), onEvent)
@@ -423,3 +481,36 @@ describe('AntigravityPtySession state machine', () => {
 
   void vi // keep vi import even if unused by a given subset of tests
 })
+
+describe('AntigravityPtySession process ownership', () => {
+  it('does not spawn a replacement while a shut-down process is still exiting', async () => {
+    // shutdown() only *requests* termination. Until the old process is gone,
+    // a later send() must not put a second agy against the same native
+    // conversation.
+    const { session, transports, onEvent } = harness()
+    session.send(baseInput(), onEvent)
+    const first = transports[0]!
+    first.handlers?.onReadyForInput()
+
+    session.shutdown()
+    expect(first.killCalls).toBe(1)
+    expect(first.isRunning, 'kill() must not pretend the process is gone').toBe(true)
+
+    session.send(baseInput({ runId: 'run_2' }), onEvent)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(transports, 'no replacement while the predecessor is alive').toHaveLength(1)
+
+    first.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(transports).toHaveLength(2)
+    expect(transports[1]!.isRunning).toBe(true)
+  })
+
+  it('spawns immediately when nothing is being retired', async () => {
+    const { session, transports, onEvent } = harness()
+    session.send(baseInput(), onEvent)
+    // The ordinary path stays synchronous — no await needed to see it.
+    expect(transports).toHaveLength(1)
+  })
+})
+

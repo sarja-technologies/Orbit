@@ -9,6 +9,7 @@ export type RuntimeEvent =
   | InteractionResolvedEvent
   | ArtifactDiscoveredEvent
   | ArtifactProducedEvent
+  | RunNoticeEvent
   | RunCompletedEvent
   | RunFailedEvent
   | RunCancelledEvent
@@ -76,6 +77,15 @@ export interface ArtifactDiscoveredEvent extends RuntimeEventBase {
   name?: string
   mimeType?: string | null
   metadata?: Record<string, unknown>
+}
+
+/** Something the user needs told about a run that is neither an error nor a
+ *  question — today, that Orbit could not apply a model change yet. Kept
+ *  distinct from `run.failed` because the turn itself is fine. */
+export interface RunNoticeEvent extends RuntimeEventBase {
+  type: 'run.notice'
+  code: string
+  message: string
 }
 
 export interface RunCompletedEvent extends RuntimeEventBase {

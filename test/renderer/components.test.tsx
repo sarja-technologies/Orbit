@@ -6,8 +6,12 @@ import { InteractionCard, InactiveInteraction, ResolvedInteraction } from '../..
 import { AttachmentChip } from '../../src/renderer/app/components/AttachmentChip'
 import { ActivitySummary, LiveActivity } from '../../src/renderer/app/components/ActivityLine'
 import { Markdown } from '../../src/renderer/app/components/Markdown'
+import { MessageBlock } from '../../src/renderer/app/components/MessageBlock'
+import { PendingReply } from '../../src/renderer/app/components/ChatRow'
+import { WorkSession } from '../../src/renderer/app/components/WorkSession'
 import { applyActivity, emptyActivity } from '../../src/renderer/app/lib/activity'
 import type { DraftAttachment } from '../../src/renderer/app/lib/attachments'
+import type { Conversation, Message, Project } from '../../src/shared/domain'
 import type { InteractionRequiredEvent, ToolActivityEvent } from '../../src/shared/runtime-events'
 
 function interaction(overrides: Partial<InteractionRequiredEvent> = {}): InteractionRequiredEvent {
@@ -205,6 +209,170 @@ describe('activity rendering', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Ran 1 command/ }))
     expect(screen.getByText('Bash(a)')).toBeInTheDocument()
+  })
+})
+
+describe('conversation sides', () => {
+  const message = (overrides: Partial<Message> = {}): Message => ({
+    id: 'm-1',
+    projectId: 'p',
+    conversationId: 'c',
+    runId: 'r',
+    role: 'user',
+    content: 'Ship the release notes.',
+    status: 'completed',
+    createdAt: '2026-09-08T10:04:00.000Z',
+    updatedAt: '2026-09-08T10:04:00.000Z',
+    sequence: 1,
+    ...overrides
+  })
+
+  const block = (overrides: Partial<Message> = {}, showRole = true): HTMLElement => {
+    const { container } = render(
+      <MessageBlock message={message(overrides)} showRole={showRole} attachments={[]} thumbnails={{}} error={null} />
+    )
+    return container.querySelector('.chat-row') as HTMLElement
+  }
+
+  it('puts the reader on the right in a sent bubble', () => {
+    const row = block()
+    expect(row).toHaveClass('chat-row-user')
+    expect(row.querySelector('.chat-bubble-user')).not.toBeNull()
+    // The assistant's surface is never applied to a user turn.
+    expect(row.querySelector('.chat-bubble-assistant')).toBeNull()
+    expect(screen.getByText('You')).toBeInTheDocument()
+  })
+
+  it('puts Antigravity on the left in its own bubble', () => {
+    const row = block({ role: 'assistant', content: 'Done — notes are drafted.' })
+    expect(row).toHaveClass('chat-row-assistant')
+    expect(row.querySelector('.chat-bubble-assistant')).not.toBeNull()
+    expect(row.querySelector('.chat-bubble-user')).toBeNull()
+    expect(screen.getByText('Antigravity')).toBeInTheDocument()
+  })
+
+  it('carries the side on the row even when a grouped message drops its header', () => {
+    const row = block({ role: 'assistant' }, false)
+    // Grouping only removes the label; alignment must still identify the
+    // speaker, or a follow-up message becomes unattributable.
+    expect(row).toHaveClass('chat-row-assistant')
+    expect(row.querySelector('.chat-bubble-assistant')).not.toBeNull()
+    expect(screen.queryByText('Antigravity')).not.toBeInTheDocument()
+  })
+
+  it('shows a real send time rather than a placeholder', () => {
+    const row = block()
+    const time = row.querySelector('time')
+    expect(time).toHaveAttribute('dateTime', '2026-09-08T10:04:00.000Z')
+    expect(time?.textContent).toMatch(/\d/)
+  })
+})
+
+describe('reply-in-progress state', () => {
+  const project: Project = {
+    id: 'p',
+    name: 'Orbit',
+    rootPath: null,
+    createdAt: '2026-09-08T10:00:00.000Z',
+    updatedAt: '2026-09-08T10:00:00.000Z'
+  }
+
+  const conversation: Conversation = {
+    id: 'c',
+    projectId: 'p',
+    title: 'Session',
+    providerId: 'antigravity',
+    nativeConversationId: null,
+    status: 'running',
+    transport: 'pty',
+    model: null,
+    reasoningEffort: null,
+    workingDirectory: null,
+    createdAt: '2026-09-08T10:00:00.000Z',
+    updatedAt: '2026-09-08T10:00:00.000Z'
+  }
+
+  const session = (props: Partial<Parameters<typeof WorkSession>[0]> = {}) =>
+    render(
+      <WorkSession
+        project={project}
+        conversation={conversation}
+        messages={[]}
+        runs={[]}
+        projectFiles={[]}
+        thumbnails={{}}
+        activeRunId="r"
+        streamText=""
+        activityByRun={{}}
+        pendingInteraction={null}
+        unavailableInteraction={null}
+        staleInteraction={false}
+        respondingInteractionId={null}
+        resolvedRecords={[]}
+        onRespond={vi.fn()}
+        {...props}
+      />
+    )
+
+  it('holds an animated assistant bubble open before the first token arrives', () => {
+    const { container } = session()
+
+    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    expect(container.querySelectorAll('.typing-dot')).toHaveLength(3)
+    // The wait happens on the assistant's side, where the answer will land.
+    expect(container.querySelector('.chat-row-assistant .chat-bubble-pending')).not.toBeNull()
+  })
+
+  it('says working, not replying, once tool steps are running', () => {
+    const activity = applyActivity(emptyActivity(), {
+      type: 'tool.activity',
+      projectId: 'p',
+      conversationId: 'c',
+      runId: 'r',
+      providerId: 'antigravity',
+      createdAt: new Date().toISOString(),
+      label: 'Bash(npm test)',
+      status: 'running',
+      providerStepId: '1'
+    })
+    const { container } = session({ activityByRun: { r: activity } })
+
+    expect(screen.getByText('Antigravity is working')).toBeInTheDocument()
+    // Tool detail is subordinate to the reply, not a peer of it.
+    expect(container.querySelector('.chat-aside .activity-live')).not.toBeNull()
+  })
+
+  it('does not draw the subordinate rail for a run that has recorded no steps', () => {
+    // Every run starts with an empty activity state. Treating that as
+    // evidence of tool work drew an empty rail and claimed "working"
+    // before anything had actually run.
+    const { container } = session({ activityByRun: { r: emptyActivity() } })
+
+    expect(container.querySelector('.chat-aside')).toBeNull()
+    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+  })
+
+  it('keeps a streaming reply visibly unfinished while text is arriving', () => {
+    const { container } = session({ streamText: 'Working through the diff' })
+
+    expect(screen.getByText('Working through the diff')).toBeInTheDocument()
+    expect(screen.getByText('Replying')).toBeInTheDocument()
+    expect(container.querySelector('.chat-bubble-assistant.is-streaming')).not.toBeNull()
+    // The placeholder yields to the real bubble rather than stacking under it.
+    expect(container.querySelector('.chat-bubble-pending')).toBeNull()
+  })
+
+  it('drops every live indicator once no run is active', () => {
+    const { container } = session({ activeRunId: null })
+
+    expect(container.querySelector('.chat-bubble-pending')).toBeNull()
+    expect(container.querySelector('.is-streaming')).toBeNull()
+    expect(screen.queryByText('Replying')).not.toBeInTheDocument()
+  })
+
+  it('announces the pending row so the wait is not a silent one', () => {
+    const { container } = render(<PendingReply />)
+    expect(container.querySelector('[aria-live="polite"]')).not.toBeNull()
   })
 })
 

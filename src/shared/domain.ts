@@ -5,6 +5,10 @@ export type ProviderId = 'antigravity'
 export interface Project {
   id: ID
   name: string
+  /** The real folder Antigravity runs in for this project's sessions.
+   *  null means the project has no folder of its own and falls back to the
+   *  Orbit-managed workspace directory — never a guessed path. */
+  rootPath: string | null
   createdAt: string
   updatedAt: string
 }
@@ -18,6 +22,19 @@ export interface Project {
  *  docs/antigravity-transports.md's transport-continuity section). */
 export type ConversationTransport = 'structured' | 'pty'
 
+/** The real reasoning tiers Antigravity's own catalogue exposes. Which of
+ *  these a given model supports is model-dependent and never assumed — see
+ *  modelCatalog.ts. */
+export type ReasoningEffort = 'low' | 'medium' | 'high'
+
+export interface ModelOption {
+  id: string
+  label: string
+  /** Present only when the catalogue genuinely lists tier variants for this
+   *  model. Absent means the model has no reasoning control at all. */
+  supportedReasoningEfforts?: readonly ReasoningEffort[]
+}
+
 export interface Conversation {
   id: ID
   projectId: ID
@@ -26,6 +43,14 @@ export interface Conversation {
   nativeConversationId: string | null
   status: 'idle' | 'running' | 'failed'
   transport: ConversationTransport
+  /** null means "whatever Antigravity's own default is" — never a guess. */
+  model: string | null
+  /** null means no explicit tier chosen; a multi-tier model without one
+   *  falls back to Antigravity's default rather than a manufactured tier. */
+  reasoningEffort: ReasoningEffort | null
+  /** Per-session override of the project's root folder. null means "use the
+   *  project's folder", which is what almost every session wants. */
+  workingDirectory: string | null
   createdAt: string
   updatedAt: string
 }
@@ -132,6 +157,27 @@ export interface RuntimeErrorInfo {
   message: string
   retryable: boolean
   details?: Record<string, unknown>
+}
+
+/** One project plus the sessions that belong to it — the shape the
+ *  project-first sidebar renders directly, without needing every project's
+ *  full snapshot in memory. */
+export interface ProjectGroup {
+  project: Project
+  conversations: Conversation[]
+}
+
+/** Cross-session user preferences. Persisted in the Orbit database rather
+ *  than the renderer, so they survive a reinstall of the window state and
+ *  are readable by the runtime when it seeds a new session. */
+export interface OrbitPreferences {
+  /** The last reasoning tier the user explicitly chose, on any model. null
+   *  until they have ever chosen one — see reasoningPolicy.ts, which
+   *  defaults that case to medium. */
+  lastReasoningEffort: ReasoningEffort | null
+  /** Explicit per-model choices, so switching away from a model and back
+   *  returns the tier that model was left on. Keyed by normalized model id. */
+  modelReasoningEfforts: Record<string, ReasoningEffort>
 }
 
 export interface ProjectSnapshot {

@@ -1,13 +1,18 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import type {
   Artifact,
   Conversation,
   ID,
+  OrbitPreferences,
   Project,
   ProjectFile,
+  ProjectGroup,
   ProjectSnapshot,
+  ModelOption,
   ProviderStatus,
+  ReasoningEffort,
   Reference,
   Run,
   RuntimeErrorInfo,
@@ -18,6 +23,7 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
+import { effortForNewSession } from '@shared/reasoningPolicy'
 import { nowIso } from '@main/util/ids'
 
 interface ActiveRunState {
@@ -54,19 +60,46 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.listProjects()
   }
 
-  createProject(name: string): Project {
+  listProjectTree(): ProjectGroup[] {
+    return this.store.listProjectTree()
+  }
+
+  createProject(name: string, rootPath: string | null = null): Project {
     if (!name.trim()) throw new Error('Project name is required.')
-    const project = this.store.createProject(name)
-    this.store.createConversation(project.id, 'Main')
+    const project = this.store.createProject(name, rootPath)
+    this.createConversation(project.id, 'Main')
     return project
+  }
+
+  setProjectRoot(projectId: ID, rootPath: string | null): Project {
+    return this.store.setProjectRoot(projectId, rootPath)
   }
 
   openProject(projectId: ID): ProjectSnapshot {
     return this.store.openProjectSnapshot(projectId)
   }
 
-  createConversation(projectId: ID, title = 'New conversation'): Conversation {
-    return this.store.createConversation(projectId, title)
+  /** New sessions open on the reasoning level the user last chose (medium
+   *  until they ever choose one). Antigravity accepts `--effort` without
+   *  `--model`, so this is a real setting from the very first turn rather
+   *  than an inert default. */
+  createConversation(projectId: ID, title = 'New conversation', workingDirectory: string | null = null): Conversation {
+    return this.store.createConversation(projectId, title, {
+      workingDirectory,
+      reasoningEffort: effortForNewSession(this.store.readPreferences())
+    })
+  }
+
+  setConversationWorkingDirectory(conversationId: ID, workingDirectory: string | null): Conversation {
+    return this.store.setConversationWorkingDirectory(conversationId, workingDirectory)
+  }
+
+  getPreferences(): OrbitPreferences {
+    return this.store.readPreferences()
+  }
+
+  setPreferences(preferences: OrbitPreferences): OrbitPreferences {
+    return this.store.writePreferences(preferences)
   }
 
   renameConversation(conversationId: ID, title: string): Conversation {
@@ -107,7 +140,7 @@ export class OrbitRuntime extends EventEmitter {
     })
     this.activeRuns.set(run.id, { text: '' })
 
-    const workspacePath = path.join(this.dataDir, 'projects', project.id, 'workspace')
+    const workspacePath = this.resolveWorkspacePath(project, conversation)
     const saveDir = path.join(this.dataDir, 'projects', project.id, 'agy-save')
     const attachments = (input.attachmentFileIds ?? [])
       .map((fileId) => this.store.getProjectFile(fileId))
@@ -137,7 +170,9 @@ export class OrbitRuntime extends EventEmitter {
           saveDir,
           attachments,
           referencedArtifacts,
-          transport
+          transport,
+          model: conversation.model,
+          reasoningEffort: conversation.reasoningEffort
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -159,9 +194,15 @@ export class OrbitRuntime extends EventEmitter {
   }
 
   async cancelRun(runId: ID): Promise<Run> {
-    const run = this.store.updateRunState(runId, 'cancelling')
+    this.store.updateRunState(runId, 'cancelling')
     await this.provider.cancelRun(runId)
-    return run
+    // Read back rather than returning the 'cancelling' snapshot above: a run
+    // stopped while it was waiting on a model-change retirement has no live
+    // process to interrupt, so the provider acknowledges it synchronously
+    // and `run.cancelled` has already been handled by the time this returns.
+    // Reporting the stale snapshot would tell the caller a settled run is
+    // still stopping.
+    return this.store.requireRun(runId)
   }
 
   /** 'pty' is sticky by design (see ConversationTransport's doc comment) —
@@ -171,6 +212,17 @@ export class OrbitRuntime extends EventEmitter {
     const conversation = this.store.requireConversation(conversationId)
     if (conversation.transport === 'pty' && transport === 'structured') return conversation
     return this.store.setConversationTransport(conversationId, transport)
+  }
+
+  listModels(): Promise<ModelOption[]> {
+    return this.provider.listModels()
+  }
+
+  /** Persists a conversation's model/effort choice. The provider decides
+   *  what that means at launch (see modelCatalog.resolveInvocation); Orbit
+   *  never manufactures a tier the catalogue does not list. */
+  setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
+    return this.store.setConversationModel(conversationId, model, reasoningEffort)
   }
 
   async respondToInteraction(input: { conversationId: ID; runId: ID; interactionId: string; optionId: string }): Promise<void> {
@@ -216,6 +268,18 @@ export class OrbitRuntime extends EventEmitter {
 
   async shutdown(): Promise<void> {
     await this.provider.shutdown()
+  }
+
+  /** Where Antigravity actually runs: the session's own folder, else the
+   *  project's, else the Orbit-managed workspace that pre-folder projects
+   *  have always used. A folder that no longer exists falls back rather
+   *  than failing the turn — the user has been told where it is running. */
+  private resolveWorkspacePath(project: Project, conversation: Conversation): string {
+    const managed = path.join(this.dataDir, 'projects', project.id, 'workspace')
+    for (const candidate of [conversation.workingDirectory, project.rootPath]) {
+      if (candidate && path.isAbsolute(candidate) && isDirectory(candidate)) return candidate
+    }
+    return managed
   }
 
   private handleProviderEvent(event: RuntimeEvent): void {
@@ -309,6 +373,14 @@ export class OrbitRuntime extends EventEmitter {
     }
     this.store.addRunEvent(event)
     this.emit('event', event)
+  }
+}
+
+function isDirectory(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isDirectory()
+  } catch {
+    return false
   }
 }
 

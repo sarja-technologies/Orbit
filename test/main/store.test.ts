@@ -22,6 +22,33 @@ afterEach(() => {
 })
 
 describe('OrbitStore', () => {
+  it('persists a model and reasoning effort per conversation', () => {
+    const project = store.createProject('Launch')
+    const conversation = store.createConversation(project.id, 'Website')
+
+    // A brand-new conversation carries no selection at all — Orbit must not
+    // start one on a model the user never picked.
+    expect(conversation.model).toBeNull()
+    expect(conversation.reasoningEffort).toBeNull()
+
+    store.setConversationModel(conversation.id, 'gemini-3.8-flash', 'medium')
+    const saved = store.getConversation(conversation.id)
+    expect(saved?.model).toBe('gemini-3.8-flash')
+    expect(saved?.reasoningEffort).toBe('medium')
+
+    // Selecting a model with no reasoning tiers must clear a stale effort
+    // rather than leaving one behind that the model cannot honour.
+    store.setConversationModel(conversation.id, 'claude-sonnet-4-6', null)
+    const cleared = store.getConversation(conversation.id)
+    expect(cleared?.model).toBe('claude-sonnet-4-6')
+    expect(cleared?.reasoningEffort).toBeNull()
+
+    // And returning to the default is a real, persisted state.
+    store.setConversationModel(conversation.id, null, null)
+    const reset = store.getConversation(conversation.id)
+    expect(reset?.model).toBeNull()
+  })
+
   it('round trips projects, conversations, messages, runs, and artifacts', () => {
     const project = store.createProject('Launch')
     const conversation = store.createConversation(project.id, 'Website')
@@ -63,5 +90,103 @@ describe('OrbitStore', () => {
     await db.init()
     store = new OrbitStore(db)
     expect(store.getProject(project.id)?.name).toBe('Persistent')
+  })
+
+  it('persists a project folder and a per-session override', () => {
+    const project = store.createProject('Website', '/home/dev/agentdock')
+    const inherits = store.createConversation(project.id, 'Copy')
+    const overrides = store.createConversation(project.id, 'Docs', { workingDirectory: '/home/dev/docs' })
+
+    expect(store.getProject(project.id)?.rootPath).toBe('/home/dev/agentdock')
+    // null is a real value: "this session uses the project's folder".
+    expect(inherits.workingDirectory).toBeNull()
+    expect(store.getConversation(overrides.id)?.workingDirectory).toBe('/home/dev/docs')
+  })
+
+  it('treats a blank folder as no folder rather than an empty path', () => {
+    const project = store.createProject('Blank', '   ')
+    expect(project.rootPath).toBeNull()
+    expect(store.createConversation(project.id, 'Main', { workingDirectory: '' }).workingDirectory).toBeNull()
+  })
+
+  it('changes a project folder and clears a session override', () => {
+    const project = store.createProject('Movable', '/home/dev/one')
+    const conversation = store.createConversation(project.id, 'Main', { workingDirectory: '/home/dev/two' })
+
+    expect(store.setProjectRoot(project.id, '/home/dev/three').rootPath).toBe('/home/dev/three')
+    expect(store.setConversationWorkingDirectory(conversation.id, null).workingDirectory).toBeNull()
+  })
+
+  it('groups every project with its own sessions, newest project first', () => {
+    const first = store.createProject('First')
+    const second = store.createProject('Second')
+    store.createConversation(first.id, 'A')
+    store.createConversation(first.id, 'B')
+    store.createConversation(second.id, 'C')
+
+    const tree = store.listProjectTree()
+    expect(tree.map((group) => group.project.name)).toEqual(['Second', 'First'])
+    expect(tree[0]?.conversations.map((item) => item.title)).toEqual(['C'])
+    expect(tree[1]?.conversations.map((item) => item.title).sort()).toEqual(['A', 'B'])
+  })
+
+  it('seeds a session with the reasoning tier it was created with', () => {
+    const project = store.createProject('Seeded')
+    expect(store.createConversation(project.id, 'Default').reasoningEffort).toBeNull()
+    expect(store.createConversation(project.id, 'Seeded', { reasoningEffort: 'high' }).reasoningEffort).toBe('high')
+  })
+
+  it('round trips reasoning preferences across database instances', async () => {
+    expect(store.readPreferences()).toEqual({ lastReasoningEffort: null, modelReasoningEfforts: {} })
+    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
+
+    db.close()
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    expect(store.readPreferences()).toEqual({ lastReasoningEffort: 'high', modelReasoningEfforts: { 'gemini-3.1-pro': 'low' } })
+  })
+
+  it('overwrites preferences in place rather than accumulating rows', () => {
+    store.writePreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: {} })
+    store.writePreferences({ lastReasoningEffort: 'medium', modelReasoningEfforts: {} })
+    expect(store.readPreferences().lastReasoningEffort).toBe('medium')
+  })
+
+  it('opens a database written before projects and sessions had folders', async () => {
+    // Exactly the pre-migration shape: no root_path, no working_directory.
+    db.close()
+    fs.rmSync(path.join(dir, 'orbit.sqlite'), { force: true })
+    const legacy = new OrbitDatabase({ dataDir: dir })
+    await legacy.init()
+    legacy.exec('DROP TABLE conversations; DROP TABLE projects;')
+    legacy.exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
+    legacy.exec(
+      `CREATE TABLE conversations (
+         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, provider_id TEXT NOT NULL,
+         native_conversation_id TEXT, status TEXT NOT NULL, transport TEXT NOT NULL DEFAULT 'structured',
+         model TEXT, reasoning_effort TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`
+    )
+    legacy.run('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', ['p1', 'Legacy', 'now', 'now'])
+    legacy.run(
+      `INSERT INTO conversations (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['c1', 'p1', 'Old session', 'antigravity', null, 'idle', 'structured', null, null, 'now', 'now']
+    )
+    legacy.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    // The session is grouped under its existing project and keeps its title;
+    // the new folder columns simply read as "no folder chosen".
+    const tree = store.listProjectTree()
+    expect(tree).toHaveLength(1)
+    expect(tree[0]?.project.name).toBe('Legacy')
+    expect(tree[0]?.project.rootPath).toBeNull()
+    expect(tree[0]?.conversations.map((item) => item.title)).toEqual(['Old session'])
+    expect(tree[0]?.conversations[0]?.workingDirectory).toBeNull()
   })
 })

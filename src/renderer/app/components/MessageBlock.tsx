@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import type { Message, ProjectFile } from '@shared/domain'
+import { memo, useState } from 'react'
+import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
+import { ChatRow } from './ChatRow'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
 
@@ -10,24 +11,39 @@ interface MessageBlockProps {
   showRole: boolean
   attachments: ProjectFile[]
   thumbnails: Record<string, string>
+  /** The error the run actually recorded, when this block is a failure. It
+   *  carries the real code, which decides which explanation the reader
+   *  gets — a denied permission and an unreadable response are not the
+   *  same problem and must not share copy. */
+  error?: RuntimeErrorInfo | null
 }
 
-/** One block in the work-session transcript. Everything is left-aligned
- *  document flow — role is carried by a label and type weight, never by
- *  alignment or a filled bubble. */
-export function MessageBlock({ message, showRole, attachments, thumbnails }: MessageBlockProps): JSX.Element {
-  if (message.status === 'failed') return <FailureBlock message={message} />
+/** One message in the work-session transcript. Side carries the speaker:
+ *  the reader's own turns sit right in a sent bubble, Antigravity's sit
+ *  left in its own surface. The label and timestamp confirm that read
+ *  rather than being the only thing that provides it. */
+function MessageBlockView({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
+  if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
+  // A turn can finish with nothing to show — Antigravity did the work in
+  // tools and said nothing, or its final text could not be read off the
+  // live session. Either way, say so rather than leaving a blank gap the
+  // reader has to interpret.
+  if (message.role === 'assistant' && message.content.trim().length === 0) {
+    return <div className="transcript-note">Antigravity finished this turn without any text to show.</div>
+  }
 
   const isUser = message.role === 'user'
   return (
-    <article className={`block block-${message.role}`}>
-      {showRole ? <div className="block-role">{isUser ? 'You' : 'Antigravity'}</div> : null}
-      {isUser ? <div className="block-user-text">{message.content}</div> : <Markdown source={message.content} />}
+    // Real send time from the stored message — never a placeholder.
+    <ChatRow role={isUser ? 'user' : 'assistant'} showIdentity={showRole} timestamp={message.createdAt}>
+      {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
-    </article>
+    </ChatRow>
   )
 }
+
+export const MessageBlock = memo(MessageBlockView)
 
 function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile[]; thumbnails: Record<string, string> }): JSX.Element {
   return (
@@ -47,11 +63,11 @@ function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile
   )
 }
 
-function FailureBlock({ message }: { message: Message }): JSX.Element {
+function FailureBlock({ message, error }: { message: Message; error: RuntimeErrorInfo | null }): JSX.Element {
   // Persisted failures only carry the message text, so the code is
   // unknown here; the generic mapping still yields honest product copy.
-  const view = describeRuntimeError({ code: 'provider.failed', message: message.content, retryable: true })
-  return <ErrorNote title={view.title} body={view.body} details={message.content} />
+  const view = describeRuntimeError(error ?? { code: 'provider.failed', message: message.content, retryable: true })
+  return <ErrorNote title={view.title} body={view.body} details={view.details ?? message.content} />
 }
 
 interface ErrorNoteProps {

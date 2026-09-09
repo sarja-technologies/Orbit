@@ -14,6 +14,7 @@ import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
+  listModels = vi.fn(async () => [])
   cancelRun = vi.fn(async () => undefined)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
@@ -88,6 +89,48 @@ class HeadlessDenialProvider extends FakeProvider {
   }
 }
 
+/** Mirrors the PTY session's deferred cancellation: the run is stopped while
+ *  it is waiting on a model-change retirement, so there is no live process to
+ *  interrupt and `run.cancelled` is emitted synchronously from cancelRun,
+ *  while OrbitRuntime is still inside its own cancelRun. */
+class DeferredCancelProvider implements AgentProvider {
+  private pending: { input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void } | null = null
+  listModels = vi.fn(async () => [])
+  respondToInteraction = vi.fn(async () => undefined)
+  releaseConversation = vi.fn(async () => undefined)
+  shutdown = vi.fn(async () => undefined)
+
+  async getStatus(): Promise<ProviderStatus> {
+    return { id: 'antigravity', state: 'ready', sdkAvailable: true, authConfigured: true, message: null, details: {} }
+  }
+
+  /** Deliberately silent, like the real thing: a model-change retirement
+   *  emits no `run.started` — the replacement that would have emitted it is
+   *  never spawned — so the run's only event is its cancellation. */
+  async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    this.pending = { input, onEvent }
+  }
+
+  async cancelRun(runId: string): Promise<void> {
+    const pending = this.pending
+    if (!pending || pending.input.runId !== runId) return
+    this.pending = null
+    pending.onEvent({ ...this.base(pending.input), type: 'run.cancelled' })
+  }
+
+  /** Nothing follows a cancellation — the replacement never spawns, so the
+   *  run neither completes nor fails afterwards. */
+  private base(input: ProviderSendInput) {
+    return {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+  }
+}
+
 class ArtifactProvider extends FakeProvider {
   constructor(private readonly artifactPath: string) {
     super()
@@ -152,6 +195,61 @@ describe('OrbitRuntime', () => {
     expect(run.conversationId).toBe(conversation!.id)
   })
 
+  it('runs Antigravity in the project folder the user chose', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
+    const project = runtime.createProject('Real folder', workspace)
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput).not.toBeNull())
+    expect(provider.lastInput?.workspacePath).toBe(workspace)
+    fs.rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('lets a session override its project folder', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
+    const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-session-'))
+    const project = runtime.createProject('Override', projectDir)
+    const conversation = runtime.createConversation(project.id, 'Docs', sessionDir)
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput?.conversationId).toBe(conversation.id))
+    expect(provider.lastInput?.workspacePath).toBe(sessionDir)
+    fs.rmSync(projectDir, { recursive: true, force: true })
+    fs.rmSync(sessionDir, { recursive: true, force: true })
+  })
+
+  it('falls back to the managed workspace when a chosen folder has gone away', async () => {
+    const gone = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-gone-'))
+    const project = runtime.createProject('Missing folder', gone)
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    fs.rmSync(gone, { recursive: true, force: true })
+
+    await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput).not.toBeNull())
+    // A deleted folder must not fail the turn — the session keeps working in
+    // Orbit's own workspace for that project.
+    expect(provider.lastInput?.workspacePath).toBe(path.join(dir, 'projects', project.id, 'workspace'))
+  })
+
+  it('starts a session on the reasoning tier the user last chose', () => {
+    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: {} })
+    const project = runtime.createProject('Seeded')
+    expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('high')
+    expect(runtime.createConversation(project.id, 'Another').reasoningEffort).toBe('high')
+  })
+
+  it('starts a session on medium before the user has ever chosen a tier', () => {
+    const project = runtime.createProject('Fresh')
+    expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('medium')
+  })
+
+  it('round trips preferences through the runtime', () => {
+    expect(runtime.getPreferences().lastReasoningEffort).toBeNull()
+    runtime.setPreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    expect(runtime.getPreferences()).toEqual({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+  })
+
   it('passes cancellation to the provider', async () => {
     const project = runtime.createProject('Cancel')
     const conversation = runtime.openProject(project.id).conversations[0]!
@@ -159,6 +257,35 @@ describe('OrbitRuntime', () => {
     await runtime.cancelRun(run.id)
     expect(provider.cancelRun).toHaveBeenCalledWith(run.id)
     expect(store.requireRun(run.id).state).toBe('cancelling')
+  })
+
+  it('settles a run the provider cancels synchronously, rather than leaving it stopping forever', async () => {
+    // A PTY run stopped while it is waiting on a model-change retirement has
+    // no process to interrupt, so `run.cancelled` arrives while cancelRun is
+    // still on the stack. The run must end up cancelled — not stuck in the
+    // 'cancelling' state the Stop request set on its way in.
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new DeferredCancelProvider(), dir, '0.1.0')
+    const project = runtime.createProject('Deferred cancel')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Change the model and stop me' })
+    const returned = await runtime.cancelRun(run.id)
+
+    expect(returned.state, 'cancelRun must report what the store really holds').toBe('cancelled')
+    expect(store.requireRun(run.id).state).toBe('cancelled')
+
+    // Exactly one cancellation message, and no completion alongside it.
+    const messages = store.listMessages(project.id).filter((message) => message.runId === run.id)
+    expect(messages.filter((message) => message.status === 'cancelled')).toHaveLength(1)
+    expect(messages.some((message) => message.status === 'completed')).toBe(false)
+
+    // The cancelled run is no longer tracked as active, so a later run for
+    // the same conversation is unaffected by it.
+    expect((runtime as unknown as { activeRuns: Map<string, unknown> }).activeRuns.has(run.id)).toBe(false)
+
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new FakeProvider(), dir, '0.1.0')
+    const next = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'A later message' })
+    await vi.waitFor(() => expect(store.requireRun(next.id).state).toBe('completed'))
   })
 
   it('persists intelligible provider failures as failed assistant messages', async () => {

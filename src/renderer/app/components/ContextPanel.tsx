@@ -4,8 +4,10 @@ import type { ArtifactContent } from '@shared/contracts'
 import { ArtifactPreview } from './ArtifactPreview'
 import { formatBytes } from '../lib/attachments'
 
+export type ContextTab = 'files' | 'artifacts'
+
 interface ContextPanelProps {
-  open: boolean
+  tab: ContextTab | null
   projectFiles: ProjectFile[]
   artifacts: Artifact[]
   conversations: Conversation[]
@@ -14,6 +16,7 @@ interface ContextPanelProps {
   artifactContent: ArtifactContent | null
   attachedFileIds: ID[]
   onClose: () => void
+  onSelectTab: (tab: ContextTab) => void
   onAddFiles: () => void
   onImportArtifacts: () => void
   onAttachFile: (file: ProjectFile) => void
@@ -26,7 +29,7 @@ interface ContextPanelProps {
  *  column. "Files you added" and "Things Antigravity produced" stay
  *  separate because their provenance and actions differ. */
 export function ContextPanel({
-  open,
+  tab,
   projectFiles,
   artifacts,
   conversations,
@@ -35,6 +38,7 @@ export function ContextPanel({
   artifactContent,
   attachedFileIds,
   onClose,
+  onSelectTab,
   onAddFiles,
   onImportArtifacts,
   onAttachFile,
@@ -45,35 +49,59 @@ export function ContextPanel({
   const panelRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
-    if (!open) return
+    if (!tab) return
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
     }
     document.addEventListener('keydown', onKeyDown)
     panelRef.current?.focus()
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose])
+  }, [tab, onClose])
 
-  if (!open) return null
+  if (!tab) return null
 
   const selected = artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null
 
   return (
     <aside className="context-panel" ref={panelRef} tabIndex={-1} aria-label="Project files and artifacts">
+      {/* Two tabs rather than two stacked sections: files you brought and
+          things Antigravity produced are different jobs, and only one is
+          usually wanted at a time. */}
       <div className="context-head">
-        <h2>Project</h2>
+        <div className="context-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'files'}
+            className={tab === 'files' ? 'context-tab active' : 'context-tab'}
+            onClick={() => onSelectTab('files')}
+          >
+            Files
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'artifacts'}
+            className={tab === 'artifacts' ? 'context-tab active' : 'context-tab'}
+            onClick={() => onSelectTab('artifacts')}
+          >
+            Artifacts
+          </button>
+        </div>
         <button type="button" className="icon-button" onClick={onClose} aria-label="Close panel">
           <CloseGlyph />
         </button>
       </div>
 
       <div className="context-scroll">
+        {tab === 'files' ? (
         <section className="context-section">
+          <button type="button" className="context-add" onClick={onAddFiles}>
+            <PlusGlyph />
+            <span>Add files</span>
+          </button>
           <div className="context-section-head">
-            <h3>Files you added</h3>
-            <button type="button" className="ghost" onClick={onAddFiles}>
-              Add
-            </button>
+            <h3>Project files</h3>
           </div>
           {projectFiles.length === 0 ? (
             <p className="context-empty">No files yet.</p>
@@ -98,13 +126,16 @@ export function ContextPanel({
             </ul>
           )}
         </section>
+        ) : null}
 
+        {tab === 'artifacts' ? (
         <section className="context-section">
+          <button type="button" className="context-add" onClick={onImportArtifacts}>
+            <PlusGlyph />
+            <span>Import artifacts</span>
+          </button>
           <div className="context-section-head">
-            <h3>Things Antigravity produced</h3>
-            <button type="button" className="ghost" onClick={onImportArtifacts}>
-              Import
-            </button>
+            <h3>Produced by Antigravity</h3>
           </div>
           {artifacts.length === 0 ? (
             <p className="context-empty">Nothing yet.</p>
@@ -125,8 +156,9 @@ export function ContextPanel({
             </ul>
           )}
         </section>
+        ) : null}
 
-        {selected ? (
+        {selected && tab === 'artifacts' ? (
           <section className="context-section">
             <div className="context-section-head">
               <h3>Preview</h3>
@@ -151,6 +183,14 @@ export function ContextPanel({
         ) : null}
       </div>
     </aside>
+  )
+}
+
+function PlusGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
+    </svg>
   )
 }
 

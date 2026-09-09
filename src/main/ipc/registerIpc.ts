@@ -14,9 +14,14 @@ import {
   deleteConversationSchema,
   idSchema,
   importArtifactSchema,
+  pickFolderSchema,
+  preferencesSchema,
   renameConversationSchema,
+  setConversationWorkingDirectorySchema,
+  setProjectRootSchema,
   respondToInteractionSchema,
   sendMessageSchema,
+  setConversationModelSchema,
   setConversationTransportSchema
 } from './validation'
 
@@ -24,11 +29,37 @@ export function registerIpc(runtime: OrbitRuntime): void {
   ipcMain.handle(IPC_CHANNELS.systemStatus, () => runtime.getSystemStatus())
   ipcMain.handle(IPC_CHANNELS.providersStatus, () => runtime.getProviderStatus())
   ipcMain.handle(IPC_CHANNELS.projectsList, () => runtime.listProjects())
-  ipcMain.handle(IPC_CHANNELS.projectsCreate, (_event, input: unknown) => runtime.createProject(createProjectSchema.parse(input).name))
+  ipcMain.handle(IPC_CHANNELS.projectsTree, () => runtime.listProjectTree())
+  ipcMain.handle(IPC_CHANNELS.projectsCreate, (_event, input: unknown) => {
+    const parsed = createProjectSchema.parse(input)
+    return runtime.createProject(parsed.name, parsed.rootPath ?? null)
+  })
   ipcMain.handle(IPC_CHANNELS.projectsOpen, (_event, projectId: unknown) => runtime.openProject(idSchema.parse(projectId)))
+  ipcMain.handle(IPC_CHANNELS.projectsSetRoot, (_event, input: unknown) => {
+    const parsed = setProjectRootSchema.parse(input)
+    return runtime.setProjectRoot(parsed.projectId, parsed.rootPath)
+  })
   ipcMain.handle(IPC_CHANNELS.conversationsCreate, (_event, input: unknown) => {
     const parsed = createConversationSchema.parse(input)
-    return runtime.createConversation(parsed.projectId, parsed.title)
+    return runtime.createConversation(parsed.projectId, parsed.title, parsed.workingDirectory ?? null)
+  })
+  ipcMain.handle(IPC_CHANNELS.conversationsSetWorkingDirectory, (_event, input: unknown) => {
+    const parsed = setConversationWorkingDirectorySchema.parse(input)
+    return runtime.setConversationWorkingDirectory(parsed.conversationId, parsed.workingDirectory)
+  })
+  ipcMain.handle(IPC_CHANNELS.preferencesGet, () => runtime.getPreferences())
+  ipcMain.handle(IPC_CHANNELS.preferencesSet, (_event, input: unknown) => runtime.setPreferences(preferencesSchema.parse(input)))
+  // The one place Orbit asks the OS where work should happen. Directory-only
+  // and always user-driven — nothing here can pick a folder on its own.
+  ipcMain.handle(IPC_CHANNELS.dialogPickFolder, async (_event, input: unknown) => {
+    const parsed = pickFolderSchema.parse(input) ?? undefined
+    const result = await dialog.showOpenDialog({
+      title: parsed?.title ?? 'Choose a working folder',
+      properties: ['openDirectory', 'createDirectory'],
+      ...(parsed?.defaultPath ? { defaultPath: parsed.defaultPath } : {})
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0] ?? null
   })
   ipcMain.handle(IPC_CHANNELS.conversationsRename, (_event, input: unknown) => {
     const parsed = renameConversationSchema.parse(input)
@@ -47,6 +78,11 @@ export function registerIpc(runtime: OrbitRuntime): void {
   ipcMain.handle(IPC_CHANNELS.conversationsDelete, (_event, input: unknown) =>
     runtime.deleteConversation(deleteConversationSchema.parse(input).conversationId)
   )
+  ipcMain.handle(IPC_CHANNELS.modelsList, () => runtime.listModels())
+  ipcMain.handle(IPC_CHANNELS.conversationsSetModel, (_event, input: unknown) => {
+    const parsed = setConversationModelSchema.parse(input)
+    return runtime.setConversationModel(parsed.conversationId, parsed.model, parsed.reasoningEffort)
+  })
   ipcMain.handle(IPC_CHANNELS.conversationsSetTransport, (_event, input: unknown) => {
     const parsed = setConversationTransportSchema.parse(input)
     return runtime.setConversationTransport(parsed.conversationId, parsed.transport)

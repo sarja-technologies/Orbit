@@ -23,6 +23,19 @@ import {
 } from '@main/terminal/TerminalInteractionDetector'
 
 const IDLE_DEBOUNCE_MS = 450
+/** How often the live screen is read for progressive response text while
+ *  output is still flowing. The idle-debounced classification snapshot
+ *  below cannot do this job: agy streams a long answer continuously, so
+ *  the debounce never fires until the turn is already over (confirmed
+ *  live — a 14-second answer produced exactly one snapshot, after
+ *  completion). This is a read-only second reader; it never classifies the
+ *  screen and never touches the ready/busy/interaction edge state.
+ *
+ *  The interval is deliberately short: agy draws a whole answer in about a
+ *  second once the model starts writing (the thinking phase before it
+ *  shows nothing at all), so a slower cadence turns that second into one
+ *  or two jumps rather than a reply that visibly grows. */
+const STREAM_SAMPLE_MS = 120
 /** Real, verified cancel-current-turn key (agy's own on-screen hint is
  *  "esc to cancel"). NOT Ctrl+C — that is reserved for exiting the whole
  *  interactive session and needs a second press. */
@@ -53,6 +66,12 @@ export interface AntigravityPtyHandlers {
    *  Fired once per busy transition, not on every redraw. */
   onBusy(): void
   onExit(code: number, signal?: number): void
+  /** Fires on a throttled cadence *while output is still arriving*, with
+   *  the full current screen. Purely for progressively reading the
+   *  response as it is drawn — this handler must never be used to decide
+   *  readiness, busyness, or interactions, which stay the exclusive job of
+   *  the idle-debounced snapshot below. Optional. */
+  onStreamText?(lines: string[]): void
   /** Fires on every idle snapshot with the full current screen text —
    *  independent of ready/busy/interaction classification. Used for
    *  one-off scraping (e.g. capturing the native conversation id from a
@@ -64,6 +83,9 @@ export interface AntigravityPtyHandlers {
 /** Structural interface the PTY session programs against — lets tests
  *  inject a fake transport without spawning a real `agy` process. */
 export interface IAntigravityPtyTransport {
+  /** True until the OS process has *actually* exited — never merely because
+   *  termination was requested. Retirement correctness depends on this: a
+   *  replacement `agy` must not exist while its predecessor still does. */
   readonly isRunning: boolean
   readonly mediaAttachedCount: number
   start(handlers: AntigravityPtyHandlers): void
@@ -71,7 +93,13 @@ export interface IAntigravityPtyTransport {
   respond(pending: PtyInteraction, optionId: string): boolean
   pasteClipboardImage(): void
   cancelTurn(): void
-  kill(): void
+  /** Requests termination. Returns once the request has been made, NOT once
+   *  the process is gone — await `whenExited()` for that. `signal` escalates
+   *  (e.g. 'SIGKILL') when a polite request was not honoured. */
+  kill(signal?: string): void
+  /** Resolves when the process has genuinely exited (or immediately if it
+   *  was never started, or has already exited). */
+  whenExited(): Promise<void>
   resize(cols: number, rows: number): void
 }
 
@@ -87,6 +115,12 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
   private lastRespondedSignature: string | null = null
   private lastRespondedAtMs = 0
   private mediaAttached = 0
+  private lastStreamSampleAtMs = 0
+  /** Termination has been requested but the process may still be alive.
+   *  Kept separate from `running` on purpose — see `kill`. */
+  private terminating = false
+  private exited: Promise<void> = Promise.resolve()
+  private markExited: () => void = () => undefined
 
   constructor(
     private readonly executable: string,
@@ -96,6 +130,9 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
 
   start(handlers: AntigravityPtyHandlers): void {
     this.handlers = handlers
+    this.exited = new Promise<void>((resolve) => {
+      this.markExited = resolve
+    })
     this.proc = pty.spawn(this.executable, this.args, {
       name: 'xterm-256color',
       cols: 120,
@@ -106,11 +143,18 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     })
     this.running = true
     this.proc.onData((chunk) => {
-      this.screen.write(chunk)
+      // The callback runs once xterm has actually parsed this chunk, so a
+      // progressive read never observes a half-applied redraw.
+      this.screen.write(chunk, () => this.sampleStreamText())
       this.scheduleSnapshot()
     })
     this.proc.onExit(({ exitCode, signal }) => {
+      // The single point at which this process is known to be gone. Settled
+      // before the handler runs, so a throwing handler cannot leave a
+      // retirement waiting forever.
       this.running = false
+      this.terminating = false
+      this.markExited()
       if (this.idleTimer) clearTimeout(this.idleTimer)
       this.screen.dispose()
       handlers.onExit(exitCode, signal)
@@ -139,7 +183,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
    *  currently pending interaction's own options (never accepts an
    *  arbitrary renderer-supplied payload). */
   respond(pending: PtyInteraction, optionId: string): boolean {
-    if (!this.running || this.pendingSignature !== pending.signature) return false
+    if (!this.running || this.terminating || this.pendingSignature !== pending.signature) return false
     const option = pending.options.find((candidate) => candidate.id === optionId)
     if (!option) return false
     this.lastRespondedSignature = pending.signature
@@ -171,9 +215,31 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     this.write(ESCAPE)
   }
 
-  kill(): void {
-    this.proc?.kill()
-    this.running = false
+  /** CRITICAL (correctness, not tidiness): this only *requests* termination.
+   *  It deliberately does not flip `isRunning`, because the OS process
+   *  outlives the request — and `AntigravityPtySession` retires a process
+   *  before spawning its replacement against the same native conversation.
+   *  Reporting "not running" here let the replacement start while the
+   *  predecessor was still alive, which is exactly the single-owner
+   *  invariant the PTY transport exists to keep. Only the real exit callback
+   *  clears `running`; `whenExited()` is how callers wait for it. */
+  kill(signal?: string): void {
+    if (!this.proc) {
+      this.running = false
+      this.markExited()
+      return
+    }
+    this.terminating = true
+    try {
+      this.proc.kill(signal)
+    } catch {
+      // Already gone, or the signal was refused; the exit callback (or the
+      // caller's bounded wait) is the authority either way.
+    }
+  }
+
+  whenExited(): Promise<void> {
+    return this.exited
   }
 
   resize(cols: number, rows: number): void {
@@ -186,7 +252,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
   }
 
   private write(value: string): void {
-    if (!this.running) return
+    if (!this.running || this.terminating) return
     // CRITICAL (real bug, confirmed live against agy 1.1.27): whenever we
     // write anything, the terminal is expected to change and the NEXT
     // observed ready-for-input footer must count as a fresh transition —
@@ -197,6 +263,19 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     // reported and the run hangs forever.
     this.wasReady = false
     this.proc?.write(value)
+  }
+
+  /** Throttled, read-only look at the live screen for progressive
+   *  response text. Skipped entirely while any write is still being
+   *  parsed, so callers only ever see complete frames. */
+  private sampleStreamText(): void {
+    const onStreamText = this.handlers?.onStreamText
+    if (!onStreamText || !this.running || this.terminating) return
+    if (!this.screen.isDrained) return
+    const now = Date.now()
+    if (now - this.lastStreamSampleAtMs < STREAM_SAMPLE_MS) return
+    this.lastStreamSampleAtMs = now
+    onStreamText(this.screen.peekLines())
   }
 
   private scheduleSnapshot(): void {

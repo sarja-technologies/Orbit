@@ -1,49 +1,48 @@
-import type { ID, Project, ProviderStatus } from '@shared/domain'
+import type { Project, ProviderStatus } from '@shared/domain'
 import { describeProviderProblem } from '../lib/errorCopy'
 
-interface ChromeBarProps {
-  projects: Project[]
+interface WorkspaceHeaderProps {
   activeProject: Project | null
-  providerStatus: ProviderStatus | null
-  onSelectProject: (projectId: ID) => void
-  onCreateProject: () => void
+  sessionTitle: string | null
+  /** The folder this session actually runs in — the single most useful
+   *  thing to be able to check without opening anything. */
+  workingPath: string | null
+  live: boolean
 }
 
-/** One compact bar: identity, active project, provider health. A healthy
- *  provider is a dot and a word — never a permanent banner. */
-export function ChromeBar({ projects, activeProject, providerStatus, onSelectProject, onCreateProject }: ChromeBarProps): JSX.Element {
-  const problem = providerStatus ? describeProviderProblem(providerStatus.state, providerStatus.message) : null
-  const state = providerStatus?.state ?? 'idle'
-
+/** The header belongs to the workspace: where you are, and where that runs.
+ *  It carries no permanent provider status — a healthy provider is the
+ *  normal case and does not need a line of chrome restating it. Real
+ *  problems surface in ProviderBanner instead. */
+export function ChromeBar({ activeProject, sessionTitle, workingPath, live }: WorkspaceHeaderProps): JSX.Element {
   return (
     <header className="chrome">
-      <div className="chrome-brand">Orbit</div>
-
-      <div className="chrome-project">
-        {projects.length > 0 ? (
-          <select
-            className="project-select"
-            aria-label="Active project"
-            value={activeProject?.id ?? ''}
-            onChange={(event) => onSelectProject(event.target.value)}
-          >
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
+      <div className="chrome-breadcrumb">
+        <span className="chrome-project">{activeProject?.name ?? 'No project'}</span>
+        {sessionTitle ? (
+          <>
+            <span className="chrome-sep" aria-hidden="true">
+              /
+            </span>
+            <span className="chrome-session">{sessionTitle}</span>
+          </>
         ) : null}
-        <button type="button" className="ghost" onClick={onCreateProject}>
-          New project
-        </button>
+        {live ? (
+          <span className="live-badge" title="This session can ask for approval and receive images directly.">
+            Live
+          </span>
+        ) : null}
       </div>
 
-      <div className="chrome-status" title={providerStatus?.message ?? undefined}>
-        <span className={`status-dot status-dot-${state}`} aria-hidden="true" />
-        <span className="status-label">Antigravity</span>
-        <span className="visually-hidden">{problem ? problem.title : 'Antigravity is ready'}</span>
-      </div>
+      {workingPath ? (
+        // Two elements on purpose: the outer box is RTL so the ellipsis lands
+        // at the START of a long path (the leaf identifies it), while the
+        // inner span stays LTR so bidi cannot move the leading slash to the
+        // far end. One element cannot do both.
+        <span className="chrome-path" title={workingPath}>
+          <span className="path-text">{workingPath}</span>
+        </span>
+      ) : null}
     </header>
   )
 }

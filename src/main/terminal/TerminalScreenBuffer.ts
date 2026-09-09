@@ -19,14 +19,29 @@ export interface ScreenSnapshot {
 export class TerminalScreenBuffer {
   private readonly term: Terminal
   private rawSinceSnapshot = ''
+  /** Writes handed to xterm that it has not finished parsing yet. */
+  private inFlightWrites = 0
 
   constructor(cols = 120, rows = 32) {
     this.term = new Terminal({ cols, rows, allowProposedApi: true, scrollback: 2000 })
   }
 
-  write(chunk: string): void {
+  /** `onParsed` fires once xterm has actually applied this chunk. Reading
+   *  the screen before then can observe a half-drawn frame — see
+   *  `isDrained`. */
+  write(chunk: string, onParsed?: () => void): void {
     this.rawSinceSnapshot += chunk
-    this.term.write(chunk)
+    this.inFlightWrites += 1
+    this.term.write(chunk, () => {
+      this.inFlightWrites -= 1
+      onParsed?.()
+    })
+  }
+
+  /** True when every write handed to xterm has been parsed, so the screen
+   *  is a complete frame rather than a redraw caught in the middle. */
+  get isDrained(): boolean {
+    return this.inFlightWrites === 0
   }
 
   resize(cols: number, rows: number): void {
@@ -37,10 +52,9 @@ export class TerminalScreenBuffer {
     }
   }
 
-  /** Reads the current stable state. Only meaningful once the writer has
-   *  been idle long enough for xterm's internal write queue to drain (the
-   *  idle debounce in the PTY transport guarantees this). */
-  snapshot(): ScreenSnapshot {
+  /** The current rows, without consuming the diagnostic raw buffer — safe
+   *  to call as often as a progressive reader needs. */
+  peekLines(): string[] {
     const buf = this.term.buffer.active
     const lines: string[] = []
     for (let i = 0; i < buf.length; i++) {
@@ -48,7 +62,15 @@ export class TerminalScreenBuffer {
       if (line) lines.push(line.translateToString(true))
     }
     while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
+    return lines
+  }
 
+  /** Reads the current stable state. Only meaningful once the writer has
+   *  been idle long enough for xterm's internal write queue to drain (the
+   *  idle debounce in the PTY transport guarantees this). */
+  snapshot(): ScreenSnapshot {
+    const lines = this.peekLines()
+    const buf = this.term.buffer.active
     const cursorCol = buf.cursorX
     const cursorRow = buf.baseY + buf.cursorY
 

@@ -6,6 +6,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev --noSandbox",
+    "postinstall": "node scripts/ensureNodePtyPermissions.mjs",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview --noSandbox",
     "typecheck": "tsc --noEmit",

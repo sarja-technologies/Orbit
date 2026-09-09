@@ -2,13 +2,50 @@ import { z } from 'zod'
 
 export const idSchema = z.string().min(1)
 
+/** A working folder is always an absolute OS path the user picked in the
+ *  native dialog. null is a real value meaning "no folder of its own". */
+export const folderPathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4096)
+  .refine((value) => value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value), {
+    message: 'A working folder must be an absolute path.'
+  })
+
 export const createProjectSchema = z.object({
-  name: z.string().trim().min(1).max(120)
+  name: z.string().trim().min(1).max(120),
+  rootPath: folderPathSchema.nullish()
+})
+
+export const setProjectRootSchema = z.object({
+  projectId: idSchema,
+  rootPath: folderPathSchema.nullable()
 })
 
 export const createConversationSchema = z.object({
   projectId: idSchema,
-  title: z.string().trim().min(1).max(120).optional()
+  title: z.string().trim().min(1).max(120).optional(),
+  workingDirectory: folderPathSchema.nullish()
+})
+
+export const setConversationWorkingDirectorySchema = z.object({
+  conversationId: idSchema,
+  workingDirectory: folderPathSchema.nullable()
+})
+
+export const pickFolderSchema = z
+  .object({
+    defaultPath: folderPathSchema.nullish(),
+    title: z.string().trim().min(1).max(120).optional()
+  })
+  .nullish()
+
+const reasoningEffortSchema = z.enum(['low', 'medium', 'high'])
+
+export const preferencesSchema = z.object({
+  lastReasoningEffort: reasoningEffortSchema.nullable(),
+  modelReasoningEfforts: z.record(z.string().min(1).max(200), reasoningEffortSchema)
 })
 
 export const renameConversationSchema = z.object({
@@ -18,6 +55,14 @@ export const renameConversationSchema = z.object({
 
 export const deleteConversationSchema = z.object({
   conversationId: idSchema
+})
+
+export const setConversationModelSchema = z.object({
+  conversationId: idSchema,
+  // Both nullable on purpose: null means "Antigravity's own default", which
+  // is a real, valid choice — not a missing value to be filled in.
+  model: z.string().trim().min(1).max(200).nullable(),
+  reasoningEffort: z.enum(['low', 'medium', 'high']).nullable()
 })
 
 export const setConversationTransportSchema = z.object({

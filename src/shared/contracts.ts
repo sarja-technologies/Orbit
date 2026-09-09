@@ -4,7 +4,11 @@ import type {
   Conversation,
   ConversationTransport,
   ID,
+  ModelOption,
+  OrbitPreferences,
+  ReasoningEffort,
   Project,
+  ProjectGroup,
   ProjectFile,
   ProjectSnapshot,
   ProviderStatus,
@@ -18,12 +22,20 @@ export const IPC_CHANNELS = {
   systemStatus: 'orbit:system:status',
   providersStatus: 'orbit:providers:status',
   projectsList: 'orbit:projects:list',
+  projectsTree: 'orbit:projects:tree',
   projectsCreate: 'orbit:projects:create',
   projectsOpen: 'orbit:projects:open',
+  projectsSetRoot: 'orbit:projects:set-root',
   conversationsCreate: 'orbit:conversations:create',
   conversationsRename: 'orbit:conversations:rename',
   conversationsDelete: 'orbit:conversations:delete',
   conversationsSetTransport: 'orbit:conversations:set-transport',
+  conversationsSetModel: 'orbit:conversations:set-model',
+  conversationsSetWorkingDirectory: 'orbit:conversations:set-working-directory',
+  dialogPickFolder: 'orbit:dialog:pick-folder',
+  preferencesGet: 'orbit:preferences:get',
+  preferencesSet: 'orbit:preferences:set',
+  modelsList: 'orbit:models:list',
   messagesSend: 'orbit:messages:send',
   runsCancel: 'orbit:runs:cancel',
   runsEvent: 'orbit:runs:event',
@@ -41,10 +53,33 @@ export const IPC_CHANNELS = {
 
 export interface CreateProjectInput {
   name: string
+  /** Absolute folder Antigravity should run in. Omitted/null means the
+   *  Orbit-managed workspace directory. */
+  rootPath?: string | null
 }
 
 export interface CreateConversationInput {
   projectId: ID
+  title?: string
+  /** Overrides the project's folder for this session only. Omitted/null
+   *  means "inherit the project's folder". */
+  workingDirectory?: string | null
+}
+
+export interface SetProjectRootInput {
+  projectId: ID
+  rootPath: string | null
+}
+
+export interface SetConversationWorkingDirectoryInput {
+  conversationId: ID
+  workingDirectory: string | null
+}
+
+export interface PickFolderInput {
+  /** Where the native picker opens. Used to start the session picker inside
+   *  the project's own folder. */
+  defaultPath?: string | null
   title?: string
 }
 
@@ -55,6 +90,14 @@ export interface RenameConversationInput {
 
 export interface DeleteConversationInput {
   conversationId: ID
+}
+
+export interface SetConversationModelInput {
+  conversationId: ID
+  /** null = use Antigravity's own default model. */
+  model: string | null
+  /** null = no explicit tier; never a manufactured default. */
+  reasoningEffort: ReasoningEffort | null
 }
 
 export interface SetConversationTransportInput {
@@ -130,14 +173,33 @@ export interface OrbitApi {
   }
   projects: {
     list(): Promise<Project[]>
+    /** Every project with its sessions — what the project-first sidebar
+     *  renders. Cheap enough to refetch, and never partial. */
+    tree(): Promise<ProjectGroup[]>
     create(input: CreateProjectInput): Promise<Project>
     open(projectId: ID): Promise<ProjectSnapshot>
+    setRoot(input: SetProjectRootInput): Promise<Project>
+  }
+  dialog: {
+    /** Native OS folder picker. Resolves to null when the user cancels. */
+    pickFolder(input?: PickFolderInput): Promise<string | null>
+  }
+  preferences: {
+    get(): Promise<OrbitPreferences>
+    set(preferences: OrbitPreferences): Promise<OrbitPreferences>
   }
   conversations: {
     create(input: CreateConversationInput): Promise<Conversation>
     rename(input: RenameConversationInput): Promise<Conversation>
     delete(input: DeleteConversationInput): Promise<void>
     setTransport(input: SetConversationTransportInput): Promise<Conversation>
+    setModel(input: SetConversationModelInput): Promise<Conversation>
+    setWorkingDirectory(input: SetConversationWorkingDirectoryInput): Promise<Conversation>
+  }
+  models: {
+    /** The real, normalized Antigravity catalogue. Empty when it could not
+     *  be read — the UI must show that honestly, never a fallback list. */
+    list(): Promise<ModelOption[]>
   }
   messages: {
     send(input: SendMessageInput): Promise<Run>
