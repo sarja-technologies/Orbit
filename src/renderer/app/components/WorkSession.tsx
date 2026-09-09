@@ -5,7 +5,7 @@ import type { ActivityState } from '../lib/activity'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
-import { ActivitySummary, LiveActivity } from './ActivityLine'
+import { ActivitySummary, LiveActivity, WaitingActivity } from './ActivityLine'
 import { InactiveInteraction, InteractionCard, ResolvedInteraction } from './InteractionCard'
 import { useTranscriptScroll } from '../lib/useTranscriptScroll'
 
@@ -177,12 +177,21 @@ export function WorkSession({
                 </div>
               ) : null}
 
+              {/* The activity rail keeps stating the turn's current state even
+                  when that state is "stopped, waiting on you" — otherwise the
+                  rail simply vanishes at the one moment the turn is most
+                  obviously not progressing. */}
               {pendingInteraction ? (
-                <InteractionCard
-                  event={pendingInteraction}
-                  busy={respondingInteractionId === pendingInteraction.interactionId}
-                  onRespond={onRespond}
-                />
+                <>
+                  <div className="chat-aside">
+                    <WaitingActivity />
+                  </div>
+                  <InteractionCard
+                    event={pendingInteraction}
+                    busy={respondingInteractionId === pendingInteraction.interactionId}
+                    onRespond={onRespond}
+                  />
+                </>
               ) : null}
             </div>
           ) : null}

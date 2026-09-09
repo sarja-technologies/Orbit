@@ -45,6 +45,50 @@ export function currentActivityLine(state: ActivityState): ActivityItem | null {
 const COMMAND_TOOLS = /(bash|shell|command|terminal|run|exec)/i
 const EDIT_TOOLS = /(write|edit|create|replace|patch|save)/i
 const READ_TOOLS = /(read|view|open|search|grep|glob|list|find)/i
+const SEARCH_TOOLS = /(search|grep|glob|find)/i
+
+/** What kind of work a step is, from the only thing the provider supplies
+ *  today: the tool's name.
+ *
+ *  Kept as a separate concept from the label so the live line can say
+ *  "Running command" in Orbit's voice while still showing `run_terminal_cmd`
+ *  beside it. When the runtime starts reporting a real step kind, this is
+ *  the one function that has to start reading it — no component classifies
+ *  anything itself. */
+export type ActivityKind = 'command' | 'edit' | 'read' | 'search' | 'work'
+
+export function activityKind(label: string): ActivityKind {
+  if (COMMAND_TOOLS.test(label)) return 'command'
+  if (EDIT_TOOLS.test(label)) return 'edit'
+  if (SEARCH_TOOLS.test(label)) return 'search'
+  if (READ_TOOLS.test(label)) return 'read'
+  return 'work'
+}
+
+const RUNNING_PHRASE: Record<ActivityKind, string> = {
+  command: 'Running command',
+  edit: 'Editing file',
+  read: 'Reading file',
+  search: 'Searching',
+  work: 'Working'
+}
+
+const SETTLED_PHRASE: Record<ActivityKind, string> = {
+  command: 'Ran command',
+  edit: 'Edited file',
+  read: 'Read file',
+  search: 'Searched',
+  work: 'Worked'
+}
+
+/** The human half of the live line. The tool's own name travels beside it
+ *  rather than being replaced by it — an exact command is the thing worth
+ *  reading when something goes wrong. */
+export function activityPhrase(item: ActivityItem): string {
+  const kind = activityKind(item.label)
+  if (item.status === 'failed') return `${SETTLED_PHRASE[kind]} — failed`
+  return item.status === 'running' ? RUNNING_PHRASE[kind] : SETTLED_PHRASE[kind]
+}
 
 /** e.g. "Ran 3 commands, edited 2 files". Returns null when there is
  *  nothing worth summarizing, so a plain answer stays uncluttered. */

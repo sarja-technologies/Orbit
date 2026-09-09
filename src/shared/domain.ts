@@ -33,6 +33,12 @@ export interface ModelOption {
   /** Present only when the catalogue genuinely lists tier variants for this
    *  model. Absent means the model has no reasoning control at all. */
   supportedReasoningEfforts?: readonly ReasoningEffort[]
+  /** What this model is for, when the catalogue itself says so. `agy models`
+   *  publishes only an id and a label today, so nothing populates this yet —
+   *  it exists so real metadata takes precedence the moment it appears.
+   *  Until then the renderer derives the line from the model's own family
+   *  name (see renderer/app/lib/modelMetadata.ts) and never invents one. */
+  description?: string
 }
 
 export interface Conversation {

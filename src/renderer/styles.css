@@ -5,7 +5,17 @@
    unmistakably dark; what changed is that they are now far enough apart to
    read as different planes rather than one flat sheet. Radii are chosen by
    role, not sprinkled. Colour is neutral everywhere except the send action
-   and the reasoning tiers. */
+   and the reasoning tiers.
+
+   The ladder was rebalanced rather than rebuilt. The canvas moved up to a
+   real slate charcoal so the conversation is the lit part of the window;
+   the sidebar moved down so navigation recedes behind it; the composer and
+   the popovers each took a clear step above the canvas so "the thing you
+   type into" and "the panel you just opened" are never the same tone as
+   what is behind them. The old set sat inside a nine-point band and read as
+   one grey sheet with faint seams — these are far enough apart to read as
+   planes, and the borders got stronger so the seams themselves are legible
+   rather than implied. */
 :root {
   /* Prefer genuine platform faces over shipping a web font; an Electron app
      must never depend on a network-hosted font to render correctly. */
@@ -13,29 +23,36 @@
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Ubuntu Mono', Menlo, Consolas, monospace;
 
   /* The surface ladder. The sidebar recedes; the composer steps forward. */
-  --bg-sidebar: #1c2025;
-  --bg-rail: #20252b;
-  --bg-canvas: #24282f;
-  --bg-drawer: #272c34;
-  --bg-elevated: #30363f;
-  --bg-float: #353c46;
-  --bg-inset: #1e2228;
+  --bg-sidebar: #171b21;
+  --bg-rail: #1d222a;
+  --bg-canvas: #2a2f38;
+  --bg-drawer: #2f353f;
+  --bg-elevated: #373e49;
+  --bg-float: #3e4653;
+  --bg-inset: #21262d;
 
-  --bg-hover: rgba(255, 255, 255, 0.06);
-  --bg-active: rgba(255, 255, 255, 0.105);
-  --bg-selected: rgba(255, 255, 255, 0.085);
+  --bg-hover: rgba(255, 255, 255, 0.065);
+  --bg-active: rgba(255, 255, 255, 0.115);
+  --bg-selected: rgba(255, 255, 255, 0.095);
 
-  --text-primary: #edf0f5;
-  --text-secondary: #aeb7c3;
-  --text-muted: #7d8794;
+  /* Three genuinely distinct steps rather than three near-identical greys.
+     `muted` in particular was lifted: it labels inactive controls, and an
+     inactive control still has to be readable. */
+  --text-primary: #eff2f7;
+  --text-secondary: #bac3d0;
+  --text-muted: #8a94a3;
 
-  --border: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.145);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.19);
 
   --accent: #4c8dff;
   --accent-hover: #6ba0ff;
   --accent-contrast: #ffffff;
   --accent-soft: rgba(76, 141, 255, 0.16);
+  /* The selection marker: a solid edge on the one row that is current. Used
+     deliberately and sparingly — selection is the only state that earns
+     accent in navigation. */
+  --accent-edge: #5c96ff;
 
   --attention: #d8a75a;
   --attention-soft: rgba(216, 167, 90, 0.13);
@@ -50,8 +67,11 @@
   --tier-base-soft: rgba(148, 163, 184, 0.15);
   --tier-mid: #4fc3a1;
   --tier-mid-soft: rgba(79, 195, 161, 0.15);
-  --tier-peak: #a78bfa;
-  --tier-peak-soft: rgba(167, 139, 250, 0.18);
+  /* Desaturated away from the lavender it was: the tier ladder still needs
+     a third distinct hue at the top, but it must not read as the generic
+     AI-product purple. */
+  --tier-peak: #9b90c8;
+  --tier-peak-soft: rgba(155, 144, 200, 0.2);
 
   --space-1: 4px;
   --space-2: 8px;
@@ -76,14 +96,14 @@
   --content-gutter: var(--space-8);
 
   /* Conversation surfaces. Both bubbles are defined against --bg-canvas
-     (#24282f): the assistant's is a calm lift that a thousand-word answer
+     (#2a2f38): the assistant's is a calm lift that a thousand-word answer
      can sit in without glare, the reader's is an accent tint that reads as
      sent at a glance. Kept as tokens so the two stay in relation. */
   --chat-mark: 26px;
   --chat-rail: calc(var(--chat-mark) + var(--space-3));
   --chat-user-max: min(78%, 560px);
-  --chat-assistant-bg: #2b3138;
-  --chat-assistant-border: rgba(255, 255, 255, 0.085);
+  --chat-assistant-bg: #333a45;
+  --chat-assistant-border: rgba(255, 255, 255, 0.1);
   --chat-user-bg: rgba(76, 141, 255, 0.15);
   --chat-user-border: rgba(76, 141, 255, 0.3);
   --chat-user-text: #f1f5fb;
@@ -315,18 +335,22 @@ textarea {
 
 /* ---------- sidebar ---------- */
 
+/* Width is set inline from useSidebarWidth — the resizer and the sidebar
+   must never hold two different opinions about it. Everything else about
+   the box lives here. */
 .sidebar {
-  width: 262px;
   flex: none;
   display: flex;
   flex-direction: column;
   padding: var(--space-3) var(--space-2) var(--space-2);
   background: var(--bg-sidebar);
   min-height: 0;
+  min-width: 0;
 }
 
 .sidebar-collapsed {
   width: 52px;
+  flex: none;
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-3) var(--space-2);
@@ -396,6 +420,77 @@ textarea {
   color: var(--text-primary);
 }
 
+/* ---------- sidebar resizer ---------- */
+
+/* A hairline at rest with a four-pixel hit area either side of it, so the
+   seam is grabbable without the window growing a permanent handle. The grip
+   only appears under the pointer or on focus — discoverable when you go
+   looking, invisible when you are not. */
+.sidebar-resizer {
+  flex: none;
+  position: relative;
+  width: 5px;
+  margin-left: -2px;
+  margin-right: -2px;
+  z-index: 5;
+  cursor: col-resize;
+  /* The pointer can leave the 5px strip mid-drag; capture keeps events
+     coming, and this keeps the browser from treating the motion as a
+     text selection or a scroll gesture. */
+  touch-action: none;
+}
+
+.sidebar-resizer::before {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--border);
+  transition: background-color 120ms ease;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizer:focus-visible::before,
+.sidebar-resizer.is-dragging::before {
+  background: var(--accent);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+/* The affordance: three short strokes centred on the seam, revealed with
+   the same trigger as the highlight above. */
+.sidebar-resizer-grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 26px;
+  border-radius: var(--radius-round);
+  background: var(--text-muted);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sidebar-resizer:hover .sidebar-resizer-grip,
+.sidebar-resizer:focus-visible .sidebar-resizer-grip,
+.sidebar-resizer.is-dragging .sidebar-resizer-grip {
+  opacity: 0.9;
+}
+
+/* A drag must not paint half the window blue on the way past, and the
+   resize cursor has to survive leaving the 5px strip. */
+.app.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* ---------- project tree ---------- */
 
 .project-tree {
@@ -430,14 +525,36 @@ textarea {
   flex: 1;
   min-width: 0;
   text-align: left;
-  padding: var(--space-2) var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
   color: var(--text-secondary);
   font-size: var(--text-ui);
 }
 
+/* The project Antigravity is actually working in. One solid accent edge and
+   a step up in weight — enough to find instantly in a list of twelve,
+   restrained enough that it is not a coloured card. */
+.project-group.current > .project-row {
+  background: var(--bg-selected);
+}
+
+.project-group.current > .project-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 2.5px;
+  border-radius: var(--radius-round);
+  background: var(--accent-edge);
+}
+
 .project-group.current .project-open {
   color: var(--text-primary);
-  font-weight: 600;
+  font-weight: 650;
+}
+
+.project-open {
+  border-radius: var(--radius-sm);
 }
 
 .project-name {
@@ -513,6 +630,19 @@ textarea {
   background: var(--bg-selected);
 }
 
+/* The open session, marked the same way its project is so the two levels of
+   "you are here" read as one idea rather than two inventions. */
+.session-row.active::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: var(--radius-round);
+  background: var(--accent-edge);
+}
+
 .session-open {
   display: flex;
   align-items: center;
@@ -520,13 +650,14 @@ textarea {
   flex: 1;
   min-width: 0;
   text-align: left;
-  padding: var(--space-2) var(--space-2);
+  padding: 7px var(--space-2);
   color: var(--text-secondary);
   font-size: var(--text-meta);
 }
 
 .session-row.active .session-open {
   color: var(--text-primary);
+  font-weight: 550;
 }
 
 .session-name {
@@ -626,6 +757,12 @@ textarea {
   border-bottom: 1px solid var(--border);
 }
 
+/* Which session you are reading is the header's job; the project name is
+   the context it sits in and stays a step quieter. */
+.chrome-breadcrumb {
+  max-width: 100%;
+}
+
 .chrome-breadcrumb {
   display: flex;
   align-items: center;
@@ -656,22 +793,9 @@ textarea {
   white-space: nowrap;
 }
 
-/* The folder this session really runs in, truncated from the left because
-   the leaf is the part that identifies it. The RTL box places the ellipsis;
-   .path-text restores the path's own order inside it. */
-.chrome-path {
-  margin-left: auto;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
-}
-
+/* Restores a path's own order inside an RTL truncation box — see
+   .project-switch-path, which is the one place that trick is still used
+   now that the header no longer carries a folder. */
 .path-text {
   direction: ltr;
   unicode-bidi: isolate;
@@ -1070,8 +1194,11 @@ textarea {
   display: flex;
   flex-direction: column;
   /* Tighter than the old flat log: the bubbles now carry the separation,
-     so this only has to keep turns from touching. */
-  gap: var(--space-5);
+     so this only has to keep turns from touching. Tightened again when
+     messages gained a reserved action strip, which contributes its own
+     space below every bubble — the rhythm between turns is the sum of the
+     two, not this alone. */
+  gap: var(--space-3);
 }
 
 .transcript-empty {
@@ -1099,7 +1226,7 @@ textarea {
 .chat-row {
   display: grid;
   grid-template-columns: var(--chat-mark) minmax(0, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   column-gap: var(--space-3);
   row-gap: var(--space-2);
   align-items: start;
@@ -1212,6 +1339,67 @@ textarea {
 
 .chat-row-user .chat-bubble:first-child {
   border-top-right-radius: var(--radius-md);
+}
+
+/* ---------- message actions ---------- */
+
+/* Copy, on the message itself rather than behind a menu. The strip's height
+   is reserved whether or not it is visible, so pointing at a message never
+   nudges the conversation — the one thing a hover affordance must not do in
+   a surface people are reading. */
+.chat-actions {
+  grid-column: 2;
+  grid-row: 3;
+  min-height: 22px;
+  margin-top: calc(-1 * var(--space-1));
+  display: flex;
+  align-items: center;
+}
+
+.chat-row-user .chat-actions {
+  grid-column: 1;
+  justify-content: flex-end;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity 110ms ease;
+}
+
+/* Revealed by pointing at the message, or by tabbing into it — the buttons
+   are always in the DOM, only ever invisible, so the keyboard reaches them
+   in reading order. */
+.chat-row:hover .message-actions,
+.chat-row:focus-within .message-actions {
+  opacity: 1;
+}
+
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1;
+}
+
+.message-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.message-action.is-copied {
+  color: var(--success);
+}
+
+.message-action svg {
+  flex: none;
 }
 
 /* ---------- live reply state ---------- */
@@ -1470,15 +1658,63 @@ textarea {
 
 /* ---------- activity ---------- */
 
+/* Everything here is subordinate to the reply it sits under: one line at a
+   time, one step quieter than the prose, and no animation that means
+   nothing. Orbit is a workspace, not a build log. */
 .activity {
   font-size: var(--text-meta);
   color: var(--text-secondary);
 }
 
-.activity-live {
+.activity-live,
+.activity-waiting {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+}
+
+/* What kind of work it is — a chevron for a command, a pencil for an edit —
+   so a scan down the rail separates the kinds without reading every line. */
+.activity-glyph {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.activity-live[data-kind='command'] .activity-glyph {
+  color: var(--tier-mid);
+}
+
+.activity-live[data-kind='edit'] .activity-glyph {
+  color: var(--accent);
+}
+
+/* The literal tool or command. Always shown when supplied — it is the part
+   that matters when something goes wrong — and always quieter than the
+   phrase in front of it. */
+.activity-detail {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Stopped, and waiting on the reader. The rail keeps stating the turn's
+   state rather than vanishing at the one moment it is most obviously not
+   progressing. */
+.activity-waiting {
+  color: var(--attention);
+}
+
+.activity-waiting .activity-pip {
+  background: var(--attention);
+}
+
+.activity-item-phrase {
+  flex: none;
 }
 
 .activity-pip {
@@ -1528,7 +1764,9 @@ textarea {
 
 .activity-item {
   display: flex;
+  align-items: baseline;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .activity-item-failed {
@@ -1882,10 +2120,21 @@ textarea {
   color: var(--text-muted);
 }
 
+/* flex-end rather than center so that when the context group wraps onto two
+   lines on a narrow window, the attach and send buttons stay level with the
+   last line instead of floating in the middle of it. Identical to center
+   while everything is one 32px row, which is the usual case. */
 .composer-controls {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The composer is the one surface that is clearly above the canvas — it is
+   what you act on, so it does not share a tone with what you read. */
+.composer-surface {
+  border-color: var(--border-strong);
 }
 
 .composer-spacer {
@@ -1938,36 +2187,119 @@ textarea {
   background: var(--border-strong);
 }
 
-/* ---------- combined model / reasoning control ---------- */
+/* ---------- composer context controls ---------- */
 
-.model-control {
-  position: relative;
-  flex: none;
+/* Project, Model and Permissions are three answers to the same question —
+   what will the next message actually do — so they share one trigger shape,
+   one popover shell and one open-at-a-time rule. They are grouped rather
+   than spread across the footer so the row reads as a single statement of
+   context. */
+.composer-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
-.model-trigger {
+.composer-control {
+  position: relative;
+  flex: none;
+  min-width: 0;
+}
+
+.composer-control-trigger {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   height: 32px;
+  max-width: 300px;
   padding: 0 var(--space-2) 0 var(--space-3);
   border-radius: var(--radius-round);
-  background: var(--bg-hover);
+  background: transparent;
+  border: 1px solid transparent;
   color: var(--text-secondary);
   font-size: var(--text-meta);
-  max-width: 320px;
 }
 
-.model-trigger:hover:not(:disabled) {
-  background: var(--bg-active);
+.composer-control-trigger:hover:not(:disabled),
+.composer-control-trigger[aria-expanded='true'] {
+  background: var(--bg-hover);
+  border-color: var(--border);
   color: var(--text-primary);
 }
 
-.model-trigger-name {
+.composer-control-trigger[aria-expanded='true'] {
+  border-color: var(--border-strong);
+}
+
+/* Reserved for a mode that can act without asking. No mode Orbit supports
+   today is one — see lib/permissionModes.ts — so nothing sets this yet; it
+   exists so such a mode arrives already marked rather than looking like
+   every other setting. */
+.composer-control-trigger[data-tone='caution'] {
+  color: var(--attention);
+  background: var(--attention-soft);
+  border-color: rgba(216, 167, 90, 0.32);
+}
+
+.composer-control-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.composer-control-trigger:hover:not(:disabled) .composer-control-icon,
+.composer-control-trigger[aria-expanded='true'] .composer-control-icon {
+  color: var(--text-secondary);
+}
+
+/* The control's own value never gives way first. It is what the control is
+   for, so it holds its width and only truncates when the name alone is too
+   long — everything to its right yields before "Default" becomes "Def…". */
+.composer-control-label {
+  flex: none;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 550;
+}
+
+/* The second, quieter value on the same line — the resolved model under
+   "Default". Separated by a real dot so the two read as two facts, not one
+   run-on name. */
+/* The one thing in the row that absorbs the pressure. */
+.composer-control-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.composer-control-detail::before,
+.composer-control-unresolved::before {
+  content: '·';
+  margin-right: var(--space-2);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* Explicit, and quiet: Orbit does not know which model Antigravity used,
+   and says so rather than showing a plausible one. */
+.composer-control-unresolved {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0.85;
+  white-space: nowrap;
 }
 
 /* The live reasoning tier, in the same treatment the open control uses, so
@@ -2001,22 +2333,38 @@ textarea {
   flex: none;
 }
 
-/* ---------- model popover ---------- */
+/* ---------- composer popovers ---------- */
 
-.model-popover {
+/* One shell for all three. Grown upward because the composer is at the
+   bottom of the window, anchored to the control's own edge, and capped
+   against the viewport so a wide panel on a small window narrows instead of
+   opening off screen. */
+.composer-popover {
   position: absolute;
   bottom: calc(100% + 10px);
-  right: 0;
   z-index: 30;
-  display: flex;
-  align-items: stretch;
-  width: 500px;
+  width: var(--popover-width, 340px);
+  max-width: calc(100vw - var(--space-6));
   padding: var(--space-2);
-  gap: var(--space-2);
   background: var(--bg-float);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-float);
+}
+
+.composer-popover[data-align='left'] {
+  left: 0;
+}
+
+.composer-popover[data-align='right'] {
+  right: 0;
+}
+
+.model-popover-body {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 .popover-pane {
@@ -2110,10 +2458,31 @@ textarea {
   white-space: nowrap;
 }
 
+/* What the model is for. Replaced a restatement of its reasoning tiers,
+   which the control on the right already makes.
+   Allowed a second line: a description truncated to "…deeper" is worse than
+   the line it replaced, and descriptions are the reason this row exists.
+   Clamped at two so a row can never grow without bound. */
 .model-row-hint {
   font-size: 11.5px;
-  line-height: 1.3;
+  line-height: 1.35;
   color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The fallback for a model whose family Orbit cannot place: its real
+   catalogue id, in the treatment ids get everywhere else, so it never
+   masquerades as a written description. Kept to one line — an id is a
+   token to recognize, not prose to read, and wrapping one mid-word helps
+   nobody. */
+.model-row-hint.is-identifier {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.85;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2144,6 +2513,222 @@ textarea {
 
 .model-more .chevron-glyph {
   transform: rotate(-90deg);
+}
+
+/* ---------- project control ---------- */
+
+.project-popover {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.project-popover-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) 0;
+}
+
+.project-popover-name {
+  font-size: var(--text-body);
+  font-weight: 620;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-popover-role {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.project-popover-path {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+
+/* The whole path, wrapping rather than truncating: this is the one place it
+   is the point, and a folder you cannot read is a folder you cannot check. */
+.project-path-value {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.project-path-managed {
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+}
+
+.project-path-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.project-popover-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+}
+
+.project-popover-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--border);
+}
+
+.project-switch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 176px;
+  overflow-y: auto;
+}
+
+.project-switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+}
+
+.project-switch-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-switch-row svg {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.project-switch-name {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Truncated from the left, because the leaf is the part that identifies a
+   folder. The RTL box places the ellipsis; .path-text restores the path's
+   own order inside it. One element cannot do both. */
+.project-switch-path {
+  margin-left: auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+/* ---------- permission control ---------- */
+
+.permission-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.permission-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+.permission-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.permission-row.selected {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+
+.permission-row .model-tick {
+  margin-top: 2px;
+}
+
+.permission-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.permission-row-name {
+  font-size: var(--text-meta);
+  font-weight: 600;
+}
+
+.permission-row[data-tone='caution'] .permission-row-name {
+  color: var(--attention);
+}
+
+.permission-row-body {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+/* The real internal identifier, as a detail line rather than as the
+   control's own name. */
+.permission-row-technical {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.permission-row-blocked {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* ---------- model browser ---------- */
@@ -3016,12 +3601,16 @@ textarea {
     --content-gutter: var(--space-5);
   }
 
-  .sidebar {
-    width: 224px;
+  /* The sidebar's width is user-owned and clamped against the viewport by
+     useSidebarWidth, so nothing here overrides it. The model popover is the
+     one panel wide enough to need narrowing before its own max-width guard
+     starts truncating it. */
+  .composer-popover {
+    --popover-width: 440px;
   }
 
-  .model-popover {
-    width: 440px;
+  .pane-reasoning {
+    width: 168px;
   }
 }
 
@@ -3030,8 +3619,14 @@ textarea {
     --content-gutter: var(--space-4);
   }
 
-  .chrome-path {
-    display: none;
+  /* Below this the three context controls stop competing for one line and
+     wrap onto two, rather than each shrinking to an unreadable stub. */
+  .composer-control-trigger {
+    max-width: 200px;
+  }
+
+  .composer-control-label {
+    max-width: 110px;
   }
 
   .rail-label {

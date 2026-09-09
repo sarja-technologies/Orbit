@@ -2,12 +2,11 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { ArtifactContent } from '@shared/contracts'
 import type {
   Artifact,
-  Conversation,
+  ConversationTransport,
   ID,
   Message,
   ModelOption,
   OrbitPreferences,
-  Project,
   ProjectFile,
   ProjectGroup,
   ProjectSnapshot,
@@ -22,6 +21,7 @@ import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
 import { ProjectSidebar, type SessionIndicator } from './components/ProjectSidebar'
+import { SidebarResizer } from './components/SidebarResizer'
 import { CreateProjectDialog } from './components/CreateDialogs'
 import { WorkSession, type ResolvedRecord } from './components/WorkSession'
 import { WorkspaceRail } from './components/WorkspaceRail'
@@ -33,6 +33,9 @@ import { applyActivity, emptyActivity, type ActivityState } from './lib/activity
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
+import { resolvedModelFromEvent, type ResolvedModels } from './lib/resolvedModel'
+import { useSidebarWidth } from './lib/useSidebarWidth'
+import { workingContext } from './lib/projectContext'
 
 /** Which project groups are open in the sidebar. Kept in the renderer rather
  *  than the database: it is view state, and losing it costs one click. */
@@ -84,6 +87,11 @@ export function App(): JSX.Element {
    *  does not exist at all. Cleared by the effect that lands the focus. */
   const [focusPendingId, setFocusPendingId] = useState<ID | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const sidebar = useSidebarWidth()
+  /** Which model each conversation's turns actually ran on, as reported by
+   *  the runtime. Display-only, and never inferred — see
+   *  lib/resolvedModel.ts for why an unreported model stays unreported. */
+  const [resolvedModels, setResolvedModels] = useState<ResolvedModels>({})
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -302,6 +310,15 @@ export function App(): JSX.Element {
   }
 
   function applyRuntimeEvent(event: RuntimeEvent): void {
+    // The one place a reported model reaches the UI. Nothing populates it
+    // today, so the composer says the model is unreported rather than
+    // guessing one.
+    const resolved = resolvedModelFromEvent(event)
+    if (resolved) {
+      setResolvedModels((current) =>
+        current[resolved.conversationId] === resolved.model ? current : { ...current, [resolved.conversationId]: resolved.model }
+      )
+    }
     if (event.type === 'interaction.required') {
       if (event.canRespond) {
         runsAwaitingInteraction.current.add(event.runId)
@@ -431,6 +448,47 @@ export function App(): JSX.Element {
     } catch (error) {
       setComposer(content)
       setNotice(error instanceof Error ? error.message : 'Message could not be sent.')
+    }
+  }
+
+  /** Escalates a session so Antigravity can stop and ask before it acts.
+   *
+   *  One-way by design: OrbitRuntime refuses `pty` -> `structured` because a
+   *  live interactive session cannot be un-started. The permission control
+   *  presents that as settled rather than offering a switch that would
+   *  silently do nothing, so this is only ever called with 'pty'. */
+  async function selectTransport(transport: ConversationTransport): Promise<void> {
+    if (!activeConversation || activeConversation.transport === transport) return
+    try {
+      const updated = await requireOrbitApi().conversations.setTransport({ conversationId: activeConversation.id, transport })
+      setTree((current) =>
+        current.map((group) => ({
+          ...group,
+          conversations: group.conversations.map((item) => (item.id === updated.id ? updated : item))
+        }))
+      )
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That permission mode could not be applied.')
+    }
+  }
+
+  /** Repoints the working project at a real folder the user picked. The
+   *  picker opens on the folder the project already uses, so "change this"
+   *  starts from where it is rather than from the user's home. */
+  async function changeProjectFolder(): Promise<void> {
+    if (!activeProject) return
+    const orbit = requireOrbitApi()
+    const current = workingContext(activeProject, activeConversation).path
+    try {
+      const chosen = await orbit.dialog.pickFolder({
+        title: `Choose the folder for ${activeProject.name}`,
+        defaultPath: current
+      })
+      if (!chosen) return
+      await orbit.projects.setRoot({ projectId: activeProject.id, rootPath: chosen })
+      await refreshProject()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That folder could not be used.')
     }
   }
 
@@ -598,7 +656,7 @@ export function App(): JSX.Element {
   }
 
   return (
-    <div className="app">
+    <div className={sidebar.dragging ? 'app is-resizing' : 'app'}>
       <ProviderLogoSprite />
       <ProjectSidebar
         groups={tree}
@@ -607,6 +665,7 @@ export function App(): JSX.Element {
         expandedProjectIds={expandedProjectIds}
         indicatorFor={indicatorFor}
         collapsed={sidebarCollapsed}
+        width={sidebar.width}
         onToggleProject={(projectId) =>
           setExpandedProjectIds((current) =>
             current.includes(projectId) ? current.filter((id) => id !== projectId) : [...current, projectId]
@@ -620,11 +679,25 @@ export function App(): JSX.Element {
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
 
+      {/* The seam between navigation and conversation. Hidden while the
+          sidebar is collapsed: there is no width to negotiate then. */}
+      {sidebarCollapsed ? null : (
+        <SidebarResizer
+          width={sidebar.width}
+          min={sidebar.min}
+          max={sidebar.max}
+          dragging={sidebar.dragging}
+          onResize={sidebar.setWidth}
+          onNudge={sidebar.nudge}
+          onReset={sidebar.reset}
+          onDraggingChange={sidebar.setDragging}
+        />
+      )}
+
       <div className="workspace">
         <ChromeBar
           activeProject={activeProject}
           sessionTitle={activeConversation?.title ?? null}
-          workingPath={workingPathFor(activeProject, activeConversation)}
           live={activeConversation?.transport === 'pty'}
         />
         <ProviderBanner providerStatus={providerStatus} />
@@ -675,8 +748,15 @@ export function App(): JSX.Element {
                 models={models}
                 selectedModel={activeConversation.model}
                 selectedEffort={activeConversation.reasoningEffort}
+                resolvedModelId={resolvedModels[activeConversation.id] ?? null}
                 onSelectModel={selectModel}
                 onSelectEffort={selectEffort}
+                project={activeProject}
+                conversation={activeConversation}
+                projects={projects}
+                onSelectProject={(projectId) => void openProject(projectId)}
+                onChangeProjectFolder={() => void changeProjectFolder()}
+                onSelectTransport={(transport) => void selectTransport(transport)}
                 registerFocus={(focus) => {
                   composerFocusRef.current = focus
                 }}
@@ -771,13 +851,6 @@ function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {
   const orbit = getOrbitApi()
   if (!orbit) throw new Error('The Orbit preload API is unavailable.')
   return orbit
-}
-
-/** The folder the header reports. A session override wins; otherwise the
- *  project's own folder; otherwise nothing is claimed, because the managed
- *  workspace is an internal location and not a place the user chose. */
-function workingPathFor(project: Project | null, conversation: Conversation | null): string | null {
-  return conversation?.workingDirectory ?? project?.rootPath ?? null
 }
 
 function workspaceConversationFor(groups: ProjectGroup[], projectId: ID, preferred?: ID | null): ID | null {

@@ -4,17 +4,21 @@ import { describeProviderProblem } from '../lib/errorCopy'
 interface WorkspaceHeaderProps {
   activeProject: Project | null
   sessionTitle: string | null
-  /** The folder this session actually runs in — the single most useful
-   *  thing to be able to check without opening anything. */
-  workingPath: string | null
   live: boolean
 }
 
-/** The header belongs to the workspace: where you are, and where that runs.
- *  It carries no permanent provider status — a healthy provider is the
- *  normal case and does not need a line of chrome restating it. Real
+/** The header belongs to the workspace: which session you are reading, and
+ *  which project it belongs to.
+ *
+ *  It no longer carries the working folder. That path is the single most
+ *  important fact about a turn, and an ellipsised copy of it in a corner was
+ *  the wrong place for it — it now lives on the composer's project control,
+ *  next to the model and the permission mode it belongs with, in full.
+ *
+ *  It carries no permanent provider status either — a healthy provider is
+ *  the normal case and does not need a line of chrome restating it. Real
  *  problems surface in ProviderBanner instead. */
-export function ChromeBar({ activeProject, sessionTitle, workingPath, live }: WorkspaceHeaderProps): JSX.Element {
+export function ChromeBar({ activeProject, sessionTitle, live }: WorkspaceHeaderProps): JSX.Element {
   return (
     <header className="chrome">
       <div className="chrome-breadcrumb">
@@ -33,16 +37,6 @@ export function ChromeBar({ activeProject, sessionTitle, workingPath, live }: Wo
           </span>
         ) : null}
       </div>
-
-      {workingPath ? (
-        // Two elements on purpose: the outer box is RTL so the ellipsis lands
-        // at the START of a long path (the leaf identifies it), while the
-        // inner span stays LTR so bidi cannot move the leading slash to the
-        // far end. One element cannot do both.
-        <span className="chrome-path" title={workingPath}>
-          <span className="path-text">{workingPath}</span>
-        </span>
-      ) : null}
     </header>
   )
 }

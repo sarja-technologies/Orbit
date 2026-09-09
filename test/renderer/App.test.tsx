@@ -391,8 +391,21 @@ describe('App', () => {
     const header = document.querySelector('.chrome') as HTMLElement
     expect(within(header).getByText('AgentDock Website')).toBeInTheDocument()
     expect(within(header).getByText('Improve Orbit UI')).toBeInTheDocument()
-    expect(within(header).getByText('/home/dev/agentdock')).toBeInTheDocument()
     expect(screen.queryByText('Antigravity online')).not.toBeInTheDocument()
+  })
+
+  it('moves the working folder off the header and onto the project control, in full', async () => {
+    const user = userEvent.setup()
+    await boot()
+    const header = document.querySelector('.chrome') as HTMLElement
+    // An ellipsised path in the corner was the wrong home for the single
+    // most important fact about a turn.
+    expect(within(header).queryByText('/home/dev/agentdock')).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Project: AgentDock Website'))
+    const popover = screen.getByRole('dialog', { name: 'Project' })
+    expect(within(popover).getByText('/home/dev/agentdock')).toBeInTheDocument()
+    expect(within(popover).getByText('Every session in this project runs here.')).toBeInTheDocument()
   })
 
   it('still reports a real provider problem', async () => {
