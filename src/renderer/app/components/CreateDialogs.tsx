@@ -1,11 +1,13 @@
-import { useEffect, useId, useState } from 'react'
-import type { ID, Project } from '@shared/domain'
+import { useId, useState } from 'react'
 import { Modal, ModalHeader } from './Modal'
 
-/** Both dialogs speak in terms of a real folder on disk, because that is
- *  what Antigravity actually runs in. An empty field means "no folder of its
- *  own": Orbit's managed workspace for a project, or the project's folder for
- *  a session. Neither is ever guessed or silently invented.
+/** A project is the one thing in Orbit that has to be configured before it
+ *  exists: it owns the real folder on disk that Antigravity runs in, and
+ *  every session inside it inherits that. Sessions themselves are created
+ *  instantly with no dialog at all — see App.createSession.
+ *
+ *  An empty folder field means "no folder of its own": Orbit's managed
+ *  workspace. That is never guessed or silently invented.
  *
  *  The native picker is the primary way in, and the field stays editable
  *  beside it because pasting a path you already have is faster than
@@ -124,112 +126,6 @@ export function CreateProjectDialog({ onCancel, onCreate, pickFolder }: CreatePr
           </button>
           <button type="submit" className="primary" disabled={!valid}>
             Create project
-          </button>
-        </div>
-      </form>
-    </Modal>
-  )
-}
-
-interface CreateSessionDialogProps {
-  projects: Project[]
-  /** The project the user launched this from — a project row's own + button
-   *  preselects itself so the common case takes no extra decision. */
-  initialProjectId: ID | null
-  onCancel: () => void
-  onCreate: (input: { projectId: ID; title: string | null; workingDirectory: string | null }) => void
-  pickFolder: (defaultPath: string | null) => Promise<string | null>
-}
-
-export function CreateSessionDialog({
-  projects,
-  initialProjectId,
-  onCancel,
-  onCreate,
-  pickFolder
-}: CreateSessionDialogProps): JSX.Element {
-  const [projectId, setProjectId] = useState<ID | null>(initialProjectId ?? projects[0]?.id ?? null)
-  const [title, setTitle] = useState('')
-  const [workingDirectory, setWorkingDirectory] = useState<string | null>(null)
-  const [picking, setPicking] = useState(false)
-  const project = projects.find((candidate) => candidate.id === projectId) ?? null
-
-  // Switching project changes what "inherit" means, so an override chosen
-  // for the previous project must not silently carry over to this one.
-  useEffect(() => {
-    setWorkingDirectory(null)
-  }, [projectId])
-
-  const choose = async (): Promise<void> => {
-    setPicking(true)
-    try {
-      const chosen = await pickFolder(project?.rootPath ?? null)
-      if (chosen) setWorkingDirectory(chosen)
-    } finally {
-      setPicking(false)
-    }
-  }
-
-  const valid = Boolean(projectId) && (workingDirectory === null || isAbsolutePath(workingDirectory.trim()))
-
-  const submit = (): void => {
-    if (!projectId || !valid) return
-    onCreate({ projectId, title: title.trim() || null, workingDirectory: workingDirectory?.trim() || null })
-  }
-
-  return (
-    <Modal label="New session" onClose={onCancel}>
-      <ModalHeader title="New session" onClose={onCancel} />
-      <form
-        className="modal-body modal-form"
-        onSubmit={(event) => {
-          event.preventDefault()
-          submit()
-        }}
-      >
-        <label className="field">
-          <span className="field-label">Project</span>
-          <select
-            className="field-input"
-            value={projectId ?? ''}
-            aria-label="Project"
-            onChange={(event) => setProjectId(event.target.value || null)}
-          >
-            {projects.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field">
-          <span className="field-label">Session name</span>
-          <input
-            className="field-input"
-            value={title}
-            autoFocus
-            placeholder="New session"
-            aria-label="Session name"
-            onChange={(event) => setTitle(event.target.value)}
-          />
-        </label>
-
-        <FolderField
-          label="Working folder"
-          path={workingDirectory}
-          fallback={project?.rootPath ?? `${project?.name ?? 'Project'} · Orbit-managed workspace`}
-          busy={picking}
-          onChange={setWorkingDirectory}
-          onChoose={() => void choose()}
-        />
-
-        <div className="modal-actions">
-          <button type="button" className="ghost" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="submit" className="primary" disabled={!valid}>
-            Create session
           </button>
         </div>
       </form>

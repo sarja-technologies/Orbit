@@ -3,7 +3,6 @@ import type { Conversation, ID, ProjectGroup } from '@shared/domain'
 import { relativeTime } from '../lib/relativeTime'
 
 export type SessionIndicator = 'running' | 'attention' | null
-export type CreateIntent = { kind: 'project' } | { kind: 'session'; projectId: ID | null }
 
 interface ProjectSidebarProps {
   groups: ProjectGroup[]
@@ -14,7 +13,13 @@ interface ProjectSidebarProps {
   collapsed: boolean
   onToggleProject: (projectId: ID) => void
   onSelectSession: (projectId: ID, conversationId: ID) => void
-  onCreate: (intent: CreateIntent) => void
+  /** Opens the project-creation dialog: a project genuinely needs a name
+   *  and a folder before it can exist. */
+  onNewProject: () => void
+  /** Creates a session in this project there and then — no dialog. A
+   *  session needs nothing configured: it is named from its first prompt
+   *  and runs in its project's folder. */
+  onNewSession: (projectId: ID) => void
   onRename: (conversationId: ID, title: string) => void
   onDelete: (conversationId: ID) => void
   onToggleCollapsed: () => void
@@ -33,7 +38,8 @@ export function ProjectSidebar({
   collapsed,
   onToggleProject,
   onSelectSession,
-  onCreate,
+  onNewProject,
+  onNewSession,
   onRename,
   onDelete,
   onToggleCollapsed
@@ -50,7 +56,7 @@ export function ProjectSidebar({
         <button
           type="button"
           className="icon-button"
-          onClick={() => onCreate({ kind: 'session', projectId: activeProjectId })}
+          onClick={() => activeProjectId && onNewSession(activeProjectId)}
           disabled={!activeProjectId}
           aria-label="New session"
           title="New session"
@@ -76,7 +82,7 @@ export function ProjectSidebar({
 
       <div className="sidebar-section">
         <span className="sidebar-section-label">Projects</span>
-        <CreateMenu onCreate={onCreate} />
+        <CreateMenu activeProjectId={activeProjectId} onNewProject={onNewProject} onNewSession={onNewSession} />
       </div>
 
       <div className="project-tree">
@@ -106,14 +112,14 @@ export function ProjectSidebar({
                     </span>
                   ) : null}
                 </button>
-                {/* Creating a session from a project row is the fastest path
-                    to the common case, and it preselects that project. */}
+                {/* One click is the whole flow: the session exists in this
+                    project immediately, with nothing to fill in. */}
                 <button
                   type="button"
                   className="icon-button project-add"
                   aria-label={`New session in ${group.project.name}`}
                   title={`New session in ${group.project.name}`}
-                  onClick={() => onCreate({ kind: 'session', projectId: group.project.id })}
+                  onClick={() => onNewSession(group.project.id)}
                 >
                   <PlusGlyph />
                 </button>
@@ -155,9 +161,17 @@ export function ProjectSidebar({
   )
 }
 
+interface CreateMenuProps {
+  activeProjectId: ID | null
+  onNewProject: () => void
+  onNewSession: (projectId: ID) => void
+}
+
 /** The one creation affordance, compact enough to sit on the section header
- *  rather than taking a full-width button's worth of the sidebar. */
-function CreateMenu({ onCreate }: { onCreate: (intent: CreateIntent) => void }): JSX.Element {
+ *  rather than taking a full-width button's worth of the sidebar. The two
+ *  items are deliberately asymmetric: a project opens its dialog, a session
+ *  just appears in the project you are already in. */
+function CreateMenu({ activeProjectId, onNewProject, onNewSession }: CreateMenuProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
 
@@ -197,7 +211,7 @@ function CreateMenu({ onCreate }: { onCreate: (intent: CreateIntent) => void }):
             className="menu-item"
             onClick={() => {
               setOpen(false)
-              onCreate({ kind: 'project' })
+              onNewProject()
             }}
           >
             <FolderGlyph />
@@ -207,9 +221,10 @@ function CreateMenu({ onCreate }: { onCreate: (intent: CreateIntent) => void }):
             type="button"
             role="menuitem"
             className="menu-item"
+            disabled={!activeProjectId}
             onClick={() => {
               setOpen(false)
-              onCreate({ kind: 'session', projectId: null })
+              if (activeProjectId) onNewSession(activeProjectId)
             }}
           >
             <ChatGlyph />

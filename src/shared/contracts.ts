@@ -58,6 +58,12 @@ export interface CreateProjectInput {
   rootPath?: string | null
 }
 
+/** Creating a session takes nothing but its project: `title` defaults to
+ *  `New Session` (the first prompt names it — see shared/sessionTitle.ts)
+ *  and omitting `workingDirectory` means it inherits the project's folder,
+ *  which is what the UI always does. Both remain settable for callers that
+ *  genuinely have a value, and `setWorkingDirectory` can override a
+ *  session's folder later. */
 export interface CreateConversationInput {
   projectId: ID
   title?: string
@@ -77,8 +83,8 @@ export interface SetConversationWorkingDirectoryInput {
 }
 
 export interface PickFolderInput {
-  /** Where the native picker opens. Used to start the session picker inside
-   *  the project's own folder. */
+  /** Where the native picker opens, when a caller has a sensible starting
+   *  point. Omitted means the OS decides. */
   defaultPath?: string | null
   title?: string
 }

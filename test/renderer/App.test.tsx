@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/app/App'
 import type { OrbitApi } from '../../src/shared/contracts'
 import type { Conversation, ModelOption, OrbitPreferences, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
+import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { deriveSessionTitle, hasDefaultSessionTitle } from '../../src/shared/sessionTitle'
 
 const WEBSITE: Project = { id: 'project_1', name: 'AgentDock Website', rootPath: '/home/dev/agentdock', createdAt: 'now', updatedAt: 'now' }
 const RENDERER: Project = { id: 'project_2', name: 'Renderer Check', rootPath: null, createdAt: 'now', updatedAt: 'now' }
@@ -37,6 +39,15 @@ const MODELS: ModelOption[] = [
 describe('App', () => {
   let api: OrbitApi
   let preferences: OrbitPreferences
+  /** A small stateful stand-in for the real backend, so a session created
+   *  through the API is genuinely there the next time the sidebar and the
+   *  workspace read it — which is the whole thing these tests are about. */
+  let sessions: Record<string, Conversation[]>
+  let created: number
+  /** Mirrors the store's `title_is_custom`: a session the user named is
+   *  never a candidate for first-prompt titling again. */
+  let userNamed: Set<string>
+  let runListener: ((event: RuntimeEvent) => void) | null
 
   const snapshotFor = (project: Project, conversations: Conversation[]): ProjectSnapshot => ({
     project,
@@ -52,6 +63,10 @@ describe('App', () => {
   beforeEach(() => {
     window.localStorage.clear()
     preferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
+    sessions = { project_1: [IMPROVE, HYBRID], project_2: [CHECK] }
+    created = 0
+    userNamed = new Set()
+    runListener = null
     const providerStatus: ProviderStatus = {
       id: 'antigravity',
       state: 'unavailable',
@@ -79,12 +94,14 @@ describe('App', () => {
       projects: {
         list: vi.fn(async () => [WEBSITE, RENDERER]),
         tree: vi.fn(async () => [
-          { project: WEBSITE, conversations: [IMPROVE, HYBRID] },
-          { project: RENDERER, conversations: [CHECK] }
+          { project: WEBSITE, conversations: sessions.project_1 ?? [] },
+          { project: RENDERER, conversations: sessions.project_2 ?? [] }
         ]),
         create: vi.fn(async () => ({ ...RENDERER, id: 'project_3', name: 'Orbit' })),
         open: vi.fn(async (projectId) =>
-          projectId === 'project_2' ? snapshotFor(RENDERER, [CHECK]) : snapshotFor(WEBSITE, [IMPROVE, HYBRID])
+          projectId === 'project_2'
+            ? snapshotFor(RENDERER, sessions.project_2 ?? [])
+            : snapshotFor(WEBSITE, sessions.project_1 ?? [])
         ),
         setRoot: vi.fn()
       },
@@ -97,16 +114,51 @@ describe('App', () => {
         })
       },
       conversations: {
-        create: vi.fn(async () => conversation({ id: 'conversation_9', projectId: 'project_1', title: 'New session' })),
-        rename: vi.fn(),
+        // Mirrors the real backend: a session with no title and no folder
+        // of its own, stored against the project it was asked for.
+        create: vi.fn(async (input) => {
+          created += 1
+          const made = conversation({ id: `conversation_new_${created}`, projectId: input.projectId, title: 'New Session' })
+          sessions[input.projectId] = [made, ...(sessions[input.projectId] ?? [])]
+          return made
+        }),
+        rename: vi.fn(async (input) => {
+          const list = sessions[activeProjectOf(input.conversationId)] ?? []
+          const index = list.findIndex((item) => item.id === input.conversationId)
+          const target = list[index]!
+          const renamed = { ...target, title: input.title }
+          list[index] = renamed
+          userNamed.add(input.conversationId)
+          return renamed
+        }),
         delete: vi.fn(),
         setTransport: vi.fn(),
         setModel: vi.fn(),
         setWorkingDirectory: vi.fn()
       },
       models: { list: vi.fn(async () => MODELS) },
-      messages: { send: vi.fn(async () => run) },
-      runs: { cancel: vi.fn(), onEvent: vi.fn(() => () => undefined) },
+      messages: {
+        // Mirrors OrbitRuntime.sendMessage: a still-unnamed session is named
+        // from the prompt as part of sending it, so the sidebar picks the
+        // new title up from the refresh the renderer already does.
+        send: vi.fn(async (input) => {
+          const list = sessions[input.projectId] ?? []
+          const index = list.findIndex((item) => item.id === input.conversationId)
+          const target = list[index]
+          if (target && hasDefaultSessionTitle(target.title) && !userNamed.has(target.id)) {
+            const derived = deriveSessionTitle(input.content)
+            if (derived) list[index] = { ...target, title: derived }
+          }
+          return run
+        })
+      },
+      runs: {
+        cancel: vi.fn(),
+        onEvent: vi.fn((next: (event: RuntimeEvent) => void) => {
+          runListener = next
+          return () => undefined
+        })
+      },
       interactions: { respond: vi.fn() },
       files: {
         attach: vi.fn(),
@@ -124,6 +176,27 @@ describe('App', () => {
   const boot = async (): Promise<void> => {
     render(<App />)
     await screen.findByText('Projects')
+  }
+
+  /** Which project a session lives in, for the stateful mock backend. */
+  const activeProjectOf = (conversationId: string): string =>
+    Object.keys(sessions).find((projectId) => sessions[projectId]!.some((item) => item.id === conversationId)) ?? 'project_1'
+
+  /** Ends the in-flight turn the way the real runtime does, so the composer
+   *  goes back to offering Send rather than Stop. */
+  const finishRun = async (conversationId: string): Promise<void> => {
+    await act(async () => {
+      runListener?.({
+        type: 'run.completed',
+        projectId: activeProjectOf(conversationId),
+        conversationId,
+        runId: 'run_1',
+        providerId: 'antigravity',
+        createdAt: 'now',
+        finalText: 'Done.',
+        nativeConversationId: null
+      })
+    })
   }
 
   it('groups sessions under the project they belong to', async () => {
@@ -163,6 +236,17 @@ describe('App', () => {
 
     expect(screen.getByRole('menuitem', { name: 'New project' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'New session' })).toBeInTheDocument()
+  })
+
+  it('still opens the project dialog for New project, because a project needs configuring', async () => {
+    await boot()
+    await userEvent.click(screen.getByLabelText('New project or session'))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'New project' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'New project' })
+    expect(within(dialog).getByLabelText('Project name')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Working folder')).toBeInTheDocument()
+    expect(api.projects.create).not.toHaveBeenCalled()
   })
 
   it('creates a project with a name and a folder chosen in the native picker', async () => {
@@ -221,49 +305,78 @@ describe('App', () => {
     expect(api.projects.create).toHaveBeenCalledWith({ name: 'Scratch', rootPath: null })
   })
 
-  it('preselects the project whose row started the session', async () => {
+  it('creates a session the moment a project\u2019s + is clicked, with no dialog at all', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in Renderer Check'))
 
-    expect(screen.getByLabelText('Project')).toHaveValue('project_2')
-    // With no project folder, the session says where it will really run.
-    expect(screen.getByLabelText('Working folder')).toHaveAttribute('placeholder', 'Renderer Check · Orbit-managed workspace')
+    // Exactly one session, in the project whose control was used, asking
+    // for nothing: no name and no folder, so it inherits the project's.
+    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
+    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_2' })
+
+    // Nothing to fill in, and nothing to dismiss.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Session name')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Project')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Working folder')).not.toBeInTheDocument()
+    expect(api.dialog.pickFolder).not.toHaveBeenCalled()
   })
 
-  it('defaults a session to its project folder and allows an override', async () => {
+  it('shows the new session as New Session, active, with the composer focused', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
-    // Empty means "inherit", and the placeholder names the folder that will
-    // really be used rather than leaving the field blank and unexplained.
-    expect(screen.getByLabelText('Working folder')).toHaveAttribute('placeholder', '/home/dev/agentdock')
 
-    await userEvent.click(screen.getByRole('button', { name: 'Choose…' }))
-    await waitFor(() => expect(screen.getByLabelText('Working folder')).toHaveValue('/home/dev/chosen'))
+    // It is in the sidebar under its project, under the default name.
+    const row = await screen.findByRole('button', { name: /^New Session/ })
+    expect(row).toBeInTheDocument()
+    // ...and it is the session the workspace is on.
+    await waitFor(() => expect(row).toHaveAttribute('aria-current', 'true'))
+    const header = document.querySelector('.chrome') as HTMLElement
+    expect(within(header).getByText('New Session')).toBeInTheDocument()
 
-    await userEvent.type(screen.getByLabelText('Session name'), 'Website copy draft')
-    await userEvent.click(screen.getByRole('button', { name: 'Create session' }))
-
-    expect(api.conversations.create).toHaveBeenCalledWith({
-      projectId: 'project_1',
-      title: 'Website copy draft',
-      workingDirectory: '/home/dev/chosen'
-    })
+    // The user can just start typing.
+    await waitFor(() => expect(screen.getByLabelText('Message Antigravity')).toHaveFocus())
   })
 
-  it('drops a folder override when the session moves to a different project', async () => {
+  it('creates the session in the project whose + was used, not the open one', async () => {
+    await boot()
+    // AgentDock Website is the open project; the + belongs to the other one.
+    await userEvent.click(screen.getByLabelText('New session in Renderer Check'))
+
+    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_2' })
+    await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
+  })
+
+  it('creates a session instantly from the menu too, in the project already open', async () => {
+    await boot()
+    await userEvent.click(screen.getByLabelText('New project or session'))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'New session' }))
+
+    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_1' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('creates another session on the next click, just as immediately', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
-    await userEvent.click(screen.getByRole('button', { name: 'Choose…' }))
-    await waitFor(() => expect(screen.getByLabelText('Working folder')).toHaveValue('/home/dev/chosen'))
+    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
 
-    await userEvent.selectOptions(screen.getByLabelText('Project'), 'project_2')
-    expect(screen.getByLabelText('Working folder')).toHaveValue('')
+    await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
 
-    await userEvent.click(screen.getByRole('button', { name: 'Create session' }))
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_2', workingDirectory: null })
+    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(2))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(sessions.project_1).toHaveLength(4)
   })
 
-  it('closes a creation dialog on Escape without creating anything', async () => {
+  it('reports a failed session create without leaving a half-made session behind', async () => {
+    vi.mocked(api.conversations.create).mockRejectedValueOnce(new Error('Project not found.'))
+    await boot()
+    await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
+
+    expect(await screen.findByText('Project not found.')).toBeInTheDocument()
+  })
+
+  it('closes the project dialog on Escape without creating anything', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New project or session'))
     await userEvent.click(screen.getByRole('menuitem', { name: 'New project' }))
@@ -355,6 +468,59 @@ describe('App', () => {
     await boot()
     await screen.findByLabelText('Message Antigravity')
     expect(screen.queryByRole('heading', { name: 'What should we work on?' })).not.toBeInTheDocument()
+  })
+
+  it('renames a new session in the sidebar once its first real prompt is sent', async () => {
+    await boot()
+    await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
+    await screen.findByRole('button', { name: /^New Session/ })
+
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'build me a futuristic robotics landing page')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    expect(await screen.findByRole('button', { name: /^Futuristic Robotics Landing Page/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^New Session/ })).not.toBeInTheDocument()
+  })
+
+  it('does not keep renaming the session as the conversation goes on', async () => {
+    await boot()
+    await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
+    await screen.findByRole('button', { name: /^New Session/ })
+
+    const composer = screen.getByLabelText('Message Antigravity')
+    await userEvent.type(composer, 'build me a futuristic robotics landing page')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByRole('button', { name: /^Futuristic Robotics Landing Page/ })
+
+    await finishRun('conversation_new_1')
+    await userEvent.type(composer, 'now make the hero section darker')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(api.messages.send).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByRole('button', { name: /^Futuristic Robotics Landing Page/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Hero Section Darker/ })).not.toBeInTheDocument()
+  })
+
+  it('leaves a session the user renamed alone when the first prompt is sent', async () => {
+    await boot()
+    await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
+    const row = await screen.findByRole('button', { name: /^New Session/ })
+
+    // Rename it by hand first, the way the sidebar does.
+    await userEvent.dblClick(row)
+    const input = await screen.findByLabelText('Session name')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'Ship checklist{Enter}')
+    await waitFor(() =>
+      expect(api.conversations.rename).toHaveBeenCalledWith({ conversationId: 'conversation_new_1', title: 'Ship checklist' })
+    )
+
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'build me a futuristic robotics landing page')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(api.messages.send).toHaveBeenCalled())
+
+    expect(await screen.findByRole('button', { name: /^Ship checklist/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Futuristic Robotics Landing Page/ })).not.toBeInTheDocument()
   })
 
   it('persists a model choice, carrying the remembered reasoning level onto it', async () => {
