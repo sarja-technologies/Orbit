@@ -42,6 +42,27 @@ const doneDelta = (text: string) => ({
     usage: { input_tokens: 6524, output_tokens: 606, total_tokens: 7130 }
   }
 })
+// Real captured `tool` steps (agy 1.1.28, verbatim parameter names — see
+// docs/antigravity-transports.md and src/main/runtime/activityMapping.ts).
+const toolStep = (
+  index: number,
+  state: 'ACTIVE' | 'DONE' | 'ERROR',
+  tool: string,
+  parameters: Record<string, unknown>,
+  extra: Record<string, unknown> = {}
+) => ({
+  event: 'step_update',
+  step_update: {
+    conversation_id: CONVERSATION_ID,
+    step_index: index,
+    state,
+    step_type: 'tool',
+    tool_name: tool,
+    tool_info: { name: tool, parameters, ...(extra.error ? { error: extra.error } : {}) },
+    ...(extra.duration_seconds === undefined ? {} : { duration_seconds: extra.duration_seconds })
+  }
+})
+
 const success = (response: string) => ({
   event: 'result',
   result: {
@@ -110,6 +131,9 @@ async function replay(lines: unknown[]): Promise<RuntimeEvent[]> {
   })
   return events
 }
+
+const activitiesOf = (events: RuntimeEvent[]): Array<Extract<RuntimeEvent, { type: 'tool.activity' }>> =>
+  events.filter((event): event is Extract<RuntimeEvent, { type: 'tool.activity' }> => event.type === 'tool.activity')
 
 const deltasOf = (events: RuntimeEvent[]): string[] =>
   events.filter((event): event is Extract<RuntimeEvent, { type: 'text.delta' }> => event.type === 'text.delta').map((event) => event.delta)
@@ -200,6 +224,64 @@ describe('structured transport streaming (real captured agy event shapes)', () =
     expect(events.find((event) => event.type === 'run.failed')).toMatchObject({ error: { code: 'provider.failed', message: 'model overloaded' } })
   })
 
+  it('names the real command a tool step runs, preserving it exactly', async () => {
+    const events = await replay([
+      INIT,
+      USER_INPUT_STEP,
+      toolStep(2, 'ACTIVE', 'run_command', { CommandLine: 'npm run build -- --watch' }),
+      toolStep(2, 'DONE', 'run_command', { CommandLine: 'npm run build -- --watch' }, { duration_seconds: 12.5 }),
+      success('Built.')
+    ])
+
+    const [started, finished] = activitiesOf(events)
+    expect(started).toMatchObject({ label: 'run_command', kind: 'running', command: 'npm run build -- --watch', status: 'running' })
+    // The command is never replaced by a description of itself.
+    expect(started!.command).toBe('npm run build -- --watch')
+    expect(finished).toMatchObject({ status: 'completed', durationSeconds: 12.5 })
+    // Both events describe the same step, so the UI updates in place.
+    expect(finished!.providerStepId).toBe(started!.providerStepId)
+  })
+
+  it('names the real file or query behind every other kind of step', async () => {
+    const events = await replay([
+      INIT,
+      USER_INPUT_STEP,
+      toolStep(2, 'ACTIVE', 'view_file', { AbsolutePath: '/ws/README.md' }),
+      toolStep(3, 'ACTIVE', 'list_dir', { DirectoryPath: '/ws/src' }),
+      toolStep(4, 'ACTIVE', 'grep_search', { Query: 'hello', SearchPath: '/ws' }),
+      toolStep(5, 'ACTIVE', 'write_to_file', { TargetFile: '/ws/notes.md' }),
+      success('Done.')
+    ])
+
+    expect(activitiesOf(events).map((event) => ({ kind: event.kind, target: event.target }))).toEqual([
+      { kind: 'reading', target: '/ws/README.md' },
+      { kind: 'listing', target: '/ws/src' },
+      // A search reports what was searched for, not the directory.
+      { kind: 'searching', target: 'hello' },
+      { kind: 'editing', target: '/ws/notes.md' }
+    ])
+  })
+
+  it('reports a tool error as a failed step rather than a silent one', async () => {
+    const events = await replay([
+      INIT,
+      USER_INPUT_STEP,
+      toolStep(2, 'ACTIVE', 'run_command', { CommandLine: 'ls -a' }),
+      toolStep(2, 'ERROR', 'run_command', { CommandLine: 'ls -a' }, { error: { type: 'TOOL_ERROR', message: 'command not found' } }),
+      success('')
+    ])
+    expect(activitiesOf(events).at(-1)).toMatchObject({ status: 'failed', command: 'ls -a' })
+  })
+
+  it('says only what it knows about a tool it cannot classify', async () => {
+    const events = await replay([INIT, USER_INPUT_STEP, toolStep(2, 'ACTIVE', 'manage_inbox', {}), success('Done.')])
+    const [activity] = activitiesOf(events)
+    expect(activity).toMatchObject({ label: 'manage_inbox', kind: 'tool', status: 'running' })
+    // Nothing is invented to fill the gap.
+    expect(activity!.command).toBeUndefined()
+    expect(activity!.target).toBeUndefined()
+  })
+
   it('reports a cancelled run as run.cancelled, keeping whatever had streamed', async () => {
     // A long replay that never reaches its result, so the run is still open
     // when cancelRun kills it.
@@ -218,6 +300,40 @@ describe('structured transport streaming (real captured agy event shapes)', () =
     await settled
     expect(deltasOf(events)).toEqual(['Partial answer'])
     expect(events.at(-1)).toMatchObject({ type: 'run.cancelled' })
+    await provider.shutdown()
+  })
+
+  it('never reports a stopped run as a transport failure, however agy dies', async () => {
+    // The real race: agy writes a non-SUCCESS `result` as it is being
+    // stopped. That used to arrive as `provider.failed` — "Antigravity's
+    // response couldn't be read" — for something the user did on purpose.
+    process.env.ORBIT_AGY_PATH = fakeAgy([INIT, USER_INPUT_STEP, activeDelta('Partial answer')])
+    const file = process.env.ORBIT_AGY_PATH
+    // The fixture answers the stop by reporting an error, then exits non-zero.
+    fs.appendFileSync(
+      file,
+      `process.on('SIGTERM', () => { process.stdout.write(${JSON.stringify(
+        `${JSON.stringify({ event: 'result', result: { conversation_id: CONVERSATION_ID, status: 'ERROR', error: 'interrupted by signal' } })}\n`
+      )}); process.exit(1) })
+setTimeout(() => {}, 60_000)
+`
+    )
+    const provider = new AntigravityProvider(undefined, async () => [])
+    const events: RuntimeEvent[] = []
+    await new Promise<void>((resolve) => {
+      void provider.sendMessage(input(), (event) => {
+        events.push(event)
+        if (event.type === 'text.delta') void provider.cancelRun('run_1')
+        if (event.type === 'run.cancelled' || event.type === 'run.completed' || event.type === 'run.failed') resolve()
+      })
+    })
+    // Give the dying process every chance to land a late failure.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    expect(events.filter((event) => event.type === 'run.failed'), JSON.stringify(events)).toHaveLength(0)
+    expect(events.filter((event) => event.type === 'run.cancelled')).toHaveLength(1)
+    // Everything Antigravity had already said still reached the runtime.
+    expect(deltasOf(events)).toEqual(['Partial answer'])
     await provider.shutdown()
   })
 })

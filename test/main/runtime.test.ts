@@ -90,6 +90,36 @@ class HeadlessDenialProvider extends FakeProvider {
   }
 }
 
+/** Streams some text, then hands the test control of how the run ends.
+ *  Models the real Stop sequence: partial output already delivered, the
+ *  user stops, and the transport then reports whatever it reports. */
+class ControllableProvider implements AgentProvider {
+  emit: ((event: Partial<RuntimeEvent> & { type: RuntimeEvent['type'] }) => void) | null = null
+  listModels = vi.fn(async () => [])
+  respondToInteraction = vi.fn(async () => undefined)
+  releaseConversation = vi.fn(async () => undefined)
+  shutdown = vi.fn(async () => undefined)
+  cancelRun = vi.fn(async () => undefined)
+
+  async getStatus(): Promise<ProviderStatus> {
+    return { id: 'antigravity', state: 'ready', sdkAvailable: true, authConfigured: true, message: null, details: {} }
+  }
+
+  async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    const base = {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+    this.emit = (event) => onEvent({ ...base, ...event } as RuntimeEvent)
+    this.emit({ type: 'run.started', nativeConversationId: 'native-1' })
+    this.emit({ type: 'text.delta', delta: 'The bicycle stands as ' })
+    this.emit({ type: 'text.delta', delta: 'one of the most efficient' })
+  }
+}
+
 /** Mirrors the PTY session's deferred cancellation: the run is stopped while
  *  it is waiting on a model-change retirement, so there is no live process to
  *  interrupt and `run.cancelled` is emitted synchronously from cancelRun,
@@ -387,6 +417,94 @@ describe('OrbitRuntime', () => {
     runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new FakeProvider(), dir, '0.1.0')
     const next = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'A later message' })
     await vi.waitFor(() => expect(store.requireRun(next.id).state).toBe('completed'))
+  })
+
+  describe('a stop is its own terminal state', () => {
+    const start = async (): Promise<{ provider: ControllableProvider; projectId: string; runId: string }> => {
+      const controllable = new ControllableProvider()
+      runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), controllable, dir, '0.1.0')
+      const project = runtime.createProject('Stop')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Tell me about bicycles' })
+      await vi.waitFor(() => expect(controllable.emit).not.toBeNull())
+      return { provider: controllable, projectId: project.id, runId: run.id }
+    }
+
+    const assistantFor = (projectId: string, runId: string) =>
+      store.listMessages(projectId).filter((message) => message.runId === runId && message.role === 'assistant')
+
+    it('keeps the text Antigravity had already produced', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+
+      const messages = assistantFor(projectId, runId)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+      // The partial answer survives the stop verbatim — nothing invented,
+      // nothing discarded.
+      expect(messages[0]!.content).toBe('The bicycle stands as one of the most efficient')
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+    })
+
+    it('never turns into a transport failure when the stopped process then dies', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+      // The exact race: agy's death is reported a beat after the stop was
+      // acknowledged. It must not overwrite the interruption.
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'Antigravity exited (143).', retryable: false } })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+      const messages = assistantFor(projectId, runId)
+      expect(messages, 'a late failure must not append a second assistant message').toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+    })
+
+    it('is not overwritten by a completion that arrives after it either', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer.', nativeConversationId: 'native-1' })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(assistantFor(projectId, runId)).toHaveLength(1)
+    })
+
+    it('leaves a genuine failure a genuine failure, with its real diagnostics', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      // No stop at all this time.
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'Antigravity exited (1). ENOENT', retryable: false } })
+
+      const run = store.requireRun(runId)
+      expect(run.state).toBe('failed')
+      expect(run.error?.code).toBe('provider.exited')
+      expect(run.error?.message).toContain('ENOENT')
+      expect(assistantFor(projectId, runId)[0]!.status).toBe('failed')
+    })
+
+    it('leaves an ordinary completion distinct from an interruption', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer.', nativeConversationId: 'native-1' })
+
+      expect(store.requireRun(runId).state).toBe('completed')
+      const messages = assistantFor(projectId, runId)
+      expect(messages[0]!.status).toBe('completed')
+      expect(messages[0]!.content).toBe('A whole answer.')
+    })
+
+    it('frees the conversation so the next message can be sent immediately', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      const conversationId = store.requireRun(runId).conversationId
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+
+      expect(store.requireConversation(conversationId).status).toBe('idle')
+      const next = await runtime.sendMessage({ projectId, conversationId, content: 'Carry on then' })
+      expect(next.state).toBe('running')
+    })
   })
 
   it('persists intelligible provider failures as failed assistant messages', async () => {

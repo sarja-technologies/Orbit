@@ -87,31 +87,48 @@ export function TypingDots(): JSX.Element {
   )
 }
 
-/** The badge that rides in the identity line while text is arriving, so a
- *  reply that has already started still reads as unfinished. */
-export function ReplyingBadge(): JSX.Element {
+/** The badge that rides in the identity line while a turn is live. The
+ *  word is the caller's, because what is true depends on what Antigravity
+ *  is actually doing — "Replying" only once text is genuinely arriving. */
+export function LiveBadge({ label }: { label: string }): JSX.Element {
   return (
     <span className="chat-live">
       <span className="chat-live-pip" aria-hidden="true" />
-      Replying
+      {label}
     </span>
   )
 }
 
+/** Text is genuinely arriving. */
+export function ReplyingBadge(): JSX.Element {
+  return <LiveBadge label="Replying" />
+}
+
 /** Stands in for the assistant bubble between "sent" and the first token.
  *  Its own component, and its own row, so streaming updates never touch
- *  the settled transcript above it. */
-export function PendingReply({ label = 'Antigravity is replying' }: { label?: string }): JSX.Element {
+ *  the settled transcript above it.
+ *
+ *  The label is whatever Antigravity is really doing — see
+ *  lib/activityCopy.ts. It is deliberately not a fixed "Antigravity is
+ *  replying": that was shown for the whole of every turn, including the
+ *  long stretches where Antigravity was running commands and reading
+ *  files, and told the reader nothing. */
+export function PendingReply({ label, command = null }: { label: string; command?: string | null }): JSX.Element {
   return (
     <div className="chat-row chat-row-assistant" aria-live="polite">
       <AssistantMark />
       <div className="chat-meta">
         <span className="chat-name">Antigravity</span>
-        <ReplyingBadge />
+        <LiveBadge label="Working" />
       </div>
       <div className="chat-bubble chat-bubble-assistant chat-bubble-pending">
         <TypingDots />
         <span className="chat-pending-label">{label}</span>
+        {command ? (
+          <code className="activity-command" title={command}>
+            {command}
+          </code>
+        ) : null}
       </div>
     </div>
   )

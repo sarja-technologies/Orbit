@@ -1494,6 +1494,19 @@ textarea {
   color: var(--text-muted);
 }
 
+/* The literal command Antigravity reported. Shown as a command rather than
+   as prose, and allowed to end in an ellipsis rather than wrap the line —
+   the full text is always the element's title. */
+.activity-command {
+  font-family: var(--font-mono);
+  font-size: inherit;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .activity-toggle {
   display: flex;
   align-items: center;

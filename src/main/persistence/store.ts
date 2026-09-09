@@ -89,7 +89,14 @@ export class OrbitStore {
   }
 
   listProjects(): Project[] {
-    return this.db.query('SELECT * FROM projects ORDER BY updated_at DESC', [], mapProject)
+    // CRITICAL: `rowid` is the tiebreaker, not decoration. These timestamps
+    // are whole milliseconds, and two rows written in the same millisecond
+    // tie — SQLite then returns them in insertion order, which is the exact
+    // opposite of "newest first". That used to be masked by writes being
+    // slow enough (a full database rewrite each) to never share a
+    // millisecond; the ordering must hold on its own, not because the layer
+    // underneath is slow.
+    return this.db.query('SELECT * FROM projects ORDER BY updated_at DESC, rowid DESC', [], mapProject)
   }
 
   getProject(projectId: ID): Project | null {
@@ -244,7 +251,7 @@ export class OrbitStore {
   }
 
   listConversations(projectId: ID): Conversation[] {
-    return this.db.query('SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC', [projectId], mapConversation)
+    return this.db.query('SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC', [projectId], mapConversation)
   }
 
   getConversation(conversationId: ID): Conversation | null {
@@ -363,10 +370,36 @@ export class OrbitStore {
   }
 
   listRuns(projectId: ID): Run[] {
-    return this.db.query('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at ASC', [projectId], mapRun)
+    return this.db.query('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at ASC, rowid ASC', [projectId], mapRun)
+  }
+
+  /** Appends a run event to the durable history.
+   *
+   *  `text.delta` is deliberately excluded. It is by far the
+   *  highest-frequency event Orbit produces — a single long Antigravity
+   *  answer emits hundreds — and storing it bought nothing: the run's text
+   *  is reconstructible from the assistant message the turn ends with,
+   *  which is what every reader actually uses.
+   *
+   *  What it cost was the streaming itself. Every row here is a sequence
+   *  query plus an INSERT plus a rewrite of the database file, all
+   *  synchronous and all on Electron's main thread — the thread that also
+   *  has to read agy's stdout and forward events to the renderer. Measured
+   *  against an ordinary 6.8 MB database: ~4 ms per delta, ~970 ms of
+   *  blocked event loop over one 230-delta turn, growing with the user's
+   *  history. That is what turned a genuinely incremental answer into
+   *  "Replying..." followed by a block of text. Every other event type is
+   *  low-frequency and still recorded. */
+  /** Writes everything buffered by the database's write coalescing to disk
+   *  now. Called at turn boundaries — the points a user would notice losing
+   *  — so coalescing costs throughput during a turn without costing
+   *  durability of the turn itself. */
+  flush(): void {
+    this.db.flush()
   }
 
   addRunEvent(event: RuntimeEvent): void {
+    if (event.type === 'text.delta') return
     const sequence = this.nextSequence('run_events', 'run_id', event.runId)
     this.db.run('INSERT INTO run_events (id, run_id, event_type, payload_json, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?)', [
       createId('event'),
@@ -465,7 +498,7 @@ export class OrbitStore {
   }
 
   listArtifacts(projectId: ID): Artifact[] {
-    return this.db.query('SELECT * FROM artifacts WHERE project_id = ? ORDER BY updated_at DESC', [projectId], mapArtifact)
+    return this.db.query('SELECT * FROM artifacts WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC', [projectId], mapArtifact)
   }
 
   getArtifact(artifactId: ID): Artifact | null {
@@ -477,7 +510,7 @@ export class OrbitStore {
       `SELECT av.* FROM artifact_versions av
        JOIN artifacts a ON a.id = av.artifact_id
        WHERE a.project_id = ?
-       ORDER BY av.created_at ASC`,
+       ORDER BY av.created_at ASC, av.rowid ASC`,
       [projectId],
       mapArtifactVersion
     )
@@ -513,7 +546,7 @@ export class OrbitStore {
   }
 
   listProjectFiles(projectId: ID): ProjectFile[] {
-    return this.db.query('SELECT * FROM project_files WHERE project_id = ? ORDER BY created_at DESC', [projectId], mapProjectFile)
+    return this.db.query('SELECT * FROM project_files WHERE project_id = ? ORDER BY created_at DESC, rowid DESC', [projectId], mapProjectFile)
   }
 
   getProjectFile(fileId: ID): ProjectFile | null {
@@ -545,7 +578,7 @@ export class OrbitStore {
   }
 
   listReferences(projectId: ID): Reference[] {
-    return this.db.query('SELECT * FROM references_table WHERE project_id = ? ORDER BY created_at ASC', [projectId], mapReference)
+    return this.db.query('SELECT * FROM references_table WHERE project_id = ? ORDER BY created_at ASC, rowid ASC', [projectId], mapReference)
   }
 
   openProjectSnapshot(projectId: ID): ProjectSnapshot {

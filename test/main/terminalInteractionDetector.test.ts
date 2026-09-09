@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   detectGenericInteraction,
@@ -5,7 +6,8 @@ import {
   progressiveAppendIndex,
   isBusy,
   isReadyForInput,
-  readMediaAttachedCount
+  readMediaAttachedCount,
+  readScreenActivity
 } from '../../src/main/terminal/TerminalInteractionDetector'
 
 // Real captured agy workspace-trust prompt (see this repo's
@@ -355,5 +357,73 @@ describe('readMediaAttachedCount', () => {
 
   it('returns 0 when nothing matches', () => {
     expect(readMediaAttachedCount(['no attachments here'])).toBe(0)
+  })
+})
+
+// Real captured PTY rows. These were already being parsed out of the
+// response body as chrome; this is the same parse, kept instead of thrown
+// away, and it is the interactive transport's only account of its work.
+describe('readScreenActivity', () => {
+  it('reads the exact command from a real captured tool row', () => {
+    expect(readScreenActivity(['● Bash(npm run build) (ctrl+o to expand)'])).toEqual([
+      { key: 'screen:tool:Bash:npm run build', kind: 'running', label: 'Bash', command: 'npm run build' }
+    ])
+  })
+
+  it('keeps a command that contains its own parentheses and flags intact', () => {
+    const [activity] = readScreenActivity(['● Bash(node -e "console.log(1)" --flag) (ctrl+o to expand)'])
+    expect(activity?.command).toBe('node -e "console.log(1)" --flag')
+  })
+
+  it('reads a file-shaped tool row as its real target', () => {
+    const [activity] = readScreenActivity(['● ReadFile(src/renderer/app/App.tsx)'])
+    expect(activity).toMatchObject({ kind: 'reading', label: 'ReadFile', target: 'src/renderer/app/App.tsx' })
+  })
+
+  it('reads the thinking agy reports, with the duration agy measured', () => {
+    expect(readScreenActivity(['▸ Thought for 11s'])).toEqual([
+      { key: 'screen:thinking', kind: 'thinking', label: 'Thought', durationSeconds: 11 }
+    ])
+  })
+
+  it("reads agy's own work title, without the animated ellipsis or spinner glyph", () => {
+    expect(readScreenActivity(['⣽  Verifying Requirements Thoroughly...'])).toEqual([
+      { key: 'screen:status:verifying requirements thoroughly', kind: 'working', label: 'Verifying Requirements Thoroughly' }
+    ])
+    // A different spinner frame of the same status is the same activity.
+    expect(readScreenActivity(['⢿  Verifying Requirements Thoroughly...'])[0]?.key).toBe(
+      readScreenActivity(['⣽  Verifying Requirements Thoroughly...'])[0]?.key
+    )
+  })
+
+  it('never reads the clipboard-paste receipt as work', () => {
+    expect(readScreenActivity(['▸ 📎 1 media attached (clipboard, 141 B, image/png)'])).toEqual([])
+  })
+
+  it('never reads a footer or ordinary prose as work', () => {
+    expect(readScreenActivity(['? for shortcuts   Gemini 3.6 Flash · medium', 'esc to cancel', 'The bicycle stands as one of the most efficient machines.', '> a prompt', ''])).toEqual([])
+  })
+
+  it('reports each distinct piece of work once, in the order it appears', () => {
+    const activities = readScreenActivity([
+      '▸ Thought for 8s',
+      '● Bash(npm test) (ctrl+o to expand)',
+      '● Bash(npm test) (ctrl+o to expand)',
+      '⣽  Working...'
+    ])
+    expect(activities.map((activity) => activity.label)).toEqual(['Thought', 'Bash', 'Working'])
+  })
+
+  it('reads the activity off the real captured frames', () => {
+    const capture = JSON.parse(readFileSync(new URL('./fixtures/agyPtyStreamFrames.json', import.meta.url), 'utf8')) as {
+      frames: Array<{ lines: string[] }>
+    }
+    const first = readScreenActivity(capture.frames[0]!.lines)
+    expect(first).toContainEqual({ key: 'screen:thinking', kind: 'thinking', label: 'Thought', durationSeconds: 11 })
+    expect(first).toContainEqual({
+      key: 'screen:status:verifying requirements thoroughly',
+      kind: 'working',
+      label: 'Verifying Requirements Thoroughly'
+    })
   })
 })

@@ -24,7 +24,12 @@ interface MessageBlockProps {
  *  rather than being the only thing that provides it. */
 function MessageBlockView({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
-  if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
+  // A stop the reader asked for is not a failure and not a blank. Whatever
+  // Antigravity had already said is kept and shown as the reply it is; the
+  // note underneath explains why it stops there. Deliberately not an
+  // ErrorNote — nothing went wrong — and deliberately not a fabricated
+  // assistant message announcing its own interruption.
+  if (message.status === 'cancelled') return <InterruptedBlock message={message} showRole={showRole} />
   // A turn can finish with nothing to show — Antigravity did the work in
   // tools and said nothing, or its final text could not be read off the
   // live session. Either way, say so rather than leaving a blank gap the
@@ -44,6 +49,26 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error }:
 }
 
 export const MessageBlock = memo(MessageBlockView)
+
+/** The copy for a deliberate stop. Restrained, and about what the reader
+ *  did rather than about a problem. */
+export const INTERRUPTED_NOTE = 'You stopped this response'
+
+function InterruptedBlock({ message, showRole }: { message: Message; showRole: boolean }): JSX.Element {
+  const partial = message.content.trim()
+  return (
+    <>
+      {partial ? (
+        <ChatRow role="assistant" showIdentity={showRole} timestamp={message.createdAt}>
+          <Markdown source={message.content} />
+        </ChatRow>
+      ) : null}
+      <div className="transcript-note" role="status">
+        {INTERRUPTED_NOTE}
+      </div>
+    </>
+  )
+}
 
 function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile[]; thumbnails: Record<string, string> }): JSX.Element {
   return (

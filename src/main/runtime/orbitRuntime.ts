@@ -146,6 +146,11 @@ export class OrbitRuntime extends EventEmitter {
       }
     })
     this.activeRuns.set(run.id, { text: '' })
+    // The user's message and its run are on disk before the turn starts.
+    // Writes are coalesced (see OrbitDatabase), which is what keeps a
+    // streaming turn off the main thread — but a turn boundary is exactly
+    // where that trade should not apply.
+    this.store.flush()
 
     const workspacePath = this.resolveWorkspacePath(project, conversation)
     const saveDir = path.join(this.dataDir, 'projects', project.id, 'agy-save')
@@ -313,6 +318,19 @@ export class OrbitRuntime extends EventEmitter {
     const run = safeRequireRun(this.store, event.runId)
     if (!run || run.projectId !== event.projectId || run.conversationId !== event.conversationId) return
 
+    // CRITICAL (the Stop race): a run that has already settled must not
+    // settle again. A stopped agy reports its own death on the way out —
+    // a non-zero exit, a closed stream, a transport error — and each of
+    // those arrives as `run.failed` a beat after `run.cancelled`. Without
+    // this the second event overwrote the deliberate interruption with a
+    // crash: a second assistant message, the run's state flipped to
+    // 'failed', and "Antigravity's response couldn't be read" shown for
+    // something the user did on purpose. The providers make cancellation
+    // win at their own level too; this is the backstop that holds for any
+    // provider, and it is deliberately about *terminality*, not about
+    // cancellation specifically — a completed run cannot be failed either.
+    if (isTerminalEvent(event) && isTerminalState(run.state)) return
+
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
     if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
@@ -385,21 +403,41 @@ export class OrbitRuntime extends EventEmitter {
       this.store.updateRunState(event.runId, 'failed', event.error)
       this.activeRuns.delete(event.runId)
     }
+    // A stop the user asked for is its own terminal state, not a failure.
+    // Whatever Antigravity had already said is kept: the message is the
+    // real partial answer, marked `cancelled`, so the transcript shows what
+    // was actually produced and the UI can label it as interrupted from the
+    // status alone. Nothing is invented to stand in for it — a turn stopped
+    // before it said anything stores an empty message, and the renderer
+    // presents that as the interruption it is.
     if (event.type === 'run.cancelled') {
       this.store.createMessage({
         projectId: event.projectId,
         conversationId: event.conversationId,
         runId: event.runId,
         role: 'assistant',
-        content: 'Request cancelled.',
+        content: active?.text ?? '',
         status: 'cancelled'
       })
       this.store.updateRunState(event.runId, 'cancelled')
       this.activeRuns.delete(event.runId)
     }
     this.store.addRunEvent(event)
+    // A settled turn is worth having on disk immediately; everything during
+    // one is worth coalescing. One flush per turn, not one per delta.
+    if (isTerminalEvent(event)) this.store.flush()
     this.emit('event', event)
   }
+}
+
+/** Events that end a run. Anything else (a late prompt, an artifact, a
+ *  notice) is still meaningful after one has ended. */
+function isTerminalEvent(event: RuntimeEvent): boolean {
+  return event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
+}
+
+function isTerminalState(state: Run['state']): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled'
 }
 
 function isDirectory(candidate: string): boolean {

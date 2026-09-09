@@ -18,7 +18,7 @@ import type { ID, ProjectFile } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
-import { extractResponseText, progressiveAppendIndex, promptHasBeenSubmitted } from '@main/terminal/TerminalInteractionDetector'
+import { extractResponseText, progressiveAppendIndex, promptHasBeenSubmitted, readScreenActivity, type ScreenActivity } from '@main/terminal/TerminalInteractionDetector'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
@@ -162,6 +162,17 @@ export class AntigravityPtySession {
   /** Consecutive sampled frames that did not line up with `streamedText`.
    *  See STREAM_RESYNC_AFTER_FRAMES. */
   private divergedFrames = 0
+  /** Activity already reported to the runtime for the turn in flight, keyed
+   *  by the screen key that produced it. agy redraws its whole screen many
+   *  times a second, so the same work is seen over and over; only a genuine
+   *  change is emitted. The insertion order is the order the work appeared
+   *  in, which is what lets a step that has left the screen be reported as
+   *  finished. */
+  private readonly reportedActivity = new Map<string, { status: 'running' | 'completed'; signature: string }>()
+  /** The last full description seen for each reported key, so a step that
+   *  has scrolled off screen can still be completed with its own details
+   *  rather than a placeholder. */
+  private readonly lastActivity = new Map<string, ScreenActivity>()
   /** Latched once this turn's own prompt has been seen echoed on screen.
    *  Until then, a ready footer belongs to the screen as it was *before*
    *  the prompt was submitted — see `turnHasStartedOnScreen`. */
@@ -489,7 +500,21 @@ export class AntigravityPtySession {
       this.cancelDeferredRun()
       return
     }
-    if (this.state === 'idle' || !this.transport?.isRunning) return
+    // Only a turn genuinely in flight can be stopped. A session sitting at
+    // 'ready' between turns has nothing to interrupt, and writing Escape
+    // into it would both disturb an idle process and latch a cancellation
+    // that belongs to no run.
+    if (!this.isBusy) return
+    if (!this.transport?.isRunning) {
+      // CRITICAL: the process this run was using is already gone, but its
+      // exit has not been handled yet. Returning silently here left the
+      // Stop unanswered and let `handleExit` report the very exit the user
+      // caused as `provider.exited` — "Antigravity's interactive session
+      // exited unexpectedly". Latching the request instead makes that exit
+      // read as the cancellation it is.
+      this.cancelRequested = true
+      return
+    }
     this.cancelRequested = true
     if (this.pending) {
       const resolvedId = this.pending.interactionId
@@ -658,6 +683,8 @@ export class AntigravityPtySession {
     this.deliveredPrompt = prompt
     this.streamedText = ''
     this.divergedFrames = 0
+    this.reportedActivity.clear()
+    this.lastActivity.clear()
     this.sawPromptEcho = false
     this.sawBusy = false
     this.refusedReady = false
@@ -744,6 +771,67 @@ export class AntigravityPtySession {
   private observeScreen(lines: string[]): void {
     this.lastScreenLines = lines
     this.latchPromptEcho(lines)
+    // The idle snapshot is the only screen a turn that never streams ever
+    // produces, so activity is read from it too. Guarded exactly as the
+    // progressive text reader is: never during bootstrap (whose screen is
+    // agy's startup banner), never mid image-paste, never after a stop.
+    if (this.state === 'running' && !this.deliveringImages && !this.cancelRequested && this.deliveredPrompt !== null) {
+      this.reportScreenActivity(lines)
+    }
+  }
+
+  /** Reports what agy's own screen says it is doing, as ordinary Orbit
+   *  `tool.activity` events.
+   *
+   *  The interactive transport has no structured step channel — the screen
+   *  is the only account of the work there is, and `extractResponseText`
+   *  was already parsing these rows out of the response body as chrome and
+   *  discarding them. This reads the same rows instead of throwing them
+   *  away, so an interactive turn can say "Running npm run build" rather
+   *  than only "Antigravity is replying".
+   *
+   *  agy redraws continuously, so only genuine changes are emitted: a step
+   *  seen for the first time starts, a step whose details changed updates,
+   *  and a step that has left the screen (agy collapses finished work) is
+   *  reported completed exactly once. */
+  private reportScreenActivity(lines: string[]): void {
+    const activities = readScreenActivity(lines)
+    const present = new Set(activities.map((activity) => activity.key))
+
+    for (const [key, reported] of this.reportedActivity) {
+      if (present.has(key) || reported.status === 'completed') continue
+      this.reportedActivity.set(key, { ...reported, status: 'completed' })
+      this.emitScreenActivity(this.lastActivityFor(key), 'completed')
+    }
+
+    for (const activity of activities) {
+      const signature = signatureOf(activity)
+      const previous = this.reportedActivity.get(activity.key)
+      // `Thought for 11s` describes work that is already over; everything
+      // else on screen is happening now.
+      const status = activity.kind === 'thinking' ? 'completed' : 'running'
+      if (previous && previous.signature === signature && previous.status === status) continue
+      this.reportedActivity.set(activity.key, { status, signature })
+      this.lastActivity.set(activity.key, activity)
+      this.emitScreenActivity(activity, status)
+    }
+  }
+
+  private lastActivityFor(key: string): ScreenActivity {
+    return this.lastActivity.get(key) ?? { key, kind: 'working', label: 'Working' }
+  }
+
+  private emitScreenActivity(activity: ScreenActivity, status: 'running' | 'completed'): void {
+    this.emit({
+      type: 'tool.activity',
+      label: activity.label,
+      status,
+      providerStepId: activity.key,
+      kind: activity.kind,
+      ...(activity.command ? { command: activity.command } : {}),
+      ...(activity.target ? { target: activity.target } : {}),
+      ...(activity.durationSeconds !== undefined ? { durationSeconds: activity.durationSeconds } : {})
+    })
   }
 
   private latchPromptEcho(lines: string[]): boolean {
@@ -770,6 +858,7 @@ export class AntigravityPtySession {
     const prompt = this.deliveredPrompt
     if (prompt === null) return
     this.latchPromptEcho(lines)
+    this.reportScreenActivity(lines)
     const candidate = extractResponseText(lines, { prompt, requirePromptEcho: true })
     if (!candidate || candidate === this.streamedText) return
     const appendAt = progressiveAppendIndex(this.streamedText, candidate)
@@ -926,6 +1015,13 @@ function unique(values: string[]): string[] {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Everything about a screen activity that would make it worth re-reporting.
+ *  The key alone is not enough: agy revises a row in place (a command's
+ *  duration lands after it finishes). */
+function signatureOf(activity: ScreenActivity): string {
+  return [activity.kind, activity.label, activity.command ?? '', activity.target ?? '', activity.durationSeconds ?? ''].join('\u0000')
 }
 
 function codedError(code: string, message: string): Error {

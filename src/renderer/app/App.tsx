@@ -425,7 +425,12 @@ export function App(): JSX.Element {
         attachmentFileIds: fileIds
       })
       setRunningRunByConversation((current) => ({ ...current, [activeConversation.id]: run.id }))
-      setActivityByRun((current) => ({ ...current, [run.id]: emptyActivity() }))
+      // Seeded only if the run has no activity yet. The provider starts
+      // working the moment `send` is dispatched in main, so its first
+      // `tool.activity` events can arrive while this await is still
+      // pending — overwriting unconditionally threw those away and left
+      // the turn showing the fallback for work it had already reported.
+      setActivityByRun((current) => (current[run.id] ? current : { ...current, [run.id]: emptyActivity() }))
       setAttachments([])
       await refreshProject()
     } catch (error) {

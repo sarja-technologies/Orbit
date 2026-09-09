@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { applyActivity, currentActivityLine, elapsedLabel, emptyActivity, hasFailure, summarizeActivity } from '../../src/renderer/app/lib/activity'
+import { durationLabel } from '../../src/renderer/app/lib/activity'
+import { describeActivity, fallbackActivity, shortenPath } from '../../src/renderer/app/lib/activityCopy'
 import { describeProviderProblem, describeRuntimeError } from '../../src/renderer/app/lib/errorCopy'
 import { imageItemsFromClipboard, isNativeImage, projectedState, stateLabel, type DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import { parseInline, parseMarkdown } from '../../src/renderer/app/lib/markdown'
@@ -268,3 +270,82 @@ describe('RuntimeEventBatcher', () => {
     expect(order).toEqual(['batch:done', 'event:run.completed'])
   })
 })
+
+describe('activity copy', () => {
+  const item = (overrides: Partial<Parameters<typeof describeActivity>[0] & object> = {}) => ({
+    key: 'k',
+    label: 'run_command',
+    status: 'running' as const,
+    startedAt: 0,
+    ...overrides
+  })
+
+  it('shows the exact command rather than a description of it', () => {
+    const view = describeActivity(item({ kind: 'running', command: 'git push --force-with-lease origin main' }))
+    expect(view.text).toBe('Running')
+    expect(view.command).toBe('git push --force-with-lease origin main')
+  })
+
+  it('names the file, shortened for reading, for every path-shaped step', () => {
+    expect(describeActivity(item({ kind: 'reading', target: '/ws/src/renderer/App.tsx' })).text).toBe('Reading App.tsx')
+    expect(describeActivity(item({ kind: 'editing', target: '/ws/notes.md' })).text).toBe('Editing notes.md')
+    expect(describeActivity(item({ kind: 'listing', target: '/ws/src' })).text).toBe('Inspecting src')
+  })
+
+  it('shows a search query in full, because a shortened one means nothing', () => {
+    expect(describeActivity(item({ kind: 'searching', target: 'use.*Effect' })).text).toBe('Searching project for “use.*Effect”')
+  })
+
+  it('has a word for each state a turn passes through', () => {
+    expect(describeActivity(item({ kind: 'thinking' })).text).toBe('Thinking')
+    expect(describeActivity(item({ kind: 'waiting' })).text).toBe('Waiting for approval')
+    expect(describeActivity(item({ kind: 'browsing', target: 'https://example.com' })).text).toBe('Browsing https://example.com')
+  })
+
+  it("uses Antigravity's own words when that is what it reported", () => {
+    expect(describeActivity(item({ kind: 'working', label: 'Verifying Requirements Thoroughly' })).text).toBe('Verifying Requirements Thoroughly')
+  })
+
+  it('falls back to a restrained line rather than claiming to be replying', () => {
+    expect(fallbackActivity().text).toBe('Working…')
+    expect(describeActivity(null).text).toBe('Working…')
+    expect(describeActivity(undefined).text).toBe('Working…')
+    // An event with nothing usable in it gets the fallback, not a guess.
+    expect(describeActivity(item({ label: '   ' })).text).toBe('Working…')
+  })
+
+  it('says a command failed rather than that it is still running', () => {
+    expect(describeActivity(item({ kind: 'running', command: 'npm test', status: 'failed' })).text).toBe('Command failed')
+  })
+
+  it('never claims to know what an unclassified tool did', () => {
+    expect(describeActivity(item({ label: 'manage_inbox', kind: 'tool' })).text).toBe('Using manage_inbox')
+    expect(describeActivity(item({ label: 'manage_inbox', kind: 'tool', target: '/ws/a.ts' })).text).toBe('Using manage_inbox on a.ts')
+  })
+
+  it('shortens a path without inventing one', () => {
+    expect(shortenPath('/ws/src/App.tsx')).toBe('App.tsx')
+    expect(shortenPath('C:\\ws\\src\\App.tsx')).toBe('App.tsx')
+    expect(shortenPath('/ws/src/')).toBe('src')
+    expect(shortenPath('App.tsx')).toBe('App.tsx')
+  })
+})
+
+describe('activity duration', () => {
+  const base = { key: 'k', label: 'run_command', status: 'running' as const, startedAt: 0 }
+
+  it("prefers Antigravity's own measurement over Orbit's clock", () => {
+    expect(durationLabel({ ...base, status: 'completed', durationSeconds: 42 }, 999_999)).toBe('42s')
+    expect(durationLabel({ ...base, durationSeconds: 125 }, 0)).toBe('2m 5s')
+  })
+
+  it('times a running step itself, once silence would read as a hang', () => {
+    expect(durationLabel(base, 3_000)).toBeNull()
+    expect(durationLabel(base, 9_000)).toBe('9s')
+  })
+
+  it('says nothing about a finished step Antigravity did not time', () => {
+    expect(durationLabel({ ...base, status: 'completed' }, 999_999)).toBeNull()
+  })
+})
+

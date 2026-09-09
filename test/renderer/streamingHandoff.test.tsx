@@ -231,11 +231,11 @@ describe('streaming hand-off to the persisted assistant message', () => {
   })
 
   it('returns the composer to Send once a stopped run reports itself cancelled', async () => {
-    // The renderer half of "Stop means Stop". The backend now answers a Stop
+    // The renderer half of "Stop means Stop". The backend answers a Stop
     // pressed during a model-change retirement immediately, so `run.cancelled`
     // can arrive without the run ever having produced a reply — the composer
-    // must leave the Stop state and the partial text must hand over to the
-    // persisted cancellation rather than lingering.
+    // must leave the Stop state, and the streamed text must hand over to the
+    // persisted turn rather than lingering as a second copy.
     await startRun()
     emit({ type: 'text.delta', delta: 'Half an answ' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
     await screen.findByText('Half an answ')
@@ -245,16 +245,140 @@ describe('streaming hand-off to the persisted assistant message', () => {
     // Nothing has come back yet, so the run is still live and still stoppable.
     expect(screen.getByRole('button', { name: /stop generating/i })).toBeInTheDocument()
 
+    // The runtime persists what Antigravity had actually said, marked
+    // cancelled — it does not invent a message announcing the stop.
     messages = [
       message('m1', 'user', 'Tell me about bicycles'),
-      { ...message('m2', 'assistant', 'Request cancelled.'), status: 'cancelled' }
+      { ...message('m2', 'assistant', 'Half an answ'), status: 'cancelled' }
     ]
     emit({ type: 'run.cancelled' } as Partial<RuntimeEvent> & { type: 'run.cancelled' }, listener!)
 
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
-    expect(screen.queryByText('Half an answ'), 'the partial reply hands over to the stored cancellation').not.toBeInTheDocument()
-    // A cancelled turn renders as the transcript's own note, exactly once.
-    expect(screen.getAllByText('Cancelled')).toHaveLength(1)
+    // The partial answer survived the stop, and there is exactly one of it.
+    expect(screen.getAllByText('Half an answ')).toHaveLength(1)
+    // A stop reads as the reader's own action, not as a failure.
+    expect(screen.getByText('You stopped this response')).toBeInTheDocument()
+    expect(screen.queryByText(/couldn’t be read/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/conversation is safe/i)).not.toBeInTheDocument()
+  })
+
+  it('lets the conversation continue straight after a stop', async () => {
+    await startRun()
+    emit({ type: 'text.delta', delta: 'Half an answ' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    await screen.findByText('Half an answ')
+    await userEvent.click(screen.getByRole('button', { name: /stop generating/i }))
+
+    messages = [
+      message('m1', 'user', 'Tell me about bicycles'),
+      { ...message('m2', 'assistant', 'Half an answ'), status: 'cancelled' }
+    ]
+    emit({ type: 'run.cancelled' } as Partial<RuntimeEvent> & { type: 'run.cancelled' }, listener!)
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
+
+    // The composer is usable again immediately, in the same session.
+    const composer = screen.getByRole('textbox', { name: /message/i })
+    expect(composer).not.toBeDisabled()
+    await userEvent.type(composer, 'Carry on then')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => expect(api.messages.send).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(api.messages.send).mock.calls[1]![0]).toMatchObject({
+      conversationId: 'conversation_1',
+      content: 'Carry on then'
+    })
+  })
+
+  it('does not let a failure that follows a stop overwrite the interruption', async () => {
+    // The exact race: Stop kills agy, agy's death is then reported as a
+    // transport failure. The interruption must stand.
+    await startRun()
+    await userEvent.click(screen.getByRole('button', { name: /stop generating/i }))
+
+    messages = [
+      message('m1', 'user', 'Tell me about bicycles'),
+      { ...message('m2', 'assistant', ''), status: 'cancelled' }
+    ]
+    emit({ type: 'run.cancelled' } as Partial<RuntimeEvent> & { type: 'run.cancelled' }, listener!)
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
+
+    // A late failure for the same run arrives. The runtime drops it (the run
+    // is already terminal), so nothing further is stored — the transcript
+    // still shows the stop, and never an error.
+    emit(
+      { type: 'run.failed', error: { code: 'provider.exited', message: 'exit 143', retryable: false } } as Partial<RuntimeEvent> & {
+        type: 'run.failed'
+      },
+      listener!
+    )
+    await waitFor(() => expect(screen.getByText('You stopped this response')).toBeInTheDocument())
+    expect(screen.queryByText(/session ended unexpectedly/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument()
+  })
+
+  it('keeps activity that arrived before the send round trip came back', async () => {
+    // The provider starts working the moment `send` is dispatched in main,
+    // so its first activity events can land while the renderer is still
+    // awaiting the run. Seeding the run's activity unconditionally on the
+    // way back threw those away, and the turn showed the fallback for work
+    // Antigravity had already reported.
+    let releaseSend: (() => void) | null = null
+    api.messages.send = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve
+      })
+      return RUN
+    })
+
+    render(<App />)
+    await screen.findByText('Projects')
+    await userEvent.type(screen.getByRole('textbox', { name: /message/i }), 'Build it')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => expect(releaseSend).not.toBe(null))
+
+    // Activity arrives while the send is still in flight.
+    emit(
+      {
+        type: 'tool.activity',
+        label: 'run_command',
+        status: 'running',
+        providerStepId: '1',
+        kind: 'running',
+        command: 'npm run build'
+      } as Partial<RuntimeEvent> & { type: 'tool.activity' },
+      listener!
+    )
+    releaseSend!()
+
+    // It survives, and it is what the turn says it is doing.
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    expect(screen.getAllByText('npm run build').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Working…')).not.toBeInTheDocument()
+  })
+
+  it('shows what Antigravity is doing, then the text, in that order', async () => {
+    await startRun()
+
+    // No evidence yet: the restrained fallback, never a claim to be replying.
+    expect(screen.getByText('Working…')).toBeInTheDocument()
+
+    emit(
+      {
+        type: 'tool.activity',
+        label: 'view_file',
+        status: 'running',
+        providerStepId: '1',
+        kind: 'reading',
+        target: '/ws/src/App.tsx'
+      } as Partial<RuntimeEvent> & { type: 'tool.activity' },
+      listener!
+    )
+    expect(await screen.findByText('Reading App.tsx')).toBeInTheDocument()
+    expect(screen.queryByText('Working…')).not.toBeInTheDocument()
+
+    // Once text arrives it takes the bubble over, and the activity moves to
+    // its own subordinate line rather than competing with the answer.
+    emit({ type: 'text.delta', delta: 'Here is what I found.' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    expect(await screen.findByText('Here is what I found.')).toBeInTheDocument()
+    expect(screen.getByText('Reading App.tsx')).toBeInTheDocument()
   })
 
   it('clears the live run once the refreshed transcript has taken over', async () => {

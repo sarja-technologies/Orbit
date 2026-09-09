@@ -9,9 +9,27 @@ export interface DatabaseOptions {
 
 type SqlParams = Array<string | number | null>
 
+/** How long writes are allowed to accumulate before the database file is
+ *  rewritten.
+ *
+ *  sql.js has no incremental writer: `export()` serializes the WHOLE
+ *  database and `persist()` then writes the whole file, synchronously, on
+ *  Electron's main thread. Doing that once per statement made every write
+ *  cost O(total database size) — measured at ~4 ms each against an
+ *  ordinary 6.8 MB Orbit database, and rising as it grows.
+ *
+ *  Coalescing bounds a burst of writes to one file rewrite instead of one
+ *  per statement. It is deliberately short, and every path that anyone
+ *  could read the file from — `close()`, and `flush()` for callers with a
+ *  reason to be sure — writes synchronously, so the only exposure is a
+ *  hard kill inside the window. */
+const PERSIST_COALESCE_MS = 120
+
 export class OrbitDatabase {
   private SQL: SqlJsStatic | null = null
   private db: Database | null = null
+  private persistTimer: ReturnType<typeof setTimeout> | null = null
+  private dirty = false
   readonly dbPath: string
 
   constructor(private readonly opts: DatabaseOptions) {
@@ -61,9 +79,15 @@ export class OrbitDatabase {
   }
 
   close(): void {
-    this.persist()
+    this.flush()
     this.db?.close()
     this.db = null
+  }
+
+  /** Writes any coalesced changes to disk right now. */
+  flush(): void {
+    this.clearPersistTimer()
+    if (this.dirty) this.persist()
   }
 
   exec(sql: string): void {
@@ -72,7 +96,7 @@ export class OrbitDatabase {
 
   run(sql: string, params: SqlParams = []): void {
     this.requireDb().run(sql, params)
-    this.persist()
+    this.schedulePersist()
   }
 
   query<T>(sql: string, params: SqlParams = [], mapper: (row: Record<string, unknown>) => T): T[] {
@@ -92,8 +116,26 @@ export class OrbitDatabase {
 
   persist(): void {
     if (!this.db) return
+    this.clearPersistTimer()
+    this.dirty = false
     const bytes = this.db.export()
     fs.writeFileSync(this.dbPath, Buffer.from(bytes))
+  }
+
+  private schedulePersist(): void {
+    this.dirty = true
+    if (this.persistTimer) return
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null
+      if (this.dirty) this.persist()
+    }, PERSIST_COALESCE_MS)
+    // Never a reason on its own to keep the process alive.
+    this.persistTimer.unref?.()
+  }
+
+  private clearPersistTimer(): void {
+    if (this.persistTimer) clearTimeout(this.persistTimer)
+    this.persistTimer = null
   }
 
   private requireDb(): Database {

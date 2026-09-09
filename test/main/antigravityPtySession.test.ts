@@ -277,6 +277,52 @@ describe('AntigravityPtySession state machine', () => {
     expect(events.some((e) => e.type === 'run.completed')).toBe(false)
   })
 
+  it('reports a stop as a stop even when the process is already gone', () => {
+    // The narrow window in which the OS process has died but its exit has
+    // not been handled yet. `cancel()` used to return silently here, so
+    // handleExit then reported the very exit the user caused as
+    // `provider.exited` — an error message for a deliberate action.
+    const { session, transports, events, onEvent } = harness()
+    session.send(baseInput(), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onBusy()
+
+    transports[0]!.isRunning = false // the process died; its exit is still in flight
+    session.cancel()
+    transports[0]!.handlers!.onExit(143)
+
+    expect(events.filter((e) => e.type === 'run.cancelled')).toHaveLength(1)
+    expect(events.some((e) => e.type === 'run.failed'), JSON.stringify(events)).toBe(false)
+  })
+
+  it('still reports an unasked-for exit as the failure it is', () => {
+    // The counterpart: nobody stopped anything, so this really is a failure
+    // and keeps its diagnostics.
+    const { session, transports, events, onEvent } = harness()
+    session.send(baseInput(), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onBusy()
+    transports[0]!.handlers!.onExit(1)
+
+    expect(events.filter((e) => e.type === 'run.cancelled')).toHaveLength(0)
+    const failed = events.find((e) => e.type === 'run.failed') as { error: { code: string; message: string } }
+    expect(failed.error.code).toBe('provider.exited')
+    expect(failed.error.message).toContain('code=1')
+  })
+
+  it('does nothing at all when there is no turn to stop', () => {
+    const { session, transports, events, onEvent } = harness()
+    session.send(baseInput(), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onBusy()
+    transports[0]!.handlers!.onReadyForInput() // the turn settles on its own
+    const settled = events.length
+
+    session.cancel()
+    expect(events).toHaveLength(settled)
+    expect(transports[0]!.cancelCalls).toBe(0)
+  })
+
   it('cancels a run that is queued behind a retirement, and never spawns the process it was owed', async () => {
     // The second window where a run has no process of its own: it arrived
     // while a retirement was already in flight, so it is waiting on that

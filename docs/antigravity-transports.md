@@ -261,10 +261,16 @@ against recorded frames and captured event shapes.
 
 ### Remaining limitations (agy's own behaviour, not Orbit's)
 
-- **Nothing is exposed during thinking.** agy emits no assistant prose at all
-  while the model reasons — 12–18 s on the captured turns, and the largest
-  part of the perceived wait. Orbit shows `Antigravity is replying` because
-  there is genuinely nothing yet.
+- **The structured transport exposes nothing during thinking.** agy emits no
+  assistant prose *and no step of any kind* while the model reasons — 12–18 s
+  on the captured turns, and the largest part of the perceived wait. Verified
+  again against agy 1.1.28: an `agent_response` step covering a 2.6 s
+  reasoning phase is only ever announced as `DONE`, after the fact, and there
+  is no `ACTIVE` event to read while it is happening. There is therefore
+  genuinely no "Thinking" state to show on this transport, and Orbit shows its
+  restrained `Working…` rather than inventing one. **The PTY transport does
+  have it** — agy draws `▸ Thought for 11s` on its own screen — which is why
+  interactive turns can say so and structured ones cannot.
 - **The structured transport dumps most of a long answer at the end.** The
   final `DONE` delta arrives in the same millisecond as `result` and carried
   62–73% of the answer in every captured turn. Orbit forwards it the instant
@@ -285,7 +291,191 @@ against recorded frames and captured event shapes.
 - The transient work-title agy prints above an answer ("Verifying Task
   Instructions", "Analyzing the Directive") is still included in the extracted
   response, as it was before this change — it is indistinguishable from an
-  ordinary unindented heading on the screen.
+  ordinary unindented heading on the screen. The *spinner-prefixed* form of
+  the same title (`⣽  Verifying Requirements Thoroughly...`) is unambiguous
+  and is now read as live activity instead (see "Live activity" below).
+
+## Live activity (issue #1)
+
+**Symptom:** the primary execution state was the fixed string `Antigravity is
+replying` (or `Antigravity is working` once any step existed) for the whole of
+every turn, including the long stretches where Antigravity was running
+commands and reading files. It told the reader nothing, and it was wrong
+whenever no text was being produced.
+
+**Root causes — one per transport, plus one in the renderer:**
+
+1. **Structured threw away everything except the tool's name.** `tool.activity`
+   carried `label: step.tool_name` and nothing else. agy supplies
+   `tool_info.parameters` alongside it — and Orbit was already reading that
+   object, for artifact discovery — but the command and the path never
+   reached the UI.
+2. **PTY reported no activity at all.** `AntigravityPtySession` emitted no
+   `tool.activity` events in any circumstance. agy draws its work on the
+   screen the session already owns, and `extractResponseText` was parsing
+   those rows out *as chrome and discarding them*.
+3. **The renderer's primary indicator ignored the activity it did have.** The
+   waiting bubble chose between two fixed strings; the real activity line was
+   rendered only as a subordinate rail.
+4. **A race dropped a turn's first steps.** The renderer seeded
+   `activityByRun[run.id]` with an empty state *after* awaiting
+   `messages.send`. The provider starts working the moment main dispatches
+   the send, so any activity that arrived during that round trip was
+   overwritten.
+
+### Real captured `agy 1.1.28` tool steps
+
+Verbatim, from a live `--output-format stream-json` run:
+
+```text
+run_command      { "CommandLine": "ls -a" }
+view_file        { "AbsolutePath": "/ws/README.md" }
+list_dir         { "DirectoryPath": "/ws" }
+grep_search      { "Query": "hello", "SearchPath": "/ws" }
+write_to_file    { "TargetFile": "/ws/notes.md" }
+```
+
+State is `ACTIVE` then `DONE` (or `ERROR`, carrying
+`tool_info.error.message`), with agy's own `duration_seconds` on the
+terminal event.
+
+Note the casing: **1.1.28 uses PascalCase parameter names.** Orbit's existing
+artifact discovery matched only `path` / `file_path` / `filename`, so every
+file agy wrote went undiscovered — a real bug fixed in passing, since it is
+the same lookup.
+
+The interactive screen's equivalents, all real captured shapes:
+
+```text
+● Bash(npm run build) (ctrl+o to expand)
+▸ Thought for 11s
+⣽  Verifying Requirements Thoroughly...
+```
+
+### What changed
+
+- `src/main/runtime/activityMapping.ts` classifies a real agy tool name into
+  a small closed set of **observed** kinds and pulls the literal command,
+  path or query out of its real parameters. Parameter lookup is
+  case-insensitive and covers both spellings, so a version rename degrades to
+  "no target" rather than to a wrong one.
+- `ToolActivityEvent` now carries `kind`, `command`, `target` and
+  `durationSeconds` alongside the existing `label` — **facts, not prose**.
+  `label` remains agy's own word for the step and is never rewritten in the
+  main process.
+- `TerminalInteractionDetector.readScreenActivity` reads the same rows the
+  response extractor strips, and `AntigravityPtySession` turns them into
+  ordinary `tool.activity` events — off the frames the transport already
+  samples, so no new process, no second reader, no extra sampling. It is
+  guarded exactly as progressive text is: never during bootstrap (whose
+  screen is agy's banner, including the signed-in account's email), never
+  mid image-paste, never after a stop.
+- `renderer/app/lib/activityCopy.ts` turns those facts into the line a person
+  reads — the same separation `interactionCopy.ts` and `errorCopy.ts` already
+  use. A shell command is passed through **verbatim**, in monospace, never
+  replaced by a description of itself.
+- The waiting bubble now shows that line. `Working…` is the only fallback,
+  and it appears only when Antigravity has genuinely reported nothing.
+- Elapsed time prefers agy's own `duration_seconds`; Orbit's own clock is
+  used only for a step that is still running and therefore has no reported
+  duration yet.
+
+### Streaming, part two: the cost of recording it (issue #2, remainder)
+
+The transports were already streaming correctly (see the evidence above).
+What was not correct was what the runtime did with each delta.
+
+`OrbitStore.addRunEvent` was called for **every** runtime event, including
+every `text.delta`, and `OrbitDatabase.run` called `persist()` after every
+statement. sql.js has no incremental writer: `persist()` calls `export()`,
+which serializes the **whole** database, and then writes the whole file —
+synchronously, on Electron's main thread. That is the same thread that reads
+agy's stdout and forwards events to the renderer.
+
+Measured on this branch, against an ordinary 6.8 MB Orbit database (40 prior
+turns):
+
+| | per delta | one 230-delta turn |
+| --- | --- | --- |
+| before | ~4.2 ms (max 9 ms) | **~970 ms of blocked event loop** |
+| after | ~0.03 ms | **~8 ms** |
+
+The cost also grew with the user's history, because the deltas were
+themselves most of what made the database large — the same 40-turn history
+now produces a 0.6 MB database rather than 6.8 MB.
+
+Two changes, both at the layer the cost was actually incurred at:
+
+- **`text.delta` is no longer written to `run_events`.** Nothing has ever
+  read that table, and a run's text is reconstructible from the assistant
+  message the turn ends with. Every other event type is still recorded.
+- **`persist()` is coalesced** (120 ms), so a burst of writes costs one file
+  rewrite rather than one per statement. `close()` and the new `flush()`
+  write synchronously, so nothing that could read the file can observe a
+  stale one. The runtime flushes at both turn boundaries — once the user's
+  message and run exist, and once the turn settles — so coalescing costs
+  throughput *during* a turn without costing durability *of* one. That is
+  two synchronous writes per turn, against the several hundred there were
+  before.
+
+**A latent bug this exposed:** `listProjects`/`listProjectTree` and friends
+ordered by `updated_at DESC` with no tiebreaker. Those timestamps are whole
+milliseconds, and once writes stopped taking milliseconds each, two rows
+could share one — SQLite then returns them in insertion order, the exact
+opposite of "newest first". Every such query now carries an explicit
+`rowid` tiebreaker, so the ordering holds on its own rather than because the
+layer underneath is slow.
+
+## Stop is not an error (issue #3)
+
+**Symptom:** pressing Stop could show `Antigravity's response couldn't be
+read… Your conversation is safe…`, and the partial answer was thrown away.
+
+**Root causes:**
+
+1. **The runtime discarded the partial answer and invented a message.**
+   `run.cancelled` stored a literal `'Request cancelled.'` as the assistant's
+   message, dropping the text that had actually streamed.
+2. **Every failure path could outrun the cancellation.** In the structured
+   provider, a stopped agy still reports its own death — a non-SUCCESS
+   `result` written as SIGTERM lands, a pipe error, a non-zero exit. Only the
+   `exit` handler checked `cancelled`; `handleLine` and the `error` handler
+   did not, so those arrived as `provider.failed`.
+3. **PTY swallowed a Stop whose process had already died.** `cancel()`
+   returned silently when `transport.isRunning` was false, leaving
+   `cancelRequested` unset — so `handleExit` reported the very exit the user
+   had caused as `provider.exited`, "Antigravity's interactive session exited
+   unexpectedly".
+4. **Nothing stopped a late terminal event overwriting an earlier one.** A
+   `run.failed` arriving after `run.cancelled` appended a second assistant
+   message and flipped the run's state to `failed`.
+
+**Fixes, each at the layer that makes it structural rather than remembered:**
+
+- `AntigravityProvider.fail()` — the single funnel every failure path in that
+  provider already went through — converts a failure into a cancellation when
+  the run was stopped. Cancellation wins by construction, not by each caller
+  checking.
+- `AntigravityPtySession.cancel()` latches `cancelRequested` when the process
+  is already gone, so the exit that follows reads as the stop it is. It also
+  no longer acts at all unless a turn is genuinely in flight (`isBusy`),
+  rather than writing Escape into an idle session.
+- `OrbitRuntime.handleProviderEvent` drops a terminal event for a run that
+  has already reached a terminal state. Deliberately about *terminality*, not
+  cancellation specifically: a completed run cannot be failed either, and the
+  rule holds for any provider.
+- `run.cancelled` persists the text that actually streamed, marked
+  `cancelled`. Nothing is invented; a turn stopped before it said anything
+  stores an empty message.
+- The renderer presents that status as `You stopped this response` beneath
+  whatever was received — a transcript note, not an `ErrorNote`. Genuine
+  failures keep their real code, their product copy and their diagnostics
+  disclosure, untouched.
+
+**Deliberately not changed:** a `result` with `status: SUCCESS` that arrives
+after a Stop is still reported as a completion. agy genuinely finished; the
+answer is complete and keeping it loses nothing. Only *failures* are
+converted.
 
 ## Native image attachment
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OrbitDatabase } from '../../src/main/persistence/database'
 import { OrbitStore } from '../../src/main/persistence/store'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
+import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 let dir = ''
 let db: OrbitDatabase
@@ -303,3 +304,88 @@ describe('OrbitStore', () => {
     expect(store.autoTitleConversation('c1', 'Something Else')).toBeNull()
   })
 })
+
+// The streaming fix, at the layer it was actually broken in. Every write
+// through sql.js serializes and rewrites the WHOLE database file,
+// synchronously, on Electron's main thread — the thread that also has to
+// read agy's output and forward it to the renderer. Storing a row per
+// `text.delta` therefore charged O(database size) to every few words of a
+// reply, which is what turned incremental output into one late lump.
+describe('run event history', () => {
+  const runtimeEvent = (runId: string, event: Partial<RuntimeEvent> & { type: RuntimeEvent['type'] }): RuntimeEvent =>
+    ({ projectId: 'p1', conversationId: 'c1', runId, providerId: 'antigravity', createdAt: 'now', ...event }) as RuntimeEvent
+
+  const setup = () => {
+    const project = store.createProject('Events', null)
+    const conversation = store.createConversation(project.id, 'Session', {})
+    const run = store.createRun({ projectId: project.id, conversationId: conversation.id })
+    return { project, conversation, run }
+  }
+
+  const storedTypes = (runId: string): string[] =>
+    db.query('SELECT event_type FROM run_events WHERE run_id = ? ORDER BY sequence', [runId], (row) => String(row.event_type))
+
+  it('does not store a row per streamed text delta', () => {
+    const { project, conversation, run } = setup()
+    for (let i = 0; i < 50; i++) {
+      store.addRunEvent(runtimeEvent(run.id, { type: 'text.delta', projectId: project.id, conversationId: conversation.id, delta: 'more words ' }))
+    }
+    expect(storedTypes(run.id)).toEqual([])
+  })
+
+  it('still stores every event that is not a text delta', () => {
+    const { project, conversation, run } = setup()
+    const base = { projectId: project.id, conversationId: conversation.id }
+    store.addRunEvent(runtimeEvent(run.id, { type: 'run.started', nativeConversationId: 'native-1', ...base }))
+    store.addRunEvent(runtimeEvent(run.id, { type: 'text.delta', delta: 'ignored', ...base }))
+    store.addRunEvent(runtimeEvent(run.id, { type: 'tool.activity', label: 'run_command', status: 'running', kind: 'running', command: 'npm test', ...base }))
+    store.addRunEvent(runtimeEvent(run.id, { type: 'run.completed', finalText: 'Done.', ...base }))
+
+    expect(storedTypes(run.id)).toEqual(['run.started', 'tool.activity', 'run.completed'])
+    // Sequencing is unbroken by the skipped deltas.
+    const sequences = db.query('SELECT sequence FROM run_events WHERE run_id = ? ORDER BY sequence', [run.id], (row) => Number(row.sequence))
+    expect(sequences).toEqual([1, 2, 3])
+  })
+
+  it('keeps the structured activity facts it stores', () => {
+    const { project, conversation, run } = setup()
+    store.addRunEvent(
+      runtimeEvent(run.id, {
+        type: 'tool.activity',
+        label: 'run_command',
+        status: 'running',
+        kind: 'running',
+        command: 'npm run build -- --watch',
+        projectId: project.id,
+        conversationId: conversation.id
+      })
+    )
+    const [payload] = db.query('SELECT payload_json FROM run_events WHERE run_id = ?', [run.id], (row) => String(row.payload_json))
+    expect(JSON.parse(payload!)).toMatchObject({ kind: 'running', command: 'npm run build -- --watch' })
+  })
+})
+
+describe('database durability', () => {
+  it('writes coalesced changes to disk, so a reopened database sees them all', async () => {
+    const project = store.createProject('Durable', null)
+    for (let i = 0; i < 20; i++) store.createConversation(project.id, `Session ${i}`, {})
+    // close() flushes synchronously; nothing may be lost to the coalescing.
+    db.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+    expect(store.listProjectTree()[0]?.conversations).toHaveLength(20)
+  })
+
+  it('flushes on demand without waiting for the coalescing window', async () => {
+    const project = store.createProject('Flush', null)
+    db.flush()
+
+    const reader = new OrbitDatabase({ dataDir: dir })
+    await reader.init()
+    expect(new OrbitStore(reader).getProject(project.id)?.name).toBe('Flush')
+    reader.close()
+  })
+})
+
