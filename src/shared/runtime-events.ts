@@ -27,16 +27,6 @@ export interface RuntimeEventBase {
 export interface RunStartedEvent extends RuntimeEventBase {
   type: 'run.started'
   nativeConversationId?: string | null
-  /** The model the provider actually resolved this turn to, when it reports
-   *  one. UI-facing only: it is what the composer shows next to "Default"
-   *  once Antigravity's own choice becomes known, and is never used to make
-   *  a selection decision.
-   *
-   *  agy 1.1.27 does not report this on `init`, so nothing emits it today
-   *  and the composer says so rather than guessing (see
-   *  renderer/app/lib/resolvedModel.ts). Declared here so the runtime can
-   *  start supplying it without any renderer change. */
-  model?: string | null
 }
 
 export interface TextDeltaEvent extends RuntimeEventBase {
@@ -103,9 +93,6 @@ export interface RunCompletedEvent extends RuntimeEventBase {
   finalText: string
   nativeConversationId?: string | null
   usage?: Record<string, unknown>
-  /** The model this turn actually ran on, when the provider reports one.
-   *  Same contract as `RunStartedEvent.model` — unpopulated today. */
-  model?: string | null
 }
 
 export interface RunFailedEvent extends RuntimeEventBase {

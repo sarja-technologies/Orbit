@@ -13,7 +13,7 @@ interface WorkspaceHeaderProps {
  *  It no longer carries the working folder. That path is the single most
  *  important fact about a turn, and an ellipsised copy of it in a corner was
  *  the wrong place for it — it now lives on the composer's project control,
- *  next to the model and the permission mode it belongs with, in full.
+ *  next to the model and the approval mode it belongs with, in full.
  *
  *  It carries no permanent provider status either — a healthy provider is
  *  the normal case and does not need a line of chrome restating it. Real

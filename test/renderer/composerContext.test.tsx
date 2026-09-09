@@ -3,16 +3,15 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ModelControls } from '../../src/renderer/app/components/ModelControls'
-import { PermissionControl } from '../../src/renderer/app/components/PermissionControl'
+import { ApprovalsControl } from '../../src/renderer/app/components/ApprovalsControl'
 import { ProjectControl } from '../../src/renderer/app/components/ProjectControl'
 import { MessageActions } from '../../src/renderer/app/components/MessageActions'
 import { MessageBlock } from '../../src/renderer/app/components/MessageBlock'
 import { isDescriptive, modelDescription, modelPurpose } from '../../src/renderer/app/lib/modelMetadata'
-import { canSwitchTo, permissionModeFor } from '../../src/renderer/app/lib/permissionModes'
-import { describeModelSelection, resolvedModelFromEvent } from '../../src/renderer/app/lib/resolvedModel'
+import { approvalModeFor, canSwitchTo } from '../../src/renderer/app/lib/approvalModes'
+import { concreteModelFor, describeModel, needsConcreteModel, orbitDefaultModel } from '../../src/renderer/app/lib/modelSelection'
 import { pathLeaf, workingContext } from '../../src/renderer/app/lib/projectContext'
 import type { Conversation, Message, ModelOption, Project } from '../../src/shared/domain'
-import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 const MODELS: ModelOption[] = [
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] },
@@ -45,112 +44,102 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
 
 // ---------------------------------------------------------------- model
 
-describe('model display', () => {
-  it('states the chosen model when the user picked one', () => {
-    const display = describeModelSelection('gemini-3.8-flash', MODELS, null)
-    expect(display.mode).toBe('explicit')
-    expect(display.primary).toBe('3.8 Flash')
-    expect(display.unresolved).toBe(false)
+describe('concrete model selection', () => {
+  it('never leaves a session without a nameable model', () => {
+    // Orbit owns the default; the user is never shown an "Orbit decides"
+    // state to select or to puzzle over.
+    expect(orbitDefaultModel(MODELS)?.id).toBe('gemini-3.8-flash')
+    expect(concreteModelFor(null, MODELS)?.id).toBe('gemini-3.8-flash')
   })
 
-  it('shows the id itself when the session carries one the catalogue no longer has', () => {
-    const display = describeModelSelection('gemini-9.9-vapour', MODELS, null)
-    expect(display.primary).toBe('gemini-9.9-vapour')
-    expect(display.model).toBeNull()
+  it('picks Gemini first, because Antigravity is a Gemini workflow', () => {
+    const claudeFirst: ModelOption[] = [MODELS[2]!, MODELS[0]!]
+    expect(orbitDefaultModel(claudeFirst)?.id).toBe('gemini-3.8-flash')
   })
 
-  it('says Default and nothing more until the runtime reports a real model', () => {
-    const display = describeModelSelection(null, MODELS, null)
-    expect(display.primary).toBe('Default')
-    expect(display.secondary).toBeNull()
-    expect(display.unresolved).toBe(true)
+  it('falls back to the catalogue’s own first entry when it has no Gemini', () => {
+    expect(orbitDefaultModel([MODELS[2]!, MODELS[3]!])?.id).toBe('claude-sonnet-4-6')
   })
 
-  it('adds the resolved model beside Default once it is known', () => {
-    const display = describeModelSelection(null, MODELS, 'gemini-3.8-flash')
-    expect(display.primary).toBe('Default')
-    expect(display.secondary).toBe('3.8 Flash')
-    expect(display.unresolved).toBe(false)
+  it('names no model at all rather than inventing one when the catalogue is unreadable', () => {
+    expect(orbitDefaultModel([])).toBeNull()
+    expect(describeModel(null, []).unavailable).toBe(true)
+    expect(describeModel(null, []).label).toBe('Model unavailable')
   })
 
-  it('reports a resolved model the catalogue does not list, rather than dropping it', () => {
-    const display = describeModelSelection(null, MODELS, 'gemini-4.0-experimental')
-    expect(display.secondary).toBe('gemini-4.0-experimental')
-    expect(display.unresolved).toBe(false)
+  it('keeps a stored choice, including one the catalogue no longer lists', () => {
+    expect(describeModel('gemini-3.1-pro', MODELS).label).toBe('3.1 Pro')
+    const drifted = describeModel('gemini-9.9-vapour', MODELS)
+    expect(drifted.label).toBe('gemini-9.9-vapour')
+    expect(drifted.model).toBeNull()
+    expect(drifted.unavailable).toBe(false)
   })
 
-  it('takes a reported model only from run events that carry one', () => {
-    const base = { projectId: 'p', conversationId: 'c1', runId: 'r', providerId: 'antigravity' as const, createdAt: 'now' }
-    expect(resolvedModelFromEvent({ ...base, type: 'run.started' } as RuntimeEvent)).toBeNull()
-    expect(resolvedModelFromEvent({ ...base, type: 'text.delta', delta: 'hi' } as RuntimeEvent)).toBeNull()
-    expect(resolvedModelFromEvent({ ...base, type: 'run.started', model: '  ' } as RuntimeEvent)).toBeNull()
-    expect(resolvedModelFromEvent({ ...base, type: 'run.started', model: 'gemini-3.8-flash' } as RuntimeEvent)).toEqual({
-      conversationId: 'c1',
-      model: 'gemini-3.8-flash'
-    })
+  it('flags a legacy session still carrying the retired no-model state', () => {
+    expect(needsConcreteModel(null, MODELS)).toBe(true)
+    expect(needsConcreteModel('gemini-3.1-pro', MODELS)).toBe(false)
+    // Nothing to migrate it onto yet, so nothing is claimed.
+    expect(needsConcreteModel(null, [])).toBe(false)
   })
 })
 
 describe('model control rendering', () => {
-  const renderModel = (selectedModel: string | null, resolvedModelId: string | null = null) =>
+  const renderModel = (selectedModel: string | null, models: ModelOption[] = MODELS) =>
     render(
       <ModelControls
-        models={MODELS}
+        models={models}
         selectedModel={selectedModel}
         selectedEffort={null}
-        resolvedModelId={resolvedModelId}
         disabled={false}
         onSelectModel={vi.fn()}
         onSelectEffort={vi.fn()}
       />
     )
 
-  it('says Default is unresolved quietly, without naming a model nobody reported', () => {
-    renderModel(null)
+  it('shows a concrete model, never Default or an unresolved state', () => {
+    renderModel('gemini-3.1-pro')
     const trigger = screen.getByLabelText('Model and reasoning')
-    expect(trigger).toHaveTextContent('Default')
-    expect(trigger).toHaveTextContent('not reported')
-    for (const model of MODELS) expect(trigger).not.toHaveTextContent(model.label)
-  })
-
-  it('shows Default and the resolved model together once it is known', () => {
-    renderModel(null, 'gemini-3.1-pro')
-    const trigger = screen.getByLabelText('Model and reasoning')
-    expect(trigger).toHaveTextContent('Default')
     expect(trigger).toHaveTextContent('3.1 Pro')
-    expect(trigger).not.toHaveTextContent('not reported')
+    expect(trigger).not.toHaveTextContent(/Default/i)
+    expect(trigger).not.toHaveTextContent(/not reported/i)
   })
 
-  it('updates in place when the model becomes known mid-session', () => {
-    const { rerender } = renderModel(null)
-    expect(screen.getByLabelText('Model and reasoning')).toHaveTextContent('not reported')
-    rerender(
-      <ModelControls
-        models={MODELS}
-        selectedModel={null}
-        selectedEffort={null}
-        resolvedModelId="gemini-3.8-flash"
-        disabled={false}
-        onSelectModel={vi.fn()}
-        onSelectEffort={vi.fn()}
-      />
-    )
-    expect(screen.getByLabelText('Model and reasoning')).toHaveTextContent('3.8 Flash')
-  })
-
-  it('carries the whole truth in the accessible description, not just the two words', () => {
+  it('shows a concrete model for a legacy session that names none', () => {
     renderModel(null)
-    expect(screen.getByLabelText('Model and reasoning')).toHaveAttribute(
-      'title',
-      expect.stringContaining('has not reported which model it used yet')
-    )
+    const trigger = screen.getByLabelText('Model and reasoning')
+    expect(trigger).toHaveTextContent('3.8 Flash')
+    expect(trigger).not.toHaveTextContent(/Default/i)
   })
 
-  it('names the resolved model on the Default row too, so the open menu agrees with the trigger', async () => {
+  it('offers no Default row in the picker', async () => {
     const user = userEvent.setup()
-    renderModel(null, 'gemini-3.8-flash')
+    renderModel('gemini-3.8-flash')
     await user.click(screen.getByLabelText('Model and reasoning'))
-    expect(screen.getByRole('menuitemradio', { name: /Default model/ })).toHaveTextContent('Antigravity’s own choice · 3.8 Flash')
+    expect(screen.queryByRole('menuitemradio', { name: /Default/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Antigravity’s own choice/)).not.toBeInTheDocument()
+  })
+
+  it('offers no Default row in the full browser either', async () => {
+    const user = userEvent.setup()
+    renderModel('gemini-3.8-flash')
+    await user.click(screen.getByLabelText('Model and reasoning'))
+    await user.click(screen.getByRole('button', { name: /Other models/ }))
+    const modal = screen.getByRole('dialog', { name: 'All models' })
+    expect(within(modal).queryByRole('menuitemradio', { name: /Default/i })).not.toBeInTheDocument()
+  })
+
+  it('ticks the concrete model a legacy session resolves to', async () => {
+    const user = userEvent.setup()
+    renderModel(null)
+    await user.click(screen.getByLabelText('Model and reasoning'))
+    expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('says so plainly when the catalogue could not be read', () => {
+    renderModel(null, [])
+    const trigger = screen.getByLabelText('Model and reasoning')
+    expect(trigger).toBeDisabled()
+    expect(trigger).toHaveTextContent('Model unavailable')
   })
 })
 
@@ -164,7 +153,6 @@ describe('model descriptions', () => {
         models={MODELS}
         selectedModel="gemini-3.8-flash"
         selectedEffort="high"
-        resolvedModelId={null}
         disabled={false}
         onSelectModel={vi.fn()}
         onSelectEffort={vi.fn()}
@@ -321,10 +309,10 @@ describe('ProjectControl', () => {
 
 // --------------------------------------------------------- permissions
 
-describe('permission modes', () => {
+describe('approval modes', () => {
   it('maps each real transport onto a mode, and invents no third one', () => {
-    expect(permissionModeFor('structured').label).toBe('Can’t ask')
-    expect(permissionModeFor('pty').label).toBe('Ask first')
+    expect(approvalModeFor('structured').label).toBe('No approval prompts')
+    expect(approvalModeFor('pty').label).toBe('Ask when needed')
   })
 
   it('allows only the escalation the runtime actually honours', () => {
@@ -335,59 +323,70 @@ describe('permission modes', () => {
   })
 })
 
-describe('PermissionControl', () => {
-  const renderPermissions = (transport: Conversation['transport']) => {
+describe('ApprovalsControl', () => {
+  const renderApprovals = (transport: Conversation['transport']) => {
     const onSelect = vi.fn()
-    render(<PermissionControl transport={transport} disabled={false} onSelect={onSelect} />)
+    render(<ApprovalsControl transport={transport} disabled={false} onSelect={onSelect} />)
     return { onSelect }
   }
 
+  it('is called Approvals, not Permissions — Orbit has no permission policy', async () => {
+    const user = userEvent.setup()
+    renderApprovals('structured')
+    await user.click(screen.getByLabelText('Approvals: No approval prompts'))
+    expect(screen.getByRole('dialog', { name: 'Approvals' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /Permission/i })).not.toBeInTheDocument()
+  })
+
   it('states the session’s real approval state beside the model', () => {
-    renderPermissions('structured')
-    expect(screen.getByLabelText('Permissions: Can’t ask')).toHaveTextContent('Can’t ask')
+    renderApprovals('structured')
+    expect(screen.getByLabelText('Approvals: No approval prompts')).toHaveTextContent('No approval prompts')
   })
 
   it('states the interactive state once the session has one', () => {
-    renderPermissions('pty')
-    expect(screen.getByLabelText('Permissions: Ask first')).toHaveTextContent('Ask first')
+    renderApprovals('pty')
+    expect(screen.getByLabelText('Approvals: Ask when needed')).toHaveTextContent('Ask when needed')
   })
 
   it('offers exactly the two modes Orbit has, with no auto-approve among them', async () => {
     const user = userEvent.setup()
-    renderPermissions('structured')
-    await user.click(screen.getByLabelText('Permissions: Can’t ask'))
-    const popover = screen.getByRole('dialog', { name: 'Permissions' })
-    const rows = within(popover).getAllByRole('menuitemradio')
-    expect(rows).toHaveLength(2)
+    renderApprovals('structured')
+    await user.click(screen.getByLabelText('Approvals: No approval prompts'))
+    const popover = screen.getByRole('dialog', { name: 'Approvals' })
+    expect(within(popover).getAllByRole('menuitemradio')).toHaveLength(2)
     expect(within(popover).queryByText(/auto.?approve/i)).not.toBeInTheDocument()
     expect(within(popover).queryByText(/skip permissions/i)).not.toBeInTheDocument()
+    expect(within(popover).queryByText(/dangerously/i)).not.toBeInTheDocument()
   })
 
-  it('keeps the technical identifier as a detail line, not as the control’s name', async () => {
+  it('keeps the transport name as secondary detail, not as the control’s name', async () => {
     const user = userEvent.setup()
-    renderPermissions('structured')
-    await user.click(screen.getByLabelText('Permissions: Can’t ask'))
-    const popover = screen.getByRole('dialog', { name: 'Permissions' })
+    renderApprovals('structured')
+    // The closed control says nothing technical at all.
+    expect(screen.getByLabelText('Approvals: No approval prompts')).not.toHaveTextContent(/transport|pty|structured/i)
+
+    await user.click(screen.getByLabelText('Approvals: No approval prompts'))
+    const popover = screen.getByRole('dialog', { name: 'Approvals' })
     expect(within(popover).getByText('transport: structured')).toBeInTheDocument()
     expect(within(popover).getByText('transport: pty')).toBeInTheDocument()
   })
 
   it('escalates a session so Antigravity can ask', async () => {
     const user = userEvent.setup()
-    const { onSelect } = renderPermissions('structured')
-    await user.click(screen.getByLabelText('Permissions: Can’t ask'))
-    await user.click(screen.getByRole('menuitemradio', { name: /Ask first/ }))
+    const { onSelect } = renderApprovals('structured')
+    await user.click(screen.getByLabelText('Approvals: No approval prompts'))
+    await user.click(screen.getByRole('menuitemradio', { name: /Ask when needed/ }))
     expect(onSelect).toHaveBeenCalledWith('pty')
   })
 
   it('presents the one-way escalation as settled rather than as a switch that does nothing', async () => {
     const user = userEvent.setup()
-    const { onSelect } = renderPermissions('pty')
-    await user.click(screen.getByLabelText('Permissions: Ask first'))
-    const cannotAsk = screen.getByRole('menuitemradio', { name: /Can’t ask/ })
-    expect(cannotAsk).toBeDisabled()
-    expect(cannotAsk).toHaveTextContent('A session that can ask you stays that way.')
-    await user.click(cannotAsk)
+    const { onSelect } = renderApprovals('pty')
+    await user.click(screen.getByLabelText('Approvals: Ask when needed'))
+    const noPrompts = screen.getByRole('menuitemradio', { name: /No approval prompts/ })
+    expect(noPrompts).toBeDisabled()
+    expect(noPrompts).toHaveTextContent('A session that can ask you stays that way.')
+    await user.click(noPrompts)
     expect(onSelect).not.toHaveBeenCalled()
   })
 })

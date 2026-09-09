@@ -178,6 +178,13 @@ describe('App', () => {
     await screen.findByText('Projects')
   }
 
+  /** Every launch opens a blank chat now, so a test about a stored session
+   *  has to click into one first — exactly as the user does. */
+  const openSession = async (name: RegExp): Promise<void> => {
+    await userEvent.click(await screen.findByRole('button', { name }))
+    await screen.findByLabelText('Message Antigravity')
+  }
+
   /** Which project a session lives in, for the stateful mock backend. */
   const activeProjectOf = (conversationId: string): string =>
     Object.keys(sessions).find((projectId) => sessions[projectId]!.some((item) => item.id === conversationId)) ?? 'project_1'
@@ -388,6 +395,7 @@ describe('App', () => {
 
   it('keeps the project and session breadcrumb, and drops the provider status line', async () => {
     await boot()
+    await openSession(/^Improve Orbit UI/)
     const header = document.querySelector('.chrome') as HTMLElement
     expect(within(header).getByText('AgentDock Website')).toBeInTheDocument()
     expect(within(header).getByText('Improve Orbit UI')).toBeInTheDocument()
@@ -479,7 +487,7 @@ describe('App', () => {
       ]
     })
     await boot()
-    await screen.findByLabelText('Message Antigravity')
+    await openSession(/^Improve Orbit UI/)
     expect(screen.queryByRole('heading', { name: 'What should we work on?' })).not.toBeInTheDocument()
   })
 
@@ -539,6 +547,7 @@ describe('App', () => {
   it('persists a model choice, carrying the remembered reasoning level onto it', async () => {
     preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -555,6 +564,7 @@ describe('App', () => {
   it('maps a remembered level onto a model that does not publish it', async () => {
     preferences = { lastReasoningEffort: 'medium', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -572,6 +582,7 @@ describe('App', () => {
   it('chooses no tier for a model with no reasoning control', async () => {
     preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -589,18 +600,22 @@ describe('App', () => {
 
   it('remembers an explicit tier for next time, globally and against the model', async () => {
     await boot()
+    await openSession(/^Improve Orbit UI/)
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
     await userEvent.click(trigger)
     await userEvent.click(screen.getByRole('button', { name: 'High' }))
 
+    // Remembered against the concrete model the session was settled onto —
+    // there is no 'antigravity:default' bucket any more, because there is no
+    // default model the user can be on.
     expect(api.preferences.set).toHaveBeenCalledWith({
       lastReasoningEffort: 'high',
-      modelReasoningEfforts: { 'antigravity:default': 'high' }
+      modelReasoningEfforts: { 'gemini-3.8-flash': 'high' }
     })
     expect(api.conversations.setModel).toHaveBeenCalledWith({
       conversationId: 'conversation_1',
-      model: null,
+      model: 'gemini-3.8-flash',
       reasoningEffort: 'high'
     })
   })
@@ -612,6 +627,7 @@ describe('App', () => {
     preferences = { lastReasoningEffort: 'low', modelReasoningEfforts: {} }
 
     await boot()
+    await openSession(/^Improve Orbit UI/)
     await waitFor(() =>
       expect(api.conversations.setModel).toHaveBeenCalledWith({
         conversationId: 'conversation_1',
@@ -621,11 +637,17 @@ describe('App', () => {
     )
   })
 
-  it('does not expose a manual transport control', async () => {
+  it('expresses transports as Approvals, and never as raw transport chrome', async () => {
     await boot()
     await screen.findByLabelText('Message Antigravity')
+
+    // The composer states the approval behaviour in product language...
+    expect(screen.getByLabelText('Approvals: No approval prompts')).toBeInTheDocument()
+    // ...and nothing about transports, interactive mode, or permission
+    // policy leaks onto the surface itself.
     expect(screen.queryByText(/interactive mode/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/PTY/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/permission/i)).not.toBeInTheDocument()
   })
 
   it('shows a startup diagnostic when the preload API is missing', async () => {

@@ -135,12 +135,14 @@ describe('closed composer control', () => {
 })
 
 describe('compact model menu', () => {
-  it('shows the default model and Gemini only, because Antigravity is a Gemini workflow', async () => {
+  it('shows Gemini only, because Antigravity is a Gemini workflow', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
 
-    expect(screen.getByRole('menuitemradio', { name: /Default model/ })).toBeInTheDocument()
+    // Concrete models only: Orbit owns the default and never offers it as a
+    // selectable row.
+    expect(screen.queryByRole('menuitemradio', { name: /Default/i })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toBeInTheDocument()
     expect(screen.queryByRole('menuitemradio', { name: /Claude Sonnet/ })).not.toBeInTheDocument()
@@ -306,10 +308,12 @@ describe('reasoning control', () => {
     expect(screen.getByText('Reasoning is controlled by the model.')).toBeInTheDocument()
   })
 
-  it('gives Antigravity’s own default model a real three-tier control', async () => {
+  it('gives a legacy session with no model the tiers of the model Orbit settles it on', async () => {
     const user = userEvent.setup()
     renderControls(null, 'medium')
     await openPopover(user)
+    // Resolves to Gemini 3.8 Flash, which really does publish three tiers —
+    // not to a placeholder with a tier set nobody can point at.
     expect((document.querySelector('.reasoning-scale') as HTMLElement).style.getPropertyValue('--stops')).toBe('3')
     expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Medium')
   })

@@ -33,13 +33,34 @@ import { applyActivity, emptyActivity, type ActivityState } from './lib/activity
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
-import { resolvedModelFromEvent, type ResolvedModels } from './lib/resolvedModel'
+import { concreteModelFor, orbitDefaultModel } from './lib/modelSelection'
 import { useSidebarWidth } from './lib/useSidebarWidth'
 import { workingContext } from './lib/projectContext'
 
 /** Which project groups are open in the sidebar. Kept in the renderer rather
  *  than the database: it is view state, and losing it costs one click. */
 const EXPANDED_KEY = 'orbit.sidebar.expandedProjects'
+
+/** Which session a project open should land on. Explicit rather than
+ *  implicit, because "no session at all" is now a real, wanted outcome and
+ *  a silent fall-back to the first one would quietly undo it. */
+type SessionSelection = ID | 'first' | 'none'
+
+/** A conversation the user is composing but that does not exist yet.
+ *
+ *  Every launch lands here. Nothing is written to the database until the
+ *  first message is actually sent, so opening Orbit and closing it again
+ *  leaves no trace — see `send`. The fields mirror the conversation columns
+ *  the composer's controls touch, so a model or approval mode chosen before
+ *  the first message is carried onto the session that gets created. */
+interface DraftSession {
+  projectId: ID
+  /** null means "Orbit's own choice", resolved concretely for display and
+   *  again at create time. It is never shown to the user as a state. */
+  model: string | null
+  reasoningEffort: ReasoningEffort | null
+  transport: ConversationTransport
+}
 
 interface WorkspaceState {
   activeProjectId: ID | null
@@ -88,10 +109,9 @@ export function App(): JSX.Element {
   const [focusPendingId, setFocusPendingId] = useState<ID | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const sidebar = useSidebarWidth()
-  /** Which model each conversation's turns actually ran on, as reported by
-   *  the runtime. Display-only, and never inferred — see
-   *  lib/resolvedModel.ts for why an unreported model stays unreported. */
-  const [resolvedModels, setResolvedModels] = useState<ResolvedModels>({})
+  /** Set whenever the workspace is showing a session that does not exist
+   *  yet. Null the moment a stored session is opened. */
+  const [draft, setDraft] = useState<DraftSession | null>(null)
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -102,6 +122,8 @@ export function App(): JSX.Element {
   /** Sessions whose reasoning tier has already been settled this launch, so
    *  seeding a migrated session can never turn into a write loop. */
   const seededEffortIds = useRef(new Set<ID>())
+  /** Likewise for sessions migrated off the retired "no model" state. */
+  const seededModelIds = useRef(new Set<ID>())
   /** Runs that currently owe the user an answer to a native prompt.
    *
    *  A ref rather than derived state because it is read from inside the
@@ -112,11 +134,23 @@ export function App(): JSX.Element {
 
   const projects = useMemo(() => tree.map((group) => group.project), [tree])
   const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
+  // A draft keeps the project context it was started in: a fresh chat does
+  // not mean a forgotten working folder.
+  const draftProject = draft ? (projects.find((project) => project.id === draft.projectId) ?? null) : null
   const activeGroup = tree.find((group) => group.project.id === workspace.activeProjectId) ?? null
   const conversations = activeGroup?.conversations ?? []
   const activeConversation = conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
   const nativeMediaAvailable = providerStatus?.details?.nativeMedia !== false
+
+  // The composer renders the same three controls whether it is attached to a
+  // stored session or to a launch draft. Reading them from one place keeps
+  // the draft from needing a parallel set of components.
+  const composerModel = draft ? draft.model : (activeConversation?.model ?? null)
+  const composerTransport = draft ? draft.transport : (activeConversation?.transport ?? 'structured')
+  const composerEffort = draft
+    ? (draft.reasoningEffort ?? effortForModel(concreteModelFor(draft.model, models), preferences))
+    : (activeConversation?.reasoningEffort ?? null)
 
   // An attachment that can only ever be shared as a workspace reference
   // says so while it is still sitting in the composer, so the user learns
@@ -141,7 +175,8 @@ export function App(): JSX.Element {
 
   // A session with nothing in it yet: the invitation and the composer sit
   // together in the middle rather than clinging to the bottom of a void.
-  const blankSession = Boolean(activeConversation) && activeMessages.length === 0 && !activeRunId
+  // A launch draft is the same state — it just has no row in the sidebar.
+  const blankSession = Boolean(draft) || (Boolean(activeConversation) && activeMessages.length === 0 && !activeRunId)
 
   // Antigravity's questions are ordinary prose, so "replying" simply means
   // the last thing in the session was an assistant turn that asked one.
@@ -202,12 +237,29 @@ export function App(): JSX.Element {
     setFocusPendingId(null)
   }, [focusPendingId, workspace.activeConversationId])
 
+  // A session persisted before Orbit owned the default model carries no
+  // model at all — the retired "Default" state. Settle it onto a real
+  // catalogue id the first time it is opened, so it stops being a session
+  // whose model nobody can name. Runs once per session per launch.
+  useEffect(() => {
+    if (!activeConversation || models.length === 0) return
+    if (activeConversation.model !== null) return
+    if (seededModelIds.current.has(activeConversation.id)) return
+    const target = orbitDefaultModel(models)
+    if (!target) return
+    seededModelIds.current.add(activeConversation.id)
+    void persistModel(activeConversation.id, target.id, effortForModel(target, preferences))
+  }, [activeConversation, models, preferences])
+
   // A session carried over from before Orbit had a reasoning preference has
   // no tier at all. Rather than leaving it on "Auto" forever, settle it once
   // from the same policy a new session uses — the user's remembered level.
   useEffect(() => {
     if (!activeConversation || models.length === 0) return
     if (activeConversation.reasoningEffort !== null) return
+    // A session with no model is the model seeder's to settle; it writes the
+    // tier alongside the id, so doing it here too would be a second write.
+    if (activeConversation.model === null) return
     if (seededEffortIds.current.has(activeConversation.id)) return
     const target = modelForSelection(models, activeConversation.model)
     const effort = effortForModel(target, preferences)
@@ -237,20 +289,59 @@ export function App(): JSX.Element {
     const first = groups[0]?.project
     if (!first) return
     setExpandedProjectIds((current) => (current.includes(first.id) ? current : [...current, first.id]))
-    await openProject(first.id)
+    // Every launch opens on a new blank chat. The last session the user was
+    // reading is still in the sidebar and one click away, but Orbit never
+    // reopens it on their behalf — restoring a half-finished conversation is
+    // a decision only the user can make.
+    await openProject(first.id, 'none')
+    startDraft(first.id)
   }
 
-  async function openProject(projectId: ID, preferredConversationId?: ID | null): Promise<void> {
+  /** Opens a project and lands on the session `select` names. 'first' is the
+   *  old implicit behaviour, kept for the cases that genuinely want it;
+   *  'none' leaves the workspace with no session open, which is what a
+   *  launch draft sits in. */
+  async function openProject(projectId: ID, select: SessionSelection = 'first'): Promise<void> {
     const orbit = requireOrbitApi()
     const [snapshot, groups] = await Promise.all([orbit.projects.open(projectId), orbit.projects.tree()])
     setTree(groups)
-    setWorkspace(fromSnapshot(snapshot, preferredConversationId ?? workspaceConversationFor(groups, projectId, preferredConversationId)))
+    setWorkspace(fromSnapshot(snapshot, resolveSelection(groups, projectId, select)))
     setSelectedArtifactId((current) => current ?? snapshot.artifacts[0]?.id ?? null)
   }
 
-  async function refreshProject(preferred?: ID | null): Promise<void> {
+  /** Re-reads the open project without moving the user. A draft has no
+   *  session to keep, and must not acquire one just because the project was
+   *  refreshed underneath it. */
+  async function refreshProject(preferred?: SessionSelection): Promise<void> {
     if (!workspace.activeProjectId) return
-    await openProject(workspace.activeProjectId, preferred ?? workspace.activeConversationId)
+    await openProject(workspace.activeProjectId, preferred ?? (draft ? 'none' : (workspace.activeConversationId ?? 'first')))
+  }
+
+  /** Puts the workspace on a conversation that does not exist yet, in the
+   *  given project. Nothing is written; see `send` for where it becomes
+   *  real. */
+  function startDraft(projectId: ID): void {
+    setDraft({ projectId, model: null, reasoningEffort: null, transport: 'structured' })
+  }
+
+  /** Changes which project the workspace is pointed at, from the composer's
+   *  own project control.
+   *
+   *  A blank chat is retargeted rather than abandoned: the user is mid-
+   *  compose and has just said where the work should happen. Otherwise this
+   *  behaves like opening the project — landing on its most recent session,
+   *  or on a blank chat when it has none, so there is always something to
+   *  type into. */
+  async function switchProject(projectId: ID): Promise<void> {
+    const target = tree.find((group) => group.project.id === projectId)
+    const blank = Boolean(draft) || !target || target.conversations.length === 0
+    if (blank) {
+      await openProject(projectId, 'none')
+      startDraft(projectId)
+      return
+    }
+    setDraft(null)
+    await openProject(projectId, 'first')
   }
 
   function flushRuntimeEventBatch(batch: RuntimeEventBatch): void {
@@ -310,15 +401,6 @@ export function App(): JSX.Element {
   }
 
   function applyRuntimeEvent(event: RuntimeEvent): void {
-    // The one place a reported model reaches the UI. Nothing populates it
-    // today, so the composer says the model is unreported rather than
-    // guessing one.
-    const resolved = resolvedModelFromEvent(event)
-    if (resolved) {
-      setResolvedModels((current) =>
-        current[resolved.conversationId] === resolved.model ? current : { ...current, [resolved.conversationId]: resolved.model }
-      )
-    }
     if (event.type === 'interaction.required') {
       if (event.canRespond) {
         runsAwaitingInteraction.current.add(event.runId)
@@ -397,6 +479,7 @@ export function App(): JSX.Element {
     try {
       const conversation = await orbit.conversations.create({ projectId })
       setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]))
+      setDraft(null)
       await openProject(projectId, conversation.id)
       setFocusPendingId(conversation.id)
     } catch (error) {
@@ -412,10 +495,15 @@ export function App(): JSX.Element {
   async function deleteSession(conversationId: ID): Promise<void> {
     await requireOrbitApi().conversations.delete({ conversationId })
     const remaining = conversations.filter((item) => item.id !== conversationId)
-    await refreshProject(remaining[0]?.id ?? null)
+    const next = remaining[0]?.id
+    // Deleting the last session leaves a blank chat rather than an empty
+    // workspace with nothing to type into.
+    if (!next && workspace.activeProjectId) startDraft(workspace.activeProjectId)
+    await refreshProject(next ?? 'none')
   }
 
   async function selectSession(projectId: ID, conversationId: ID): Promise<void> {
+    setDraft(null)
     if (projectId === workspace.activeProjectId) {
       setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))
       return
@@ -424,7 +512,8 @@ export function App(): JSX.Element {
   }
 
   async function send(): Promise<void> {
-    if (!workspace.activeProjectId || !activeConversation) return
+    const projectId = draft?.projectId ?? workspace.activeProjectId
+    if (!projectId || (!draft && !activeConversation)) return
     if (!composer.trim() && attachments.length === 0) return
     const content = composer.trim() || 'See the attached files.'
     const fileIds = attachments.map((attachment) => attachment.fileId)
@@ -435,29 +524,65 @@ export function App(): JSX.Element {
     setComposer('')
 
     try {
+      // A draft becomes a real conversation here and nowhere else. That is
+      // the whole reason launching Orbit leaves nothing behind: no message,
+      // no session.
+      const conversationId = draft ? await materializeDraft(draft) : activeConversation!.id
       const run = await requireOrbitApi().messages.send({
-        projectId: workspace.activeProjectId,
-        conversationId: activeConversation.id,
+        projectId,
+        conversationId,
         content,
         attachmentFileIds: fileIds
       })
-      setRunningRunByConversation((current) => ({ ...current, [activeConversation.id]: run.id }))
+      setRunningRunByConversation((current) => ({ ...current, [conversationId]: run.id }))
       setActivityByRun((current) => ({ ...current, [run.id]: emptyActivity() }))
       setAttachments([])
-      await refreshProject()
+      setDraft(null)
+      await refreshProject(conversationId)
     } catch (error) {
       setComposer(content)
       setNotice(error instanceof Error ? error.message : 'Message could not be sent.')
     }
   }
 
+  /** Creates the session a draft has been standing in for, carrying over
+   *  anything the user set on the composer before typing. Returns its id.
+   *
+   *  The model is resolved to a concrete catalogue entry here even when the
+   *  user never touched the control, so a session is never created in the
+   *  retired "no model chosen" state. */
+  async function materializeDraft(pending: DraftSession): Promise<ID> {
+    const orbit = requireOrbitApi()
+    const conversation = await orbit.conversations.create({ projectId: pending.projectId })
+    const target = concreteModelFor(pending.model, models)
+    if (target) {
+      await orbit.conversations.setModel({
+        conversationId: conversation.id,
+        model: target.id,
+        reasoningEffort: pending.reasoningEffort ?? effortForModel(target, preferences)
+      })
+    }
+    // Only ever an escalation; the runtime refuses the other direction.
+    if (pending.transport === 'pty') {
+      await orbit.conversations.setTransport({ conversationId: conversation.id, transport: 'pty' })
+    }
+    setExpandedProjectIds((current) => (current.includes(pending.projectId) ? current : [...current, pending.projectId]))
+    return conversation.id
+  }
+
   /** Escalates a session so Antigravity can stop and ask before it acts.
    *
    *  One-way by design: OrbitRuntime refuses `pty` -> `structured` because a
-   *  live interactive session cannot be un-started. The permission control
+   *  live interactive session cannot be un-started. The approvals control
    *  presents that as settled rather than offering a switch that would
    *  silently do nothing, so this is only ever called with 'pty'. */
   async function selectTransport(transport: ConversationTransport): Promise<void> {
+    // On a draft there is nothing to write to yet; the choice rides along
+    // and is applied when the session is created.
+    if (draft) {
+      setDraft((current) => (current ? { ...current, transport } : current))
+      return
+    }
     if (!activeConversation || activeConversation.transport === transport) return
     try {
       const updated = await requireOrbitApi().conversations.setTransport({ conversationId: activeConversation.id, transport })
@@ -468,7 +593,7 @@ export function App(): JSX.Element {
         }))
       )
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'That permission mode could not be applied.')
+      setNotice(error instanceof Error ? error.message : 'That approval mode could not be applied.')
     }
   }
 
@@ -512,17 +637,24 @@ export function App(): JSX.Element {
   /** Choosing a model does not choose a tier: the tier comes from what this
    *  user has chosen before, mapped onto what the new model genuinely
    *  offers. A model with no tiers lands on none. */
-  function selectModel(modelId: string | null): void {
+  function selectModel(modelId: string): void {
+    const target = concreteModelFor(modelId, models)
+    if (draft) {
+      setDraft((current) => (current ? { ...current, model: modelId, reasoningEffort: effortForModel(target, preferences) } : current))
+      return
+    }
     if (!activeConversation) return
-    const target = modelForSelection(models, modelId)
     void persistModel(activeConversation.id, modelId, effortForModel(target, preferences))
   }
 
   /** The only thing that updates the remembered preference: an explicit
    *  click or keypress on a tier. */
   function selectEffort(effort: ReasoningEffort): void {
-    if (!activeConversation) return
-    const next = rememberEffort(preferences, preferenceKeyFor(activeConversation.model), effort)
+    if (!draft && !activeConversation) return
+    // Remembered against the concrete model it was chosen on, so returning
+    // to that model returns the tier — a draft is no exception.
+    const modelKey = concreteModelFor(composerModel, models)?.id ?? composerModel
+    const next = rememberEffort(preferences, preferenceKeyFor(modelKey), effort)
     setPreferences(next)
     void requireOrbitApi()
       .preferences.set(next)
@@ -530,7 +662,11 @@ export function App(): JSX.Element {
         // A preference that failed to persist still applies to this session;
         // it simply will not be remembered next launch.
       })
-    void persistModel(activeConversation.id, activeConversation.model, effort)
+    if (draft) {
+      setDraft((current) => (current ? { ...current, reasoningEffort: effort } : current))
+      return
+    }
+    void persistModel(activeConversation!.id, activeConversation!.model, effort)
   }
 
   async function cancel(): Promise<void> {
@@ -723,6 +859,7 @@ export function App(): JSX.Element {
               projectFiles={workspace.projectFiles}
               thumbnails={thumbnails}
               activeRunId={activeRunId}
+              drafting={Boolean(draft)}
               streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
               activityByRun={activityByRun}
               pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
@@ -735,7 +872,7 @@ export function App(): JSX.Element {
 
             {blankSession ? (
               <EmptySession
-                projectName={activeProject?.name ?? null}
+                projectName={draftProject?.name ?? activeProject?.name ?? null}
                 onPick={(starter: Starter) => {
                   setComposer(starter.prompt)
                   composerFocusRef.current?.()
@@ -743,18 +880,18 @@ export function App(): JSX.Element {
               />
             ) : null}
 
-            {activeConversation ? (
+            {activeConversation || draft ? (
               <Composer
                 models={models}
-                selectedModel={activeConversation.model}
-                selectedEffort={activeConversation.reasoningEffort}
-                resolvedModelId={resolvedModels[activeConversation.id] ?? null}
+                selectedModel={composerModel}
+                selectedEffort={composerEffort}
+                transport={composerTransport}
                 onSelectModel={selectModel}
                 onSelectEffort={selectEffort}
-                project={activeProject}
+                project={draftProject ?? activeProject}
                 conversation={activeConversation}
                 projects={projects}
-                onSelectProject={(projectId) => void openProject(projectId)}
+                onSelectProject={(projectId) => void switchProject(projectId)}
                 onChangeProjectFolder={() => void changeProjectFolder()}
                 onSelectTransport={(transport) => void selectTransport(transport)}
                 registerFocus={(focus) => {
@@ -762,7 +899,7 @@ export function App(): JSX.Element {
                 }}
                 value={composer}
                 attachments={displayAttachments}
-                disabled={!activeConversation}
+                disabled={!activeConversation && !draft}
                 running={Boolean(activeRunId)}
                 replying={replying}
                 onChange={setComposer}
@@ -777,7 +914,7 @@ export function App(): JSX.Element {
               />
             ) : null}
 
-            {blankSession && activeConversation ? <ComposerHints /> : null}
+            {blankSession && (activeConversation || draft) ? <ComposerHints /> : null}
 
             {dragging ? <div className="drop-overlay">Drop to attach</div> : null}
           </main>
@@ -853,20 +990,27 @@ function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {
   return orbit
 }
 
-function workspaceConversationFor(groups: ProjectGroup[], projectId: ID, preferred?: ID | null): ID | null {
+/** Turns a requested selection into a real conversation id, or null for
+ *  "no session open". A named session that no longer exists falls back to
+ *  the project's first rather than to nothing, because it was asked for. */
+function resolveSelection(groups: ProjectGroup[], projectId: ID, select: SessionSelection): ID | null {
+  if (select === 'none') return null
   const group = groups.find((candidate) => candidate.project.id === projectId)
   if (!group) return null
-  if (preferred && group.conversations.some((conversation) => conversation.id === preferred)) return preferred
+  if (select !== 'first' && group.conversations.some((conversation) => conversation.id === select)) return select
   return group.conversations[0]?.id ?? null
 }
 
+/** `activeConversationId` is authoritative, null included: the caller has
+ *  already decided, and a silent fall-back to the first session here is what
+ *  used to make a blank launch impossible. */
 function fromSnapshot(snapshot: ProjectSnapshot, activeConversationId: ID | null): WorkspaceState {
   return {
     activeProjectId: snapshot.project.id,
     activeConversationId:
       activeConversationId && snapshot.conversations.some((conversation) => conversation.id === activeConversationId)
         ? activeConversationId
-        : (snapshot.conversations[0]?.id ?? null),
+        : null,
     messages: snapshot.messages,
     runs: snapshot.runs,
     artifacts: snapshot.artifacts,

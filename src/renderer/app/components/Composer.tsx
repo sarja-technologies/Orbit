@@ -4,8 +4,8 @@ import type { DraftAttachment } from '../lib/attachments'
 import { imageItemsFromClipboard } from '../lib/attachments'
 import { AttachmentChip } from './AttachmentChip'
 import { ComposerControlProvider } from './ComposerControl'
+import { ApprovalsControl } from './ApprovalsControl'
 import { ModelControls } from './ModelControls'
-import { PermissionControl } from './PermissionControl'
 import { ProjectControl } from './ProjectControl'
 
 interface ComposerProps {
@@ -16,16 +16,25 @@ interface ComposerProps {
   /** Set when the next message answers a question Antigravity just asked. */
   replying: boolean
   models: ModelOption[]
+  /** Always a concrete catalogue id once the catalogue is readable. null is
+   *  only the retired "no model chosen" state, which the model control
+   *  resolves for display and App settles on the session itself. */
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
-  /** The model the runtime reported for this session, if any. */
-  resolvedModelId: string | null
-  onSelectModel: (model: string | null) => void
+  /** Whether Antigravity can stop and ask during this turn. Passed
+   *  separately from `conversation` because a launch draft has one of these
+   *  and not the other. */
+  transport: ConversationTransport
+  onSelectModel: (model: string) => void
   onSelectEffort: (effort: ReasoningEffort) => void
   /** The working context the next message will act in — the project, its
    *  folder, and whether Antigravity can stop and ask about what it does
    *  there. Passed in rather than read here: the composer renders the
-   *  session's real state, it does not own it. */
+   *  session's real state, it does not own it.
+   *
+   *  `conversation` is null while the user is composing the first message of
+   *  a session that does not exist yet; `project` is not, because a fresh
+   *  chat still has a working folder. */
   project: Project | null
   conversation: Conversation | null
   projects: readonly Project[]
@@ -66,7 +75,7 @@ export function Composer({
   models,
   selectedModel,
   selectedEffort,
-  resolvedModelId,
+  transport,
   onSelectModel,
   onSelectEffort,
   project,
@@ -152,7 +161,7 @@ export function Composer({
             <PlusGlyph />
           </button>
 
-          {/* Project, Model, Permissions — the three things that decide what
+          {/* Project, Model, Approvals — the three things that decide what
               the next message will actually do, in one row, sharing one
               trigger shape and one open-at-a-time popover. */}
           <ComposerControlProvider>
@@ -170,17 +179,12 @@ export function Composer({
                 models={models}
                 selectedModel={selectedModel}
                 selectedEffort={selectedEffort}
-                resolvedModelId={resolvedModelId}
                 disabled={disabled}
                 onSelectModel={onSelectModel}
                 onSelectEffort={onSelectEffort}
               />
 
-              <PermissionControl
-                transport={conversation?.transport ?? 'structured'}
-                disabled={disabled || !conversation}
-                onSelect={onSelectTransport}
-              />
+              <ApprovalsControl transport={transport} disabled={disabled} onSelect={onSelectTransport} />
             </div>
           </ComposerControlProvider>
 

@@ -62,7 +62,7 @@ interface ComposerControlButtonProps {
 }
 
 /** The one trigger shape the three composer context controls share, so
- *  Project, Model and Permissions read as one row of the same kind of thing
+ *  Project, Model and Approvals read as one row of the same kind of thing
  *  rather than three separately-invented pills. */
 export const ComposerControlButton = forwardRef<HTMLButtonElement, ComposerControlButtonProps>(function ComposerControlButton(
   { name, icon, label, detail, unresolved, ariaLabel, title, trailing, open, disabled, tone = 'neutral', onClick },

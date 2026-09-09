@@ -8,8 +8,10 @@ import { ProviderLogo } from './ProviderLogo'
 
 interface ModelBrowserProps {
   models: ModelOption[]
+  /** The concrete id the session is on, already resolved by the caller —
+   *  this component never has to reason about what "no model" means. */
   selectedModel: string | null
-  onSelect: (modelId: string | null) => void
+  onSelect: (modelId: string) => void
   onClose: () => void
 }
 
@@ -44,24 +46,8 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
         ) : null}
       </ModalHeader>
 
+      {/* Concrete models only — every row here is a real catalogue entry. */}
       <div className="modal-body model-browser">
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={selectedModel === null}
-          className={selectedModel === null ? 'model-row selected' : 'model-row'}
-          onClick={() => onSelect(null)}
-        >
-          <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-            <AutoGlyph />
-          </span>
-          <span className="model-row-text">
-            <span className="model-row-name">Default model</span>
-            <span className="model-row-hint">Antigravity’s own choice</span>
-          </span>
-          <Tick checked={selectedModel === null} />
-        </button>
-
         {groups.map((group) => (
           <section key={group.provider.key} className="model-group">
             <h3 className="model-group-title">
@@ -127,13 +113,3 @@ export function Tick({ checked }: { checked: boolean }): JSX.Element | null {
   )
 }
 
-/** Marks the "let Antigravity decide" row. Deliberately not a provider mark:
- *  no single vendor owns that choice. */
-export function AutoGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="8" r="5.4" stroke="currentColor" strokeWidth="1.4" fill="none" strokeDasharray="2.6 2.4" />
-      <circle cx="8" cy="8" r="1.7" fill="currentColor" />
-    </svg>
-  )
-}

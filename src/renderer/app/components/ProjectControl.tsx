@@ -21,7 +21,7 @@ const CONTROL_ID = 'project'
  *
  *  Orbit's whole premise is that an agent is operating on a specific folder,
  *  and until now the only place that said so was a truncated path in the
- *  window header. It belongs next to Model and Permissions: the three
+ *  window header. It belongs next to Model and Approvals: the three
  *  things that decide what the next message will actually do.
  *
  *  The name is the control; the absolute path is detail, and stays in the

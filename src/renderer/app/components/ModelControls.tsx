@@ -3,11 +3,11 @@ import type { ModelOption, ReasoningEffort } from '@shared/domain'
 import { EFFORT_LABEL } from '../lib/modelDisplay'
 import { reasoningTheme } from '../lib/reasoningVisual'
 import { isGeminiModel, providerForModel } from '../lib/providers'
-import { describeModelForAssistiveText, describeModelSelection } from '../lib/resolvedModel'
+import { describeModel, describeModelForAssistiveText } from '../lib/modelSelection'
 import { useDismiss } from '../lib/useDismiss'
 import { modelForSelection } from '@shared/reasoningPolicy'
 import { ReasoningControl } from './ReasoningControl'
-import { ModelBrowser, ModelRow, Tick, AutoGlyph } from './ModelBrowser'
+import { ModelBrowser, ModelRow } from './ModelBrowser'
 import { ProviderLogo } from './ProviderLogo'
 import { ComposerControlButton, ComposerPopover, useComposerControl } from './ComposerControl'
 
@@ -15,15 +15,12 @@ interface ModelControlsProps {
   models: ModelOption[]
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
-  /** What Antigravity actually ran on, when the runtime has reported it.
-   *  Only ever displayed — see lib/resolvedModel.ts. */
-  resolvedModelId?: string | null
   disabled: boolean
   /** Model and effort are separate intents: App resolves which tier a newly
    *  chosen model should land on from the user's remembered preference, and
    *  only an explicit tier click updates that preference. Collapsing both
    *  into one callback would make those indistinguishable. */
-  onSelectModel: (model: string | null) => void
+  onSelectModel: (model: string) => void
   onSelectEffort: (effort: ReasoningEffort) => void
 }
 
@@ -32,11 +29,11 @@ const CONTROL_ID = 'model'
 /** One compact control in the composer footer that opens one popover:
  *  models on the left, reasoning on the right.
  *
- *  The closed control states two separate facts. What the user chose —
- *  a model, or Antigravity's own default — and, in the default case, which
- *  model that turned out to be. The second is shown only once the runtime
- *  genuinely reports it; until then the control says so quietly rather than
- *  naming a plausible model nobody verified.
+ *  The closed control names a concrete model, always. There is no "Default"
+ *  row and no "Orbit decides" state: a picker whose selected entry cannot
+ *  tell you which model you are talking to is not answering the question it
+ *  exists to answer. Orbit owns the default and settles every session onto a
+ *  real catalogue id — see lib/modelSelection.ts.
  *
  *  The popover lists Gemini only, because Antigravity is a Gemini workflow
  *  and dumping every vendor into a menu this size makes the common choice
@@ -46,7 +43,6 @@ export function ModelControls({
   models,
   selectedModel,
   selectedEffort,
-  resolvedModelId = null,
   disabled,
   onSelectModel,
   onSelectEffort
@@ -59,10 +55,11 @@ export function ModelControls({
   // not also close on the clicks and Escapes happening inside it.
   useDismiss(wrapperRef, open, () => setOpen(false), { suspended: browsing })
 
-  const display = describeModelSelection(selectedModel, models, resolvedModelId)
-  // Reasoning is asked of the selection, not the catalogue row: "Default
-  // model" has real, selectable tiers even though it has no catalogue entry.
-  const reasoningModel = modelForSelection(models, selectedModel)
+  const display = describeModel(selectedModel, models)
+  // Reasoning belongs to the concrete model the session is actually on, so a
+  // legacy session still carrying no id gets the tiers of the model Orbit
+  // has settled it onto rather than a placeholder's.
+  const reasoningModel = display.model ?? modelForSelection(models, selectedModel)
   const theme = reasoningTheme(reasoningModel, selectedEffort)
   const geminiModels = models.filter(isGeminiModel)
 
@@ -70,10 +67,8 @@ export function ModelControls({
     <div className="composer-control model-control" ref={wrapperRef}>
       <ComposerControlButton
         name="Model"
-        icon={display.model ? <ProviderLogo provider={providerForModel(display.model)} size={15} /> : <AutoGlyph />}
-        label={display.primary}
-        detail={display.secondary}
-        unresolved={display.unresolved ? 'not reported' : null}
+        icon={<ProviderLogo provider={providerForModel(display.model)} size={15} />}
+        label={display.label}
         ariaLabel="Model and reasoning"
         title={models.length === 0 ? 'Antigravity’s model list is unavailable' : describeModelForAssistiveText(display)}
         open={open}
@@ -96,30 +91,11 @@ export function ModelControls({
           <div className="model-popover-body">
             <section className="popover-pane pane-models">
               <h3 className="pane-title">AI Model</h3>
+              {/* Concrete models only. The row that used to sit above these
+                  and mean "let Antigravity decide" is gone. */}
               <div className="model-list">
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selectedModel === null}
-                  className={selectedModel === null ? 'model-row selected' : 'model-row'}
-                  onClick={() => onSelectModel(null)}
-                >
-                  <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-                    <AutoGlyph />
-                  </span>
-                  <span className="model-row-text">
-                    <span className="model-row-name">Default model</span>
-                    <span className="model-row-hint">
-                      {display.mode === 'default' && display.secondary
-                        ? `Antigravity’s own choice · ${display.secondary}`
-                        : 'Antigravity’s own choice'}
-                    </span>
-                  </span>
-                  <Tick checked={selectedModel === null} />
-                </button>
-
                 {geminiModels.map((model) => (
-                  <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelectModel(model.id)} />
+                  <ModelRow key={model.id} model={model} selected={model.id === display.id} onSelect={() => onSelectModel(model.id)} />
                 ))}
               </div>
 

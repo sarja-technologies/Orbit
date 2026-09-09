@@ -1208,6 +1208,14 @@ textarea {
   color: var(--text-muted);
 }
 
+/* A blank chat has no transcript at all. It still holds the top of the
+   column so the invitation and the composer settle into the optical centre
+   rather than climbing to the ceiling. */
+.transcript-drafting {
+  flex: 1;
+  min-height: 0;
+}
+
 .turn {
   display: flex;
   flex-direction: column;
@@ -2189,7 +2197,7 @@ textarea {
 
 /* ---------- composer context controls ---------- */
 
-/* Project, Model and Permissions are three answers to the same question —
+/* Project, Model and Approvals are three answers to the same question —
    what will the next message actually do — so they share one trigger shape,
    one popover shell and one open-at-a-time rule. They are grouped rather
    than spread across the footer so the row reads as a single statement of
@@ -2234,7 +2242,7 @@ textarea {
 }
 
 /* Reserved for a mode that can act without asking. No mode Orbit supports
-   today is one — see lib/permissionModes.ts — so nothing sets this yet; it
+   today is one — see lib/approvalModes.ts — so nothing sets this yet; it
    exists so such a mode arrives already marked rather than looking like
    every other setting. */
 .composer-control-trigger[data-tone='caution'] {
@@ -2435,10 +2443,6 @@ textarea {
   place-items: center;
   width: 22px;
   height: 22px;
-}
-
-.model-row-mark-default {
-  color: var(--text-muted);
 }
 
 .model-row-text {
@@ -2660,15 +2664,15 @@ textarea {
   text-align: left;
 }
 
-/* ---------- permission control ---------- */
+/* ---------- approvals control ---------- */
 
-.permission-list {
+.approval-list {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
 
-.permission-row {
+.approval-row {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
@@ -2679,21 +2683,21 @@ textarea {
   color: var(--text-secondary);
 }
 
-.permission-row:hover:not(:disabled) {
+.approval-row:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-.permission-row.selected {
+.approval-row.selected {
   background: var(--bg-selected);
   color: var(--text-primary);
 }
 
-.permission-row .model-tick {
+.approval-row .model-tick {
   margin-top: 2px;
 }
 
-.permission-row-text {
+.approval-row-text {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -2701,16 +2705,16 @@ textarea {
   min-width: 0;
 }
 
-.permission-row-name {
+.approval-row-name {
   font-size: var(--text-meta);
   font-weight: 600;
 }
 
-.permission-row[data-tone='caution'] .permission-row-name {
+.approval-row[data-tone='caution'] .approval-row-name {
   color: var(--attention);
 }
 
-.permission-row-body {
+.approval-row-body {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--text-muted);
@@ -2718,14 +2722,14 @@ textarea {
 
 /* The real internal identifier, as a detail line rather than as the
    control's own name. */
-.permission-row-technical {
+.approval-row-technical {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-muted);
   opacity: 0.75;
 }
 
-.permission-row-blocked {
+.approval-row-blocked {
   font-size: 11px;
   color: var(--text-muted);
   font-style: italic;
