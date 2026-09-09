@@ -33,6 +33,12 @@ The provider maps native stream events into Orbit-neutral events:
 
 The native `conversation_id` is stored on the Orbit conversation and supplied as `--conversation` on later runs. This preserves actual Antigravity conversation context and keeps separate Orbit conversations isolated.
 
+## Projects, sessions and naming
+
+A project owns the workspace configuration — its name and the real folder `agy` runs in — so creating one opens a dialog. A session owns nothing: it is created in one click with no dialog, inherits its project's folder, and starts life called `New Session`.
+
+Session naming is Orbit's concern, not Antigravity's. `agy` 1.1.28 exposes no conversation title Orbit can read live: `history.jsonl` records only prompt/timestamp/workspace/conversationId; `conversation_summaries.db` has a `title` column but is written only for gracefully-exited sessions (Orbit's cancel and shutdown paths kill `agy` abruptly, and the table was empty in practice); the per-conversation `conversations/<id>.db` files have no title at all. So `OrbitRuntime.sendMessage` derives a short title locally from the user's first substantive prompt (`src/shared/sessionTitle.ts`) — deterministic and synchronous, costing no second `agy` process and never able to delay or fail a turn. It applies at most once, only while the session still carries the default title, and never over a title the user set themselves (`conversations.title_is_custom`).
+
 ## Security and authentication
 
 The renderer receives only the typed preload API. It cannot launch a process, control a PTY, access raw IPC, access credentials, or read arbitrary paths.

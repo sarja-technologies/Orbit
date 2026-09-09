@@ -11,6 +11,7 @@ import { OrbitRuntime } from '../../src/main/runtime/orbitRuntime'
 import type { AgentProvider, ProviderSendInput } from '../../src/main/runtime/provider'
 import type { ProviderStatus } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
 
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
@@ -230,6 +231,106 @@ describe('OrbitRuntime', () => {
     // A deleted folder must not fail the turn — the session keeps working in
     // Orbit's own workspace for that project.
     expect(provider.lastInput?.workspacePath).toBe(path.join(dir, 'projects', project.id, 'workspace'))
+  })
+
+  it('creates a session that needs nothing configured: default name, project folder', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
+    const project = runtime.createProject('Instant', projectDir)
+    const session = runtime.createConversation(project.id)
+
+    expect(session.projectId).toBe(project.id)
+    expect(session.title).toBe(DEFAULT_SESSION_TITLE)
+    // No folder of its own means "the project's" — resolved at send time.
+    expect(session.workingDirectory).toBeNull()
+    await runtime.sendMessage({ projectId: project.id, conversationId: session.id, content: 'Hi' })
+    await vi.waitFor(() => expect(provider.lastInput?.conversationId).toBe(session.id))
+    expect(provider.lastInput?.workspacePath).toBe(projectDir)
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('seeds a brand-new project with a session under the same default name', () => {
+    const project = runtime.createProject('Fresh')
+    expect(runtime.openProject(project.id).conversations.map((item) => item.title)).toEqual([DEFAULT_SESSION_TITLE])
+  })
+
+  it('names a session from its first prompt', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+
+    await runtime.sendMessage({
+      projectId: project.id,
+      conversationId: session.id,
+      content: 'build me a futuristic robotics landing page'
+    })
+
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Futuristic Robotics Landing Page')
+  })
+
+  it('names a session once and then leaves it alone', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+    const send = (content: string): Promise<unknown> =>
+      runtime.sendMessage({ projectId: project.id, conversationId: session.id, content })
+
+    await send('build me a futuristic robotics landing page')
+    await send('now make the hero section darker')
+    await send('and add a pricing table underneath')
+
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Futuristic Robotics Landing Page')
+  })
+
+  it('never renames a session the user named themselves', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+    runtime.renameConversation(session.id, 'Ship checklist')
+
+    await runtime.sendMessage({
+      projectId: project.id,
+      conversationId: session.id,
+      content: 'build me a futuristic robotics landing page'
+    })
+
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Ship checklist')
+  })
+
+  it('keeps the default name when the first prompt says nothing worth naming, and lets the next one name it', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+    const send = (content: string): Promise<unknown> =>
+      runtime.sendMessage({ projectId: project.id, conversationId: session.id, content })
+
+    await send('hi')
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe(DEFAULT_SESSION_TITLE)
+
+    await send('refactor the payment service')
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Refactor the Payment Service')
+  })
+
+  it('sends the prompt even when it cannot be turned into a title', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: session.id, content: 'hi' })
+
+    // Titling is never a gate on the turn: the message is stored, the run
+    // exists, and the provider got it.
+    await vi.waitFor(() => expect(provider.lastInput?.runId).toBe(run.id))
+    expect(runtime.openProject(project.id).messages.some((message) => message.content === 'hi')).toBe(true)
+  })
+
+  it('leaves a session named after its first prompt renameable by the user', async () => {
+    const project = runtime.createProject('Naming')
+    const session = runtime.createConversation(project.id)
+    await runtime.sendMessage({
+      projectId: project.id,
+      conversationId: session.id,
+      content: 'build me a futuristic robotics landing page'
+    })
+
+    runtime.renameConversation(session.id, 'Landing page v2')
+    await runtime.sendMessage({ projectId: project.id, conversationId: session.id, content: 'design a dark mode palette' })
+
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Landing page v2')
   })
 
   it('starts a session on the reasoning tier the user last chose', () => {

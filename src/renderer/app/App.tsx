@@ -21,8 +21,8 @@ import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor,
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
-import { ProjectSidebar, type CreateIntent, type SessionIndicator } from './components/ProjectSidebar'
-import { CreateProjectDialog, CreateSessionDialog } from './components/CreateDialogs'
+import { ProjectSidebar, type SessionIndicator } from './components/ProjectSidebar'
+import { CreateProjectDialog } from './components/CreateDialogs'
 import { WorkSession, type ResolvedRecord } from './components/WorkSession'
 import { WorkspaceRail } from './components/WorkspaceRail'
 import { Composer } from './components/Composer'
@@ -77,7 +77,12 @@ export function App(): JSX.Element {
   const [staleRunIds, setStaleRunIds] = useState<string[]>([])
   const [contextTab, setContextTab] = useState<ContextTab | null>(null)
   const [expandedProjectIds, setExpandedProjectIds] = useState<ID[]>(readExpanded)
-  const [creating, setCreating] = useState<CreateIntent | null>(null)
+  const [creatingProject, setCreatingProject] = useState(false)
+  /** The session a just-finished create is waiting to hand the composer to.
+   *  Focus cannot be taken at create time: the composer for a brand-new
+   *  session has not mounted yet, and for the first session in the app it
+   *  does not exist at all. Cleared by the effect that lands the focus. */
+  const [focusPendingId, setFocusPendingId] = useState<ID | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
@@ -177,6 +182,17 @@ export function App(): JSX.Element {
   useEffect(() => {
     writeExpanded(expandedProjectIds)
   }, [expandedProjectIds])
+
+  // A new session lands the user in the composer, ready to type. This waits
+  // for the session to actually be the active one, because that is the
+  // render that mounts the composer and registers its focus callback (a
+  // child effect, so it has already run by the time this one does).
+  useEffect(() => {
+    if (!focusPendingId) return
+    if (workspace.activeConversationId !== focusPendingId) return
+    composerFocusRef.current?.()
+    setFocusPendingId(null)
+  }, [focusPendingId, workspace.activeConversationId])
 
   // A session carried over from before Orbit had a reasoning preference has
   // no tier at all. Rather than leaving it on "Auto" forever, settle it once
@@ -346,7 +362,7 @@ export function App(): JSX.Element {
     const orbit = requireOrbitApi()
     try {
       const project = await orbit.projects.create({ name: input.name, rootPath: input.rootPath })
-      setCreating(null)
+      setCreatingProject(false)
       setExpandedProjectIds((current) => (current.includes(project.id) ? current : [...current, project.id]))
       await openProject(project.id)
     } catch (error) {
@@ -354,18 +370,18 @@ export function App(): JSX.Element {
     }
   }
 
-  async function createSession(input: { projectId: ID; title: string | null; workingDirectory: string | null }): Promise<void> {
+  /** One click, one session. Nothing is asked for: the session belongs to
+   *  the project whose control was used, inherits that project's folder
+   *  (no workingDirectory means exactly that), and is called `New Session`
+   *  until its first prompt names it. It is then opened and handed the
+   *  composer so the user can just start typing. */
+  async function createSession(projectId: ID): Promise<void> {
     const orbit = requireOrbitApi()
     try {
-      const conversation = await orbit.conversations.create({
-        projectId: input.projectId,
-        ...(input.title ? { title: input.title } : {}),
-        workingDirectory: input.workingDirectory
-      })
-      setCreating(null)
-      setExpandedProjectIds((current) => (current.includes(input.projectId) ? current : [...current, input.projectId]))
-      await openProject(input.projectId, conversation.id)
-      composerFocusRef.current?.()
+      const conversation = await orbit.conversations.create({ projectId })
+      setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]))
+      await openProject(projectId, conversation.id)
+      setFocusPendingId(conversation.id)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That session could not be created.')
     }
@@ -597,7 +613,8 @@ export function App(): JSX.Element {
           )
         }
         onSelectSession={(projectId, conversationId) => void selectSession(projectId, conversationId)}
-        onCreate={setCreating}
+        onNewProject={() => setCreatingProject(true)}
+        onNewSession={(projectId) => void createSession(projectId)}
         onRename={(conversationId, title) => void renameSession(conversationId, title)}
         onDelete={(conversationId) => void deleteSession(conversationId)}
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
@@ -714,23 +731,13 @@ export function App(): JSX.Element {
         </div>
       </div>
 
-      {creating?.kind === 'project' ? (
+      {/* A project is the only thing that still needs configuring before it
+          can exist: its name, and the folder Antigravity will run in. */}
+      {creatingProject ? (
         <CreateProjectDialog
-          onCancel={() => setCreating(null)}
+          onCancel={() => setCreatingProject(false)}
           onCreate={(input) => void createProject(input)}
           pickFolder={() => requireOrbitApi().dialog.pickFolder({ title: 'Choose the project folder' })}
-        />
-      ) : null}
-
-      {creating?.kind === 'session' && projects.length > 0 ? (
-        <CreateSessionDialog
-          projects={projects}
-          initialProjectId={creating.projectId ?? workspace.activeProjectId}
-          onCancel={() => setCreating(null)}
-          onCreate={(input) => void createSession(input)}
-          pickFolder={(defaultPath) =>
-            requireOrbitApi().dialog.pickFolder({ title: 'Choose the session folder', defaultPath })
-          }
         />
       ) : null}
     </div>

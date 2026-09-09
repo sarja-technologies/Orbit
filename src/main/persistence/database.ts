@@ -44,7 +44,12 @@ export class OrbitDatabase {
       // means "the Orbit-managed workspace" — the same folder they have
       // always run in — so no session loses its history or its location.
       'ALTER TABLE projects ADD COLUMN root_path TEXT',
-      'ALTER TABLE conversations ADD COLUMN working_directory TEXT'
+      'ALTER TABLE conversations ADD COLUMN working_directory TEXT',
+      // Marks a title the user chose themselves, so first-prompt
+      // auto-titling can never overwrite one. Existing rows default to 0:
+      // they were all named before auto-titling existed and none of them
+      // carries the default title, so none is a candidate anyway.
+      'ALTER TABLE conversations ADD COLUMN title_is_custom INTEGER NOT NULL DEFAULT 0'
     ]
     for (const migration of migrations) {
       try {

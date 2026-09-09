@@ -4,6 +4,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OrbitDatabase } from '../../src/main/persistence/database'
 import { OrbitStore } from '../../src/main/persistence/store'
+import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
 
 let dir = ''
 let db: OrbitDatabase
@@ -154,6 +155,74 @@ describe('OrbitStore', () => {
     expect(store.readPreferences().lastReasoningEffort).toBe('medium')
   })
 
+  it('names an unnamed session New Session, so first-prompt titling can claim it', () => {
+    const project = store.createProject('Naming')
+    expect(store.createConversation(project.id, '').title).toBe(DEFAULT_SESSION_TITLE)
+    expect(store.createConversation(project.id, '   ').title).toBe(DEFAULT_SESSION_TITLE)
+  })
+
+  it('auto-titles a session that still carries the default name', () => {
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+
+    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')?.title).toBe('Robotics Landing Page')
+    expect(store.getConversation(session.id)?.title).toBe('Robotics Landing Page')
+  })
+
+  it('auto-titles at most once, because the default name is gone afterwards', () => {
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+    store.autoTitleConversation(session.id, 'Robotics Landing Page')
+
+    // Whatever a later message would have derived, the session is named.
+    expect(store.autoTitleConversation(session.id, 'Something Else')).toBeNull()
+    expect(store.getConversation(session.id)?.title).toBe('Robotics Landing Page')
+  })
+
+  it('never auto-titles over a name the user chose', () => {
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+    store.renameConversation(session.id, 'Ship checklist')
+
+    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.getConversation(session.id)?.title).toBe('Ship checklist')
+  })
+
+  it('never auto-titles over a user who renamed a session back to the default', () => {
+    // The title alone cannot tell these apart, which is exactly why the
+    // store records that the user chose it.
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+    store.renameConversation(session.id, 'Draft')
+    store.renameConversation(session.id, DEFAULT_SESSION_TITLE)
+
+    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.getConversation(session.id)?.title).toBe(DEFAULT_SESSION_TITLE)
+  })
+
+  it('declines an empty auto-title rather than blanking the session name', () => {
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+
+    expect(store.autoTitleConversation(session.id, '   ')).toBeNull()
+    expect(store.getConversation(session.id)?.title).toBe(DEFAULT_SESSION_TITLE)
+  })
+
+  it('remembers a user-chosen name across database instances', async () => {
+    const project = store.createProject('Naming')
+    const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
+    store.renameConversation(session.id, 'Ship checklist')
+    db.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    // The flag is persisted, not merely in-memory for this launch.
+    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.getConversation(session.id)?.title).toBe('Ship checklist')
+  })
+
   it('opens a database written before projects and sessions had folders', async () => {
     // Exactly the pre-migration shape: no root_path, no working_directory.
     db.close()
@@ -188,5 +257,49 @@ describe('OrbitStore', () => {
     expect(tree[0]?.project.rootPath).toBeNull()
     expect(tree[0]?.conversations.map((item) => item.title)).toEqual(['Old session'])
     expect(tree[0]?.conversations[0]?.workingDirectory).toBeNull()
+
+    // The title column added for auto-titling migrated in too, and a stored
+    // session keeps working: it is named, so it is never a titling
+    // candidate, and it can still be renamed and sent to.
+    expect(store.autoTitleConversation('c1', 'Something Derived')).toBeNull()
+    expect(store.renameConversation('c1', 'Renamed session').title).toBe('Renamed session')
+    expect(store.getConversation('c1')?.title).toBe('Renamed session')
+  })
+
+  it('auto-titles a stored session that predates the title_is_custom column', async () => {
+    // The case above never reads title_is_custom: its session is named, so
+    // the title check declines first. A stored session actually *called*
+    // `New Session` is the one that reaches the migrated column — and if
+    // reading it ever threw, the runtime's catch would swallow it and the
+    // session would silently never be titled again.
+    db.close()
+    fs.rmSync(path.join(dir, 'orbit.sqlite'), { force: true })
+    const legacy = new OrbitDatabase({ dataDir: dir })
+    await legacy.init()
+    legacy.exec('DROP TABLE conversations; DROP TABLE projects;')
+    legacy.exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
+    legacy.exec(
+      `CREATE TABLE conversations (
+         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, provider_id TEXT NOT NULL,
+         native_conversation_id TEXT, status TEXT NOT NULL, transport TEXT NOT NULL DEFAULT 'structured',
+         model TEXT, reasoning_effort TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`
+    )
+    legacy.run('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', ['p1', 'Legacy', 'now', 'now'])
+    legacy.run(
+      `INSERT INTO conversations (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['c1', 'p1', DEFAULT_SESSION_TITLE, 'antigravity', null, 'idle', 'structured', null, null, 'now', 'now']
+    )
+    legacy.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    // The migration backfills 0, so the session is still Orbit's to name.
+    expect(store.autoTitleConversation('c1', 'Robotics Landing Page')?.title).toBe('Robotics Landing Page')
+    expect(store.getConversation('c1')?.title).toBe('Robotics Landing Page')
+    // ...and having been named, it is done: no second rename.
+    expect(store.autoTitleConversation('c1', 'Something Else')).toBeNull()
   })
 })

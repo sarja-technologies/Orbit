@@ -23,6 +23,7 @@ import type {
 import type { RuntimeEvent } from '@shared/runtime-events'
 import { createId, nowIso } from '@main/util/ids'
 import { normalizePreferences } from '@shared/reasoningPolicy'
+import { DEFAULT_SESSION_TITLE, hasDefaultSessionTitle } from '@shared/sessionTitle'
 import { jsonParseObject, jsonStringify, nullableText, numberValue, OrbitDatabase, text } from './database'
 
 /** Where cross-session preferences live in the `meta` key/value table. */
@@ -105,7 +106,7 @@ export class OrbitStore {
     const conversation: Conversation = {
       id: createId('conversation'),
       projectId,
-      title: title.trim() || 'Main',
+      title: title.trim() || DEFAULT_SESSION_TITLE,
       providerId: options.providerId ?? 'antigravity',
       nativeConversationId: null,
       status: 'idle',
@@ -183,12 +184,47 @@ export class OrbitStore {
     return this.requireConversation(conversationId)
   }
 
+  /** A rename the user asked for. It also marks the title as theirs, which
+   *  is what stops first-prompt auto-titling from ever replacing it — see
+   *  autoTitleConversation. */
   renameConversation(conversationId: ID, title: string): Conversation {
     const conversation = this.requireConversation(conversationId)
     const updated = { ...conversation, title: title.trim() || conversation.title, updatedAt: nowIso() }
-    this.db.run('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?', [updated.title, updated.updatedAt, conversationId])
+    this.db.run('UPDATE conversations SET title = ?, title_is_custom = 1, updated_at = ? WHERE id = ?', [
+      updated.title,
+      updated.updatedAt,
+      conversationId
+    ])
     this.touchProject(updated.projectId)
     return updated
+  }
+
+  /** Orbit naming a session after the prompt that started it. Deliberately
+   *  narrow: it applies only while the session still carries the default
+   *  title *and* the user has never renamed it, and it does not claim the
+   *  title afterwards — so it can happen at most once, and a later manual
+   *  rename still wins for good. Returns null when it declined, which is a
+   *  normal outcome and never an error. */
+  autoTitleConversation(conversationId: ID, title: string): Conversation | null {
+    const conversation = this.requireConversation(conversationId)
+    if (!hasDefaultSessionTitle(conversation.title)) return null
+    if (this.isTitleCustom(conversationId)) return null
+    const next = title.trim()
+    if (!next) return null
+    const updatedAt = nowIso()
+    this.db.run('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?', [next, updatedAt, conversationId])
+    this.touchProject(conversation.projectId)
+    return { ...conversation, title: next, updatedAt }
+  }
+
+  /** Whether this session's name was chosen by the user rather than Orbit.
+   *  Kept out of the `Conversation` shape on purpose: nothing outside this
+   *  store's titling rules has any use for it. */
+  private isTitleCustom(conversationId: ID): boolean {
+    const value = this.db.get<number>('SELECT title_is_custom FROM conversations WHERE id = ?', [conversationId], (row) =>
+      numberValue(row, 'title_is_custom')
+    )
+    return (value ?? 0) !== 0
   }
 
   updateConversationNativeId(conversationId: ID, nativeConversationId: string | null): void {

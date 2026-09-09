@@ -24,6 +24,7 @@ import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
 import { effortForNewSession } from '@shared/reasoningPolicy'
+import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 
 interface ActiveRunState {
@@ -67,7 +68,7 @@ export class OrbitRuntime extends EventEmitter {
   createProject(name: string, rootPath: string | null = null): Project {
     if (!name.trim()) throw new Error('Project name is required.')
     const project = this.store.createProject(name, rootPath)
-    this.createConversation(project.id, 'Main')
+    this.createConversation(project.id)
     return project
   }
 
@@ -82,8 +83,13 @@ export class OrbitRuntime extends EventEmitter {
   /** New sessions open on the reasoning level the user last chose (medium
    *  until they ever choose one). Antigravity accepts `--effort` without
    *  `--model`, so this is a real setting from the very first turn rather
-   *  than an inert default. */
-  createConversation(projectId: ID, title = 'New conversation', workingDirectory: string | null = null): Conversation {
+   *  than an inert default.
+   *
+   *  A session needs nothing from the user to exist: no name (it starts as
+   *  `New Session` and names itself from the first prompt — see
+   *  sessionTitle.ts) and no folder of its own (null means it inherits the
+   *  project's, which is what resolveWorkspacePath already does). */
+  createConversation(projectId: ID, title = DEFAULT_SESSION_TITLE, workingDirectory: string | null = null): Conversation {
     return this.store.createConversation(projectId, title, {
       workingDirectory,
       reasoningEffort: effortForNewSession(this.store.readPreferences())
@@ -130,6 +136,7 @@ export class OrbitRuntime extends EventEmitter {
       content: input.content,
       status: 'completed'
     })
+    this.nameSessionFromPrompt(conversation.id, input.content)
     const run = this.store.createRun({
       projectId: project.id,
       conversationId: conversation.id,
@@ -191,6 +198,25 @@ export class OrbitRuntime extends EventEmitter {
       })
 
     return run
+  }
+
+  /** Gives a still-unnamed session a name from the prompt the user just
+   *  sent. Lives here rather than in the renderer so it holds for every
+   *  route into a turn, and so the sidebar picks it up from the same
+   *  project refresh it already does after a send.
+   *
+   *  Deliberately fail-safe on both sides: the store declines unless the
+   *  session is genuinely still Orbit's to name (see autoTitleConversation),
+   *  and anything that goes wrong here leaves the session as `New Session`
+   *  without touching the message that is on its way out. Naming a session
+   *  is never a reason not to send a prompt. */
+  private nameSessionFromPrompt(conversationId: ID, prompt: string): void {
+    try {
+      const title = deriveSessionTitle(prompt)
+      if (title) this.store.autoTitleConversation(conversationId, title)
+    } catch {
+      // The session keeps its default name; the turn proceeds regardless.
+    }
   }
 
   async cancelRun(runId: ID): Promise<Run> {
