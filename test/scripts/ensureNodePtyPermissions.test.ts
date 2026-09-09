@@ -6,8 +6,27 @@ import { afterEach, describe, expect, it } from 'vitest'
 // `postinstall` can run it with no build step.
 import { EXECUTABLE_BITS, ensureNodePtyPermissions, helperDirs, nativeSearchDirs, resolveNodePtyRoot } from '../../scripts/ensureNodePtyPermissions.mjs'
 
+// NTFS cannot model Unix executable bits. Keep the real filesystem for
+// layout/errors, and model only mode bits on Windows. Unix uses real chmod;
+// the installed-package integration tests below always use the real fs.
+const fixtureModes = new Map<string, number>()
+const fixtureFs = process.platform === 'win32' ? {
+  ...fs,
+  statSync(file: string) {
+    const stat = fs.statSync(file)
+    const mode = fixtureModes.get(file)
+    if (mode !== undefined) stat.mode = (stat.mode & ~0o777) | mode
+    return stat
+  },
+  chmodSync(file: string, mode: number) {
+    fs.statSync(file) // Still reject missing files.
+    fixtureModes.set(file, mode & 0o777)
+  }
+} : fs
+
 const dirs: string[] = []
 afterEach(() => {
+  fixtureModes.clear()
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
 })
 
@@ -22,13 +41,13 @@ function fakeNodePty(layout: Record<string, { native?: boolean; helper?: number 
     if (spec.helper !== false && spec.helper !== undefined) {
       const helper = path.join(root, dir, 'spawn-helper')
       fs.writeFileSync(helper, 'binary')
-      fs.chmodSync(helper, spec.helper)
+      fixtureFs.chmodSync(helper, spec.helper)
     }
   }
   return root
 }
 
-const modeOf = (file: string): number => fs.statSync(file).mode & 0o777
+const modeOf = (file: string): number => fixtureFs.statSync(file).mode & 0o777
 
 describe('ensureNodePtyPermissions', () => {
   it('makes the shipped macOS helper executable, which is the actual bug', () => {
@@ -39,7 +58,7 @@ describe('ensureNodePtyPermissions', () => {
       'prebuilds/darwin-x64': { native: true, helper: 0o644 }
     })
 
-    const result = ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })
+    const result = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })
 
     expect(result.fixed).toHaveLength(2)
     expect(modeOf(path.join(root, 'prebuilds/darwin-arm64/spawn-helper'))).toBe(0o755)
@@ -57,7 +76,7 @@ describe('ensureNodePtyPermissions', () => {
       'prebuilds/darwin-x64': { native: true, helper: 0o644 }
     })
 
-    ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'x64' })
+    ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'x64' })
 
     expect(modeOf(path.join(root, 'prebuilds/darwin-arm64/spawn-helper'))).toBe(0o755)
     expect(modeOf(path.join(root, 'prebuilds/darwin-x64/spawn-helper'))).toBe(0o755)
@@ -65,14 +84,14 @@ describe('ensureNodePtyPermissions', () => {
 
   it('preserves the rest of the mode instead of forcing one', () => {
     const root = fakeNodePty({ 'prebuilds/darwin-arm64': { native: true, helper: 0o600 } })
-    ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })
+    ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })
     expect(modeOf(path.join(root, 'prebuilds/darwin-arm64/spawn-helper'))).toBe(0o711)
   })
 
   it('is idempotent: a second run changes nothing', () => {
     const root = fakeNodePty({ 'prebuilds/darwin-arm64': { native: true, helper: 0o644 } })
-    expect(ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' }).fixed).toHaveLength(1)
-    const second = ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })
+    expect(ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' }).fixed).toHaveLength(1)
+    const second = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })
     expect(second.fixed).toHaveLength(0)
     expect(second.alreadyExecutable).toHaveLength(1)
   })
@@ -82,7 +101,7 @@ describe('ensureNodePtyPermissions', () => {
     // and node-pty's binding.gyp builds spawn-helper only for `OS=="mac"`,
     // so there is genuinely no helper next to the module it just compiled.
     const root = fakeNodePty({ 'build/Release': { native: true, helper: false } })
-    const result = ensureNodePtyPermissions({ packageRoot: root, platform: 'linux', arch: 'x64' })
+    const result = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'linux', arch: 'x64' })
     expect(result.fixed).toHaveLength(0)
     expect(result.runtimeHelper).toBeNull()
   })
@@ -92,7 +111,7 @@ describe('ensureNodePtyPermissions', () => {
     // install outright, because `postinstall` throws and takes `npm install`
     // down with it.
     const root = fakeNodePty({ 'build/Release': { native: true, helper: false } })
-    expect(() => ensureNodePtyPermissions({ packageRoot: root, platform: 'linux', arch: 'x64' })).not.toThrow()
+    expect(() => ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'linux', arch: 'x64' })).not.toThrow()
   })
 
   it('still fixes darwin prebuilds when a non-darwin install is what runs', () => {
@@ -103,7 +122,7 @@ describe('ensureNodePtyPermissions', () => {
       'build/Release': { native: true, helper: false },
       'prebuilds/darwin-arm64': { native: true, helper: 0o644 }
     })
-    const result = ensureNodePtyPermissions({ packageRoot: root, platform: 'linux', arch: 'x64' })
+    const result = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'linux', arch: 'x64' })
     expect(result.fixed).toEqual([path.join(root, 'prebuilds/darwin-arm64/spawn-helper')])
     expect(modeOf(path.join(root, 'prebuilds/darwin-arm64/spawn-helper'))).toBe(0o755)
   })
@@ -113,27 +132,31 @@ describe('ensureNodePtyPermissions', () => {
       'build/Release': { native: true, helper: 0o644 },
       'prebuilds/darwin-arm64': { native: true, helper: 0o644 }
     })
-    const result = ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })
+    const result = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })
     expect(result.runtimeHelper).toBe(path.join(root, 'build/Release/spawn-helper'))
   })
 
   it('does nothing on Windows, which has no spawn-helper and no executable bit', () => {
     const root = fakeNodePty({ 'prebuilds/win32-x64': { native: true, helper: false } })
-    const result = ensureNodePtyPermissions({ packageRoot: root, platform: 'win32', arch: 'x64' })
+    const result = ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'win32', arch: 'x64' })
     expect(result.skipped).toBe('win32')
     expect(result.fixed).toHaveLength(0)
+    expect(ensureNodePtyPermissions({
+      packageRoot: root, platform: 'win32', arch: 'x64',
+      fs: new Proxy({}, { get() { throw new Error('Windows must not access Unix permissions') } })
+    }).skipped).toBe('win32')
   })
 
   it('fails loudly when the helper the runtime needs is missing', () => {
     // A broken install must not look like a successful one — otherwise it
     // resurfaces much later as an unexplained `posix_spawnp failed`.
     const root = fakeNodePty({ 'prebuilds/darwin-arm64': { native: true, helper: false } })
-    expect(() => ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })).toThrow(/spawn-helper is missing beside it/)
+    expect(() => ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })).toThrow(/spawn-helper is missing beside it/)
   })
 
   it('fails loudly when there is no native module for this platform at all', () => {
     const root = fakeNodePty({ 'prebuilds/darwin-x64': { native: true, helper: 0o644 } })
-    expect(() => ensureNodePtyPermissions({ packageRoot: root, platform: 'darwin', arch: 'arm64' })).toThrow(/has no pty.node for darwin-arm64/)
+    expect(() => ensureNodePtyPermissions({ packageRoot: root, fs: fixtureFs, platform: 'darwin', arch: 'arm64' })).toThrow(/has no pty.node for darwin-arm64/)
   })
 
   it('tolerates a package with no prebuilds directory', () => {
@@ -174,7 +197,7 @@ describe('the real installed node-pty', () => {
     expect(fs.statSync(helper).mode & 0o111).toBe(0o111)
   })
 
-  it.runIf(process.platform !== 'win32')('runs clean against the real install', () => {
+  it('runs clean against the real install', () => {
     // The postinstall script itself must succeed here — it runs on every
     // `npm install`, so throwing takes the whole dependency install down.
     expect(() => ensureNodePtyPermissions({ packageRoot: resolveNodePtyRoot(), platform: process.platform, arch: process.arch })).not.toThrow()

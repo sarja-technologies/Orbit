@@ -16,8 +16,10 @@ A conversation can also be switched into interactive mode, which keeps a persist
 
 ## Development
 
+Use Node.js 22 (see `.nvmrc`); Electron 33 supplies the desktop runtime.
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -47,3 +49,26 @@ npm run verify
 `npm run test:agy` runs additional tests against the real, installed, signed-in `agy` CLI (both structured and interactive PTY transports) — opt-in via `ORBIT_REAL_AGY=1`, skipped otherwise.
 
 The retired Python SDK worker has been removed. Orbit has one production Antigravity backend: the native `agy` transport.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs `npm ci` and `npm run verify` on Ubuntu,
+macOS, and Windows for every PR into `main` and every push to `main`.
+The checks are `Verify (ubuntu-latest)`, `Verify (macos-latest)`, and
+`Verify (windows-latest)`. npm caching stores downloads, not `node_modules`;
+each OS runs the repository-owned postinstall repair from a clean install.
+
+All platforms run typecheck, deterministic main/renderer/shared/script tests,
+and the main/preload/renderer builds. The three real Unix PTY signal tests
+are Unix-only because Windows has different process termination semantics.
+Unix helper permission tests use real chmod on Unix and modeled mode bits on
+Windows; installed-package checks use the actual host filesystem. Structured
+stream fixtures run through Node on every OS, preserving real child-process
+pipes and cancellation without relying on Unix shebang execution. Fixtures
+wait for process exit before removing workspaces (required by Windows locks).
+Mocked provider tests isolate executable discovery and temporary workspaces,
+so the deterministic suite needs no installed AGY even on a developer machine.
+
+Live AGY tests are deliberately excluded (`ORBIT_REAL_AGY=0`): they need a
+signed-in account, network access, and model availability. Green CI does not
+certify live AGY, desktop UI, or Windows PTY/clipboard behavior.

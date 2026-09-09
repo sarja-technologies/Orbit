@@ -1,10 +1,28 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ID, ModelOption } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+
+let workspaceRoot: string
+beforeEach(() => {
+  workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-provider-test-'))
+  // Discovery needs an existing absolute executable, but execution is mocked.
+  // Never depend on the developer's installed/signed-in AGY or home directory.
+  vi.stubEnv('ORBIT_AGY_PATH', process.execPath)
+  vi.stubEnv('PATH', '')
+  vi.stubEnv('HOME', workspaceRoot)
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+  fs.rmSync(workspaceRoot, { recursive: true, force: true })
+})
+
 
 const spawnCalls: { command: string; args: string[] }[] = []
 
@@ -44,8 +62,8 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     runId: 'run_1',
     prompt: 'hello',
     nativeConversationId: null,
-    workspacePath: '/tmp/workspace',
-    saveDir: '/tmp/workspace',
+    workspacePath: workspaceRoot,
+    saveDir: workspaceRoot,
     attachments: [],
     referencedArtifacts: [],
     transport: 'structured',
