@@ -64,7 +64,10 @@ are Unix-only because Windows has different process termination semantics.
 Unix helper permission tests use real chmod on Unix and modeled mode bits on
 Windows; installed-package checks use the actual host filesystem. Structured
 stream fixtures run through Node on every OS, preserving real child-process
-pipes and cancellation without relying on Unix shebang execution.
+pipes and cancellation without relying on Unix shebang execution. Fixtures
+wait for process exit before removing workspaces (required by Windows locks).
+Mocked provider tests isolate executable discovery and temporary workspaces,
+so the deterministic suite needs no installed AGY even on a developer machine.
 
 Live AGY tests are deliberately excluded (`ORBIT_REAL_AGY=0`): they need a
 signed-in account, network access, and model availability. Green CI does not

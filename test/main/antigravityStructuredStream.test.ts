@@ -62,6 +62,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...actual, spawn: vi.fn(actual.spawn) }
 })
 const { spawn: realSpawn } = await vi.importActual<typeof childProcess>('node:child_process')
+const children: { child: childProcess.ChildProcess; closed: Promise<void> }[] = []
 let scriptDir: string
 let previousPath: string | undefined
 
@@ -121,11 +122,20 @@ beforeEach(() => {
   // this Node on every OS; retain real pipes, framing, events and cancellation.
   vi.mocked(childProcess.spawn).mockImplementation(((executable: string, args: readonly string[], options: SpawnOptions) => {
     expect(path.dirname(executable)).toBe(scriptDir)
-    return realSpawn(process.execPath, [executable, ...args], options)
+    const child = realSpawn(process.execPath, [executable, ...args], options)
+    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
+    children.push({ child, closed })
+    return child
   }) as typeof childProcess.spawn)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // A protocol result can precede OS exit. Windows locks the child's cwd
+  // until exit; always reap fixture processes before deleting their workspace.
+  for (const { child } of children) {
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+  }
+  await Promise.all(children.splice(0).map(({ closed }) => closed))
   vi.mocked(childProcess.spawn).mockReset()
   if (previousPath === undefined) delete process.env.ORBIT_AGY_PATH
   else process.env.ORBIT_AGY_PATH = previousPath

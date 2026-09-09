@@ -1,10 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import { AntigravityPtySession, type PtySessionDeps } from '../../src/main/runtime/providers/antigravity/AntigravityPtySession'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
 import type { ID } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+
+let workspaceRoot: string
+beforeEach(() => {
+  workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-provider-test-'))
+  // Discovery needs an existing absolute executable, but execution is mocked.
+  // Never depend on the developer's installed/signed-in AGY or home directory.
+  vi.stubEnv('ORBIT_AGY_PATH', process.execPath)
+  vi.stubEnv('PATH', '')
+  vi.stubEnv('HOME', workspaceRoot)
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+  fs.rmSync(workspaceRoot, { recursive: true, force: true })
+})
+
 
 class FakeTransport implements IAntigravityPtyTransport {
   isRunning = true
@@ -58,8 +76,8 @@ function baseInput(conversationId: ID, runId: string, overrides: Partial<Provide
     runId,
     prompt: `hello from ${conversationId}`,
     nativeConversationId: null,
-    workspacePath: `/tmp/${conversationId}`,
-    saveDir: `/tmp/${conversationId}`,
+    workspacePath: path.join(workspaceRoot, conversationId),
+    saveDir: path.join(workspaceRoot, conversationId),
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
