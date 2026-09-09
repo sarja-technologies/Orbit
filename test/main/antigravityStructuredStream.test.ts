@@ -1,7 +1,9 @@
 import fs from 'node:fs'
+import * as childProcess from 'node:child_process'
+import type { SpawnOptions } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
@@ -55,6 +57,11 @@ const success = (response: string) => ({
 /** A stand-in `agy` that replays captured NDJSON. Nothing here talks to a
  *  real account, but everything downstream of it — argv handling, line
  *  framing, the event normalizer — is the real provider. */
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcess>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
+const { spawn: realSpawn } = await vi.importActual<typeof childProcess>('node:child_process')
 let scriptDir: string
 let previousPath: string | undefined
 
@@ -110,9 +117,16 @@ beforeEach(() => {
   scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-fake-'))
   fs.mkdirSync(path.join(scriptDir, 'workspace'), { recursive: true })
   previousPath = process.env.ORBIT_AGY_PATH
+  // Windows cannot execute a shebang .mjs directly. Launch the fixture with
+  // this Node on every OS; retain real pipes, framing, events and cancellation.
+  vi.mocked(childProcess.spawn).mockImplementation(((executable: string, args: readonly string[], options: SpawnOptions) => {
+    expect(path.dirname(executable)).toBe(scriptDir)
+    return realSpawn(process.execPath, [executable, ...args], options)
+  }) as typeof childProcess.spawn)
 })
 
 afterEach(() => {
+  vi.mocked(childProcess.spawn).mockReset()
   if (previousPath === undefined) delete process.env.ORBIT_AGY_PATH
   else process.env.ORBIT_AGY_PATH = previousPath
   fs.rmSync(scriptDir, { recursive: true, force: true })
@@ -125,7 +139,7 @@ describe('structured transport streaming (real captured agy event shapes)', () =
     const response = `${chunks.join('')}${tail}`
     const events = await replay([INIT, USER_INPUT_STEP, ...chunks.map(activeDelta), doneDelta(tail), success(response)])
 
-    expect(deltasOf(events)).toEqual([...chunks, tail])
+    expect(deltasOf(events), JSON.stringify(events)).toEqual([...chunks, tail])
     expect(deltasOf(events).join('')).toBe(response)
 
     const completed = events.find((event) => event.type === 'run.completed')
