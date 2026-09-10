@@ -1,3 +1,4 @@
+import type { PermissionMode } from './permissionMode'
 import type {
   Artifact,
   ArtifactVersion,
@@ -31,6 +32,8 @@ export const IPC_CHANNELS = {
   conversationsDelete: 'orbit:conversations:delete',
   conversationsSetTransport: 'orbit:conversations:set-transport',
   conversationsSetModel: 'orbit:conversations:set-model',
+  conversationsSetPermissionMode: 'orbit:conversations:set-permission-mode',
+  clipboardWriteText: 'orbit:clipboard:write-text',
   conversationsSetWorkingDirectory: 'orbit:conversations:set-working-directory',
   dialogPickFolder: 'orbit:dialog:pick-folder',
   preferencesGet: 'orbit:preferences:get',
@@ -98,9 +101,15 @@ export interface DeleteConversationInput {
   conversationId: ID
 }
 
+export interface SetConversationPermissionModeInput {
+  conversationId: ID
+  permissionMode: PermissionMode
+}
+
 export interface SetConversationModelInput {
   conversationId: ID
-  /** null = use Antigravity's own default model. */
+  /** null = a legacy value meaning Orbit's own default; normalized on the
+   *  way in so it can never persist as "let agy choose". */
   model: string | null
   /** null = no explicit tier; never a manufactured default. */
   reasoningEffort: ReasoningEffort | null
@@ -200,7 +209,16 @@ export interface OrbitApi {
     delete(input: DeleteConversationInput): Promise<void>
     setTransport(input: SetConversationTransportInput): Promise<Conversation>
     setModel(input: SetConversationModelInput): Promise<Conversation>
+    setPermissionMode(input: SetConversationPermissionModeInput): Promise<Conversation>
     setWorkingDirectory(input: SetConversationWorkingDirectoryInput): Promise<Conversation>
+  }
+  /** Narrow clipboard capability. The renderer cannot use
+   *  `navigator.clipboard`: a packaged Orbit loads over file://, which is
+   *  not a secure context, so that API is simply absent there. This routes
+   *  the one operation Orbit needs through the main process instead, and
+   *  reports failure rather than silently doing nothing. */
+  clipboard: {
+    writeText(text: string): Promise<boolean>
   }
   models: {
     /** The real, normalized Antigravity catalogue. Empty when it could not

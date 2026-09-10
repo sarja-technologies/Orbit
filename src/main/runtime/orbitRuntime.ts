@@ -25,6 +25,7 @@ import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
 import { effortForNewSession } from '@shared/reasoningPolicy'
 import { ORBIT_DEFAULT_MODEL_ID } from '@shared/defaultModel'
+import type { PermissionMode } from '@shared/permissionMode'
 import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 
@@ -189,7 +190,8 @@ export class OrbitRuntime extends EventEmitter {
           referencedArtifacts,
           transport,
           model: conversation.model,
-          reasoningEffort: conversation.reasoningEffort
+          reasoningEffort: conversation.reasoningEffort,
+          permissionMode: conversation.permissionMode
         },
         (event) => this.handleProviderEvent(event)
       )
@@ -272,6 +274,13 @@ export class OrbitRuntime extends EventEmitter {
    *  never manufactures a tier the catalogue does not list. */
   setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
     return this.store.setConversationModel(conversationId, model, reasoningEffort)
+  }
+
+  /** Persists how a session handles permission requests. Applied as a real
+   *  agy flag at launch, so an in-flight session picks it up the same way a
+   *  model change does — on its next spawn. */
+  setConversationPermissionMode(conversationId: ID, permissionMode: PermissionMode): Conversation {
+    return this.store.setConversationPermissionMode(conversationId, permissionMode)
   }
 
   async respondToInteraction(input: { conversationId: ID; runId: ID; interactionId: string; optionId: string }): Promise<void> {

@@ -17,7 +17,28 @@ export const EFFORT_RANK: Record<ReasoningEffort, number> = { low: 0, medium: 1,
  *  nearestSupportedEffort rather than gaining a fabricated one. */
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium'
 
-export const EMPTY_PREFERENCES: OrbitPreferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
+export const EMPTY_PREFERENCES: OrbitPreferences = {
+  lastReasoningEffort: null,
+  modelReasoningEfforts: {},
+  sidebarWidth: null,
+  lastActiveProjectId: null,
+  lastActiveConversationId: null
+}
+
+/** The sidebar's width bounds, in pixels. The default is deliberately wider
+ *  than the 262px the sidebar shipped with, which cropped ordinary session
+ *  titles. The bounds keep a dragged — or hand-edited — width usable: never
+ *  so narrow it cannot show a title, never so wide it crowds the
+ *  transcript. */
+export const SIDEBAR_WIDTH = { min: 200, max: 520, default: 300 } as const
+
+/** A stored width as a width the layout can actually use. Anything absent,
+ *  non-finite or out of bounds resolves to something sane rather than
+ *  rendering an unusable sidebar. */
+export function resolveSidebarWidth(stored: number | null | undefined): number {
+  if (typeof stored !== 'number' || !Number.isFinite(stored)) return SIDEBAR_WIDTH.default
+  return Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, Math.round(stored)))
+}
 
 /** The model option a selection refers to.
  *
@@ -129,6 +150,7 @@ export function rememberEffort(
     else delete modelReasoningEfforts[modelId]
   }
   return {
+    ...preferences,
     lastReasoningEffort: effort ?? preferences.lastReasoningEffort,
     modelReasoningEfforts
   }
@@ -147,7 +169,20 @@ export function normalizePreferences(value: unknown): OrbitPreferences {
       if (modelId && isEffort(effort)) efforts[modelId] = effort
     }
   }
-  return { lastReasoningEffort: last, modelReasoningEfforts: efforts }
+  return {
+    lastReasoningEffort: last,
+    modelReasoningEfforts: efforts,
+    // Kept as stored (null when absent) rather than clamped here: the
+    // clamp belongs to the layout that uses it, so a width written by a
+    // future Orbit with different bounds is not destroyed on read.
+    sidebarWidth: typeof raw.sidebarWidth === 'number' && Number.isFinite(raw.sidebarWidth) ? raw.sidebarWidth : null,
+    lastActiveProjectId: nonEmptyString(raw.lastActiveProjectId),
+    lastActiveConversationId: nonEmptyString(raw.lastActiveConversationId)
+  }
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
 }
 
 function isEffort(value: unknown): value is ReasoningEffort {

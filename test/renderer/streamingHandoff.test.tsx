@@ -7,6 +7,7 @@ import type { OrbitApi } from '../../src/shared/contracts'
 import type { Conversation, Message, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RunEventListener, RuntimeEvent } from '../../src/shared/runtime-events'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
+import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 
 const PROJECT: Project = { id: 'project_1', name: 'Orbit', rootPath: '/home/dev/orbit', createdAt: 'now', updatedAt: 'now' }
 const SESSION: Conversation = {
@@ -18,6 +19,7 @@ const SESSION: Conversation = {
   status: 'idle',
   transport: 'structured',
   model: ORBIT_DEFAULT_MODEL_ID,
+  permissionMode: 'ask' as const,
   reasoningEffort: 'medium',
   workingDirectory: null,
   createdAt: 'now',
@@ -110,8 +112,9 @@ describe('streaming hand-off to the persisted assistant message', () => {
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn() },
-      preferences: { get: vi.fn(async () => ({ lastReasoningEffort: null, modelReasoningEfforts: {} })), set: vi.fn(async (next) => next) },
-      conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setWorkingDirectory: vi.fn() },
+      preferences: { get: vi.fn(async () => ({ ...EMPTY_PREFERENCES })), set: vi.fn(async (next) => next) },
+      conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
+      clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => []) },
       messages: { send: vi.fn(async () => RUN) },
       runs: {

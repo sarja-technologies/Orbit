@@ -29,7 +29,11 @@ const orbitApi: OrbitApi = {
     delete: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsDelete, input),
     setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input),
     setModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetModel, input),
+    setPermissionMode: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetPermissionMode, input),
     setWorkingDirectory: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetWorkingDirectory, input)
+  },
+  clipboard: {
+    writeText: (text) => ipcRenderer.invoke(IPC_CHANNELS.clipboardWriteText, text)
   },
   models: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.modelsList)

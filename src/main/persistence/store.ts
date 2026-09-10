@@ -24,6 +24,7 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import { createId, nowIso } from '@main/util/ids'
 import { normalizePreferences } from '@shared/reasoningPolicy'
 import { resolveModelId } from '@shared/defaultModel'
+import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from '@shared/permissionMode'
 import { DEFAULT_SESSION_TITLE, hasDefaultSessionTitle } from '@shared/sessionTitle'
 import { jsonParseObject, jsonStringify, nullableText, numberValue, OrbitDatabase, text } from './database'
 
@@ -118,6 +119,7 @@ export class OrbitStore {
       status: 'idle',
       transport: 'structured',
       model: resolveModelId(options.model ?? null),
+      permissionMode: DEFAULT_PERMISSION_MODE,
       reasoningEffort: options.reasoningEffort ?? null,
       workingDirectory: normalizePath(options.workingDirectory ?? null),
       createdAt: now,
@@ -125,8 +127,8 @@ export class OrbitStore {
     }
     this.db.run(
       `INSERT INTO conversations
-       (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, working_directory, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, permission_mode, working_directory, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversation.id,
         conversation.projectId,
@@ -137,6 +139,7 @@ export class OrbitStore {
         conversation.transport,
         conversation.model,
         conversation.reasoningEffort,
+        conversation.permissionMode,
         conversation.workingDirectory,
         conversation.createdAt,
         conversation.updatedAt
@@ -176,6 +179,20 @@ export class OrbitStore {
     this.db.run('UPDATE conversations SET model = ?, reasoning_effort = ?, updated_at = ? WHERE id = ?', [
       resolveModelId(model),
       reasoningEffort,
+      nowIso(),
+      conversationId
+    ])
+    this.touchProject(conversation.projectId)
+    return this.requireConversation(conversationId)
+  }
+
+  /** Persists how this session handles permission requests. A real launch
+   *  flag, so the provider treats a change the way it treats a model change:
+   *  the live session is retired and the next turn respawns with it. */
+  setConversationPermissionMode(conversationId: ID, permissionMode: PermissionMode): Conversation {
+    const conversation = this.requireConversation(conversationId)
+    this.db.run('UPDATE conversations SET permission_mode = ?, updated_at = ? WHERE id = ?', [
+      normalizePermissionMode(permissionMode),
       nowIso(),
       conversationId
     ])
@@ -622,6 +639,7 @@ function mapConversation(row: Record<string, unknown>): Conversation {
     // so the renderer, the runtime and the provider all see one real model
     // without the user reopening or re-selecting anything.
     model: resolveModelId(nullableText(row, 'model')),
+    permissionMode: normalizePermissionMode(nullableText(row, 'permission_mode')),
     reasoningEffort: nullableText(row, 'reasoning_effort') as Conversation['reasoningEffort'],
     workingDirectory: nullableText(row, 'working_directory'),
     createdAt: text(row, 'created_at'),

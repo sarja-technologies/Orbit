@@ -1,9 +1,12 @@
 import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent } from 'react'
-import type { ModelOption, ReasoningEffort } from '@shared/domain'
+import type { Conversation, ModelOption, Project, ReasoningEffort } from '@shared/domain'
+import type { PermissionMode } from '@shared/permissionMode'
 import type { DraftAttachment } from '../lib/attachments'
 import { imageItemsFromClipboard } from '../lib/attachments'
 import { AttachmentChip } from './AttachmentChip'
 import { ModelControls } from './ModelControls'
+import { ProjectControl } from './ProjectControl'
+import { PermissionControl } from './PermissionControl'
 
 interface ComposerProps {
   value: string
@@ -17,6 +20,14 @@ interface ComposerProps {
   selectedEffort: ReasoningEffort | null
   onSelectModel: (model: string | null) => void
   onSelectEffort: (effort: ReasoningEffort) => void
+  /** The session's real project and folder context, shown beside the model
+   *  so the composer states everything a turn is about to run with. */
+  project: Project | null
+  conversation: Conversation | null
+  permissionMode: PermissionMode
+  onSelectPermissionMode: (mode: PermissionMode) => void
+  onChooseProjectFolder: () => void
+  onUseProjectFolder: () => void
   /** Lets the empty-state starters hand focus back to the composer after
    *  they fill it, so the user can keep typing without reaching for it. */
   registerFocus?: (focus: () => void) => void
@@ -53,6 +64,12 @@ export function Composer({
   selectedEffort,
   onSelectModel,
   onSelectEffort,
+  project,
+  conversation,
+  permissionMode,
+  onSelectPermissionMode,
+  onChooseProjectFolder,
+  onUseProjectFolder,
   registerFocus
 }: ComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -125,12 +142,26 @@ export function Composer({
           onPaste={handlePaste}
         />
 
+        {/* One quiet row that states everything the next turn will run
+            with — where, on what, and under which permissions — and the
+            action that starts it. Deliberately not a toolbar: these are
+            facts about the session that happen to be adjustable. */}
         <div className="composer-controls">
           <button type="button" className="composer-attach" onClick={onPickFiles} disabled={disabled} aria-label="Add files">
             <PlusGlyph />
           </button>
 
+          <ProjectControl
+            project={project}
+            conversation={conversation}
+            disabled={disabled}
+            onChooseProjectFolder={onChooseProjectFolder}
+            onUseProjectFolder={onUseProjectFolder}
+          />
+
           <div className="composer-spacer" />
+
+          <PermissionControl mode={permissionMode} disabled={disabled} onSelect={onSelectPermissionMode} />
 
           <ModelControls
             models={models}

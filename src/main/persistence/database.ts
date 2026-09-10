@@ -49,7 +49,11 @@ export class OrbitDatabase {
       // auto-titling can never overwrite one. Existing rows default to 0:
       // they were all named before auto-titling existed and none of them
       // carries the default title, so none is a candidate anyway.
-      'ALTER TABLE conversations ADD COLUMN title_is_custom INTEGER NOT NULL DEFAULT 0'
+      'ALTER TABLE conversations ADD COLUMN title_is_custom INTEGER NOT NULL DEFAULT 0',
+      // Permission handling per session. Defaults to 'ask', which is agy's
+      // own behaviour, so every existing session keeps behaving exactly as
+      // it did before the control existed.
+      "ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask'"
     ]
     for (const migration of migrations) {
       try {

@@ -1,5 +1,6 @@
 import type { ConversationTransport, ID, ModelOption, ProjectFile, ProviderStatus, ReasoningEffort } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
+import type { PermissionMode } from '@shared/permissionMode'
 
 export interface ProviderSendInput {
   projectId: ID
@@ -20,6 +21,9 @@ export interface ProviderSendInput {
    *  there is no "null means agy decides" state here; it is resolved into
    *  real --model/--effort args by the provider. */
   model: string
+  /** How this session handles permission requests, as a real agy launch
+   *  flag. Both transports must apply it identically. */
+  permissionMode: PermissionMode
   reasoningEffort: ReasoningEffort | null
 }
 

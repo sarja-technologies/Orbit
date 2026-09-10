@@ -45,7 +45,21 @@ const reasoningEffortSchema = z.enum(['low', 'medium', 'high'])
 
 export const preferencesSchema = z.object({
   lastReasoningEffort: reasoningEffortSchema.nullable(),
-  modelReasoningEfforts: z.record(z.string().min(1).max(200), reasoningEffortSchema)
+  modelReasoningEfforts: z.record(z.string().min(1).max(200), reasoningEffortSchema),
+  // Bounded here as well as clamped in the layout, so nothing outside a
+  // plausible range is ever persisted in the first place.
+  sidebarWidth: z.number().finite().min(120).max(900).nullable().default(null),
+  lastActiveProjectId: idSchema.nullable().default(null),
+  lastActiveConversationId: idSchema.nullable().default(null)
+})
+
+/** Bounded so an enormous renderer string can never be pushed at the OS
+ *  clipboard. A megabyte is far beyond any real message. */
+export const clipboardTextSchema = z.string().max(1_000_000)
+
+export const setPermissionModeSchema = z.object({
+  conversationId: idSchema,
+  permissionMode: z.enum(['ask', 'skip'])
 })
 
 export const renameConversationSchema = z.object({

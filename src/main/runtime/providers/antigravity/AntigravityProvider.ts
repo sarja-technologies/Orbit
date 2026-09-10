@@ -13,6 +13,7 @@ import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySess
 import { checkClipboardCapability } from './clipboardCapability'
 import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
 import { describeToolActivity } from './toolActivity'
+import { permissionArgs } from '@shared/permissionMode'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -129,6 +130,10 @@ export class AntigravityProvider implements AgentProvider {
     const args: string[] = []
     if (invocation.model) args.push('--model', invocation.model)
     if (invocation.effort) args.push('--effort', invocation.effort)
+    // Permission handling is a launch flag like the others, so it lands
+    // here and both transports inherit it — there is no second place a
+    // session's permission state could be applied differently.
+    args.push(...permissionArgs(input.permissionMode))
     return args
   }
 

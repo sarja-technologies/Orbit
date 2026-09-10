@@ -183,6 +183,7 @@ function conversation(id: string): Conversation {
     status: 'idle',
     transport: 'pty',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null,
     workingDirectory: null,
     createdAt: '2026-09-08T10:00:00.000Z',

@@ -5,6 +5,7 @@ import { ChatRow } from './ChatRow'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
 import type { AgentIdentity } from '../lib/agentIdentity'
+import { MessageActions } from './MessageActions'
 
 interface MessageBlockProps {
   message: Message
@@ -51,6 +52,9 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
     >
       {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
+      {/* The message's own source text, never the rendered markup: what
+          lands on the clipboard is what was written. */}
+      <MessageActions text={message.content} label={isUser ? 'your message' : 'reply'} />
     </ChatRow>
   )
 }

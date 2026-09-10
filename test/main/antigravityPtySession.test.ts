@@ -77,6 +77,7 @@ function baseInput(overrides: Partial<ProviderSendInput> = {}): ProviderSendInpu
     referencedArtifacts: [],
     transport: 'pty',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null,
     ...overrides
   }
