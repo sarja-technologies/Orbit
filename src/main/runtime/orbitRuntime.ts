@@ -18,7 +18,7 @@ import type {
   RuntimeErrorInfo,
   SystemStatus
 } from '@shared/domain'
-import type { ArtifactContent, SendMessageInput } from '@shared/contracts'
+import type { ArtifactContent, SendMessageInput, StartupSession } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
@@ -28,6 +28,7 @@ import { ORBIT_DEFAULT_MODEL_ID } from '@shared/defaultModel'
 import type { PermissionMode } from '@shared/permissionMode'
 import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
+import { StartupSessionResolver } from '@main/startup/startupSession'
 
 interface ActiveRunState {
   text: string
@@ -42,6 +43,15 @@ export class OrbitRuntime extends EventEmitter {
    *  succeeded, which `effortForNewSession` treats as "unknown tiers" rather
    *  than as an excuse to guess. */
   private cachedModels: ModelOption[] = []
+  /** Owns the "exactly one brand-new session per application launch"
+   *  invariant. Constructed once with the runtime — which lives for the
+   *  length of the launch — so no renderer-side lifecycle can make a
+   *  second one. */
+  private readonly startupSession = new StartupSessionResolver({
+    listProjectTree: () => this.store.listProjectTree(),
+    readLastActiveProjectId: () => this.store.readPreferences().lastActiveProjectId,
+    createConversation: (projectId) => this.createConversation(projectId)
+  })
 
   constructor(
     private readonly store: OrbitStore,
@@ -79,6 +89,14 @@ export class OrbitRuntime extends EventEmitter {
     const project = this.store.createProject(name, rootPath)
     this.createConversation(project.id)
     return project
+  }
+
+  /** The one fresh session this launch opens on. Creates it on the first
+   *  call and returns that same session to every call afterwards, so a
+   *  remount or reload cannot litter the project with duplicates. Null on
+   *  first run, when no project exists to hold it. */
+  async ensureStartupSession(): Promise<StartupSession | null> {
+    return this.startupSession.ensure()
   }
 
   setProjectRoot(projectId: ID, rootPath: string | null): Project {

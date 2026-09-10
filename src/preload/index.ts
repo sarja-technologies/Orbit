@@ -19,6 +19,9 @@ const orbitApi: OrbitApi = {
   dialog: {
     pickFolder: (input) => ipcRenderer.invoke(IPC_CHANNELS.dialogPickFolder, input ?? null)
   },
+  startup: {
+    session: () => ipcRenderer.invoke(IPC_CHANNELS.startupSession)
+  },
   preferences: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.preferencesGet),
     set: (preferences) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSet, preferences)

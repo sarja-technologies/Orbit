@@ -36,6 +36,7 @@ export const IPC_CHANNELS = {
   clipboardWriteText: 'orbit:clipboard:write-text',
   conversationsSetWorkingDirectory: 'orbit:conversations:set-working-directory',
   dialogPickFolder: 'orbit:dialog:pick-folder',
+  startupSession: 'orbit:startup:session',
   preferencesGet: 'orbit:preferences:get',
   preferencesSet: 'orbit:preferences:set',
   modelsList: 'orbit:models:list',
@@ -53,6 +54,14 @@ export const IPC_CHANNELS = {
   artifactsReveal: 'orbit:artifacts:reveal',
   referencesCreate: 'orbit:references:create'
 } as const
+
+/** The one brand-new session an application launch opens on. Null from
+ *  `startup.session()` means first run: no project exists yet, so there is
+ *  nowhere to put a session and the create-project state shows instead. */
+export interface StartupSession {
+  projectId: ID
+  conversationId: ID
+}
 
 export interface CreateProjectInput {
   name: string
@@ -198,6 +207,13 @@ export interface OrbitApi {
   dialog: {
     /** Native OS folder picker. Resolves to null when the user cancels. */
     pickFolder(input?: PickFolderInput): Promise<string | null>
+  }
+  startup: {
+    /** The single brand-new session this application launch opens on.
+     *  Memoized in the main process, so calling it again after a remount,
+     *  an HMR reload or a bridge reconnect returns the same session rather
+     *  than creating another. Null on first run (no project yet). */
+    session(): Promise<StartupSession | null>
   }
   preferences: {
     get(): Promise<OrbitPreferences>

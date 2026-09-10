@@ -112,6 +112,9 @@ describe('streaming hand-off to the persisted assistant message', () => {
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn() },
+      // These tests are about streaming, not launch: no fresh launch session,
+      // so the app opens the project on its existing one.
+      startup: { session: vi.fn(async () => null) },
       preferences: { get: vi.fn(async () => ({ ...EMPTY_PREFERENCES })), set: vi.fn(async (next) => next) },
       conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
       clipboard: { writeText: vi.fn(async () => true) },

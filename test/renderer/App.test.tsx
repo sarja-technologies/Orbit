@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/app/App'
-import type { OrbitApi } from '../../src/shared/contracts'
+import type { OrbitApi, StartupSession } from '../../src/shared/contracts'
 import type { Conversation, ModelOption, OrbitPreferences, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { deriveSessionTitle, hasDefaultSessionTitle } from '../../src/shared/sessionTitle'
@@ -29,6 +29,9 @@ function conversation(overrides: Partial<Conversation> & { id: string; projectId
   }
 }
 
+/** The session an application launch creates and opens on. */
+const LAUNCH_SESSION_ID = 'conversation_launch'
+
 const IMPROVE = conversation({ id: 'conversation_1', projectId: 'project_1', title: 'Improve Orbit UI', reasoningEffort: 'medium' })
 const HYBRID = conversation({ id: 'conversation_2', projectId: 'project_1', title: 'Explore hybrid mode', reasoningEffort: 'medium' })
 const CHECK = conversation({ id: 'conversation_3', projectId: 'project_2', title: 'Main', reasoningEffort: 'medium' })
@@ -51,6 +54,8 @@ describe('App', () => {
    *  never a candidate for first-prompt titling again. */
   let userNamed: Set<string>
   let runListener: ((event: RuntimeEvent) => void) | null
+  /** The one launch session, memoized exactly as the main process does. */
+  let launchSession: Promise<StartupSession | null> | null
 
   const snapshotFor = (project: Project, conversations: Conversation[]): ProjectSnapshot => ({
     project,
@@ -70,6 +75,7 @@ describe('App', () => {
     created = 0
     userNamed = new Set()
     runListener = null
+    launchSession = null
     const providerStatus: ProviderStatus = {
       id: 'antigravity',
       state: 'unavailable',
@@ -109,6 +115,25 @@ describe('App', () => {
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn(async () => '/home/dev/chosen') },
+      // Mirrors the main process: one launch session, created on the first
+      // call and handed back to every later caller, so a remount or a reload
+      // cannot produce a second one. The real one is made through the same
+      // createConversation the New Session control uses (asserted in
+      // test/main/startupSession.test.ts); here it is built directly so the
+      // create spy keeps counting only the sessions a test itself asks for.
+      startup: {
+        session: vi.fn(async () => {
+          launchSession ??= (async (): Promise<StartupSession | null> => {
+            const order = [WEBSITE, RENDERER].filter((project) => sessions[project.id] !== undefined)
+            const target = order.find((project) => project.id === preferences.lastActiveProjectId) ?? order[0]
+            if (!target) return null
+            const made = conversation({ id: LAUNCH_SESSION_ID, projectId: target.id, title: 'New Session' })
+            sessions[target.id] = [made, ...(sessions[target.id] ?? [])]
+            return { projectId: target.id, conversationId: made.id }
+          })()
+          return launchSession
+        })
+      },
       preferences: {
         get: vi.fn(async () => preferences),
         set: vi.fn(async (next) => {
@@ -183,6 +208,14 @@ describe('App', () => {
     await screen.findByText('Projects')
   }
 
+  /** Orbit always opens on its fresh launch session. Tests whose fixtures
+   *  are about a particular stored conversation open it first, exactly as a
+   *  user does after landing in the new one. */
+  const bootInto = async (session: RegExp): Promise<void> => {
+    await boot()
+    await userEvent.click(screen.getByRole('button', { name: session }))
+  }
+
   /** Which project a session lives in, for the stateful mock backend. */
   const activeProjectOf = (conversationId: string): string =>
     Object.keys(sessions).find((projectId) => sessions[projectId]!.some((item) => item.id === conversationId)) ?? 'project_1'
@@ -204,9 +237,9 @@ describe('App', () => {
     })
   }
 
-  it('reopens the conversation the user was last in, not merely the newest', async () => {
-    // The second session in the second project: neither the first project
-    // nor the first session, so recency alone could not produce it.
+  it('opens the launch session in the project the user was last in', async () => {
+    // The second project, so recency alone could not have produced it. The
+    // remembered *conversation* is deliberately not reopened.
     preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_2', lastActiveConversationId: 'conversation_3' }
     await boot()
     await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
@@ -219,18 +252,24 @@ describe('App', () => {
     await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_1'))
   })
 
-  it('creates no session at all just because Orbit launched', async () => {
+  it('opens on the fresh launch session rather than the conversation last used', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' }
     await boot()
-    // Opening the app is not a request for a new session — only the New
-    // Session control is.
-    expect(api.conversations.create).not.toHaveBeenCalled()
+
+    // The remembered conversation is still there and still selectable — it
+    // just is not what Orbit reopened into.
+    const header = document.querySelector('.chrome') as HTMLElement
+    await waitFor(() => expect(within(header).getByText('New Session')).toBeInTheDocument())
+    expect(within(header).queryByText('Improve Orbit UI')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Improve Orbit UI/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^New Session/ })).toHaveAttribute('aria-current', 'true')
   })
 
-  it('remembers where the user is, so the next launch can reopen it', async () => {
+  it('remembers the project, which is where the next launch puts its session', async () => {
     await boot()
     await waitFor(() =>
       expect(api.preferences.set).toHaveBeenCalledWith(
-        expect.objectContaining({ lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' })
+        expect.objectContaining({ lastActiveProjectId: 'project_1', lastActiveConversationId: LAUNCH_SESSION_ID })
       )
     )
   })
@@ -241,6 +280,9 @@ describe('App', () => {
     const sidebar = screen.getByRole('navigation', { name: 'Projects and sessions' })
     expect(sidebar).toHaveStyle({ width: '340px' })
 
+    // Launch focuses the composer, so wait for that before taking focus,
+    // otherwise the arrow key lands in the message box.
+    await waitFor(() => expect(screen.getByLabelText('Message Antigravity')).toHaveFocus())
     const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
     handle.focus()
     await userEvent.keyboard('{ArrowRight}')
@@ -285,7 +327,7 @@ describe('App', () => {
   })
 
   it('persists a permission change against the session it belongs to', async () => {
-    await boot()
+    await bootInto(/^Improve Orbit UI/)
     await userEvent.click(await screen.findByLabelText('Permissions'))
     await userEvent.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
 
@@ -424,8 +466,10 @@ describe('App', () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
 
-    // It is in the sidebar under its project, under the default name.
-    const row = await screen.findByRole('button', { name: /^New Session/ })
+    // It is in the sidebar under its project, under the default name. The
+    // launch session is also called New Session, so this matches the active
+    // one — the session the click just made.
+    const row = await screen.findByRole('button', { name: /^New Session/, current: true })
     expect(row).toBeInTheDocument()
     // ...and it is the session the workspace is on.
     await waitFor(() => expect(row).toHaveAttribute('aria-current', 'true'))
@@ -463,7 +507,8 @@ describe('App', () => {
 
     await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(sessions.project_1).toHaveLength(4)
+    // Two originals, the launch session, and the two just made.
+    expect(sessions.project_1).toHaveLength(5)
   })
 
   it('reports a failed session create without leaving a half-made session behind', async () => {
@@ -485,7 +530,7 @@ describe('App', () => {
   })
 
   it('keeps the project and session breadcrumb, and drops the provider status line', async () => {
-    await boot()
+    await bootInto(/^Improve Orbit UI/)
     const header = document.querySelector('.chrome') as HTMLElement
     expect(within(header).getByText('AgentDock Website')).toBeInTheDocument()
     expect(within(header).getByText('Improve Orbit UI')).toBeInTheDocument()
@@ -571,19 +616,21 @@ describe('App', () => {
   it('renames a new session in the sidebar once its first real prompt is sent', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
-    await screen.findByRole('button', { name: /^New Session/ })
+    await screen.findByRole('button', { name: /^New Session/, current: true })
 
     await userEvent.type(screen.getByLabelText('Message Antigravity'), 'build me a futuristic robotics landing page')
     await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
 
     expect(await screen.findByRole('button', { name: /^Futuristic Robotics Landing Page/ })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^New Session/ })).not.toBeInTheDocument()
+    // The session that was sent into is no longer New Session. (The launch
+    // session still is, untouched, which is the point of it.)
+    expect(screen.queryByRole('button', { name: /^New Session/, current: true })).not.toBeInTheDocument()
   })
 
   it('does not keep renaming the session as the conversation goes on', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
-    await screen.findByRole('button', { name: /^New Session/ })
+    await screen.findByRole('button', { name: /^New Session/, current: true })
 
     const composer = screen.getByLabelText('Message Antigravity')
     await userEvent.type(composer, 'build me a futuristic robotics landing page')
@@ -602,7 +649,7 @@ describe('App', () => {
   it('leaves a session the user renamed alone when the first prompt is sent', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New session in AgentDock Website'))
-    const row = await screen.findByRole('button', { name: /^New Session/ })
+    const row = await screen.findByRole('button', { name: /^New Session/, current: true })
 
     // Rename it by hand first, the way the sidebar does.
     await userEvent.dblClick(row)
@@ -631,7 +678,7 @@ describe('App', () => {
     await userEvent.click(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ }))
 
     expect(api.conversations.setModel).toHaveBeenCalledWith({
-      conversationId: 'conversation_1',
+      conversationId: LAUNCH_SESSION_ID,
       model: 'gemini-3.8-flash',
       reasoningEffort: 'high'
     })
@@ -648,7 +695,7 @@ describe('App', () => {
 
     // Pro has no medium, and Orbit refuses to invent one.
     expect(api.conversations.setModel).toHaveBeenCalledWith({
-      conversationId: 'conversation_1',
+      conversationId: LAUNCH_SESSION_ID,
       model: 'gemini-3.1-pro',
       reasoningEffort: 'low'
     })
@@ -666,7 +713,7 @@ describe('App', () => {
     await userEvent.click(within(modal).getByRole('menuitemradio', { name: /Claude Sonnet 4\.6/ }))
 
     expect(api.conversations.setModel).toHaveBeenCalledWith({
-      conversationId: 'conversation_1',
+      conversationId: LAUNCH_SESSION_ID,
       model: 'claude-sonnet-4-6',
       reasoningEffort: null
     })
@@ -686,7 +733,7 @@ describe('App', () => {
       })
     )
     expect(api.conversations.setModel).toHaveBeenCalledWith({
-      conversationId: 'conversation_1',
+      conversationId: LAUNCH_SESSION_ID,
       model: ORBIT_DEFAULT_MODEL_ID,
       reasoningEffort: 'high'
     })
@@ -725,7 +772,7 @@ describe('App', () => {
 
   describe('stopping a run', () => {
     it('says it is stopping while the transport tears the turn down', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
 
       await userEvent.click(screen.getByLabelText('Stop generating'))
@@ -738,7 +785,7 @@ describe('App', () => {
     })
 
     it('settles into a calm stopped state, never a retry prompt', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await userEvent.click(screen.getByLabelText('Stop generating'))
       await emit({ ...base, type: 'run.cancelled' })
@@ -752,7 +799,7 @@ describe('App', () => {
     })
 
     it('closes every activity row a stopped run left open, so nothing keeps counting', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
       expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
@@ -765,7 +812,7 @@ describe('App', () => {
     })
 
     it('still shows a real error state for a genuine backend failure', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await emit({
         ...base,
@@ -781,7 +828,7 @@ describe('App', () => {
 
   describe('live activity', () => {
     it('shows the real command the run is on, not a generic working line', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
 
@@ -790,7 +837,7 @@ describe('App', () => {
     })
 
     it('does not carry one session’s activity or timer into another', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
       expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
@@ -807,7 +854,7 @@ describe('App', () => {
     })
 
     it('keeps another project’s live activity and timer off screen', async () => {
-      await boot()
+      await bootInto(/^Improve Orbit UI/)
       await startRun()
       await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
       await screen.findByText('Running npm run build')
