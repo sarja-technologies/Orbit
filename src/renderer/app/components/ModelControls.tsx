@@ -16,8 +16,11 @@ interface ModelControlsProps {
   /** Model and effort are separate intents: App resolves which tier a newly
    *  chosen model should land on from the user's remembered preference, and
    *  only an explicit tier click updates that preference. Collapsing both
-   *  into one callback would make those indistinguishable. */
-  onSelectModel: (model: string | null) => void
+   *  into one callback would make those indistinguishable.
+   *
+   *  Always a real catalogue id — Orbit has no "let Antigravity choose"
+   *  option to select. */
+  onSelectModel: (model: string) => void
   onSelectEffort: (effort: ReasoningEffort) => void
 }
 
@@ -40,8 +43,6 @@ export function ModelControls({
   const [browsing, setBrowsing] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const selected = models.find((model) => model.id === selectedModel) ?? null
-  // Reasoning is asked of the selection, not the catalogue row: "Default
-  // model" has real, selectable tiers even though it has no catalogue entry.
   const reasoningModel = modelForSelection(models, selectedModel)
   const theme = reasoningTheme(reasoningModel, selectedEffort)
 
@@ -78,7 +79,11 @@ export function ModelControls({
         onClick={() => setOpen((value) => !value)}
       >
         {selected ? <ProviderLogo provider={providerForModel(selected)} size={15} /> : <AutoGlyph />}
-        <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : 'Default model'}</span>
+        {/* A session always resolves to a real model (see
+            shared/defaultModel.ts). "Resolving…" is the brief moment before
+            the catalogue has loaded — never a standing state, and never an
+            offer to let Antigravity choose. */}
+        <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : 'Resolving…'}</span>
         {/* The closed control carries the live tier in the same treatment the
             open control uses, so changing it is visible without reopening. */}
         {selectedEffort ? (
@@ -94,23 +99,6 @@ export function ModelControls({
           <section className="popover-pane pane-models">
             <h3 className="pane-title">AI Model</h3>
             <div className="model-list">
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={selectedModel === null}
-                className={selectedModel === null ? 'model-row selected' : 'model-row'}
-                onClick={() => onSelectModel(null)}
-              >
-                <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-                  <AutoGlyph />
-                </span>
-                <span className="model-row-text">
-                  <span className="model-row-name">Default model</span>
-                  <span className="model-row-hint">Antigravity’s own choice</span>
-                </span>
-                <Tick checked={selectedModel === null} />
-              </button>
-
               {geminiModels.map((model) => (
                 <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelectModel(model.id)} />
               ))}

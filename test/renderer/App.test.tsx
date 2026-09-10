@@ -62,7 +62,7 @@ describe('App', () => {
 
   beforeEach(() => {
     window.localStorage.clear()
-    preferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
+    preferences = { defaultModel: null, lastReasoningEffort: null, modelReasoningEfforts: {} }
     sessions = { project_1: [IMPROVE, HYBRID], project_2: [CHECK] }
     created = 0
     userNamed = new Set()
@@ -524,7 +524,7 @@ describe('App', () => {
   })
 
   it('persists a model choice, carrying the remembered reasoning level onto it', async () => {
-    preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
+    preferences = { defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -540,7 +540,7 @@ describe('App', () => {
   })
 
   it('maps a remembered level onto a model that does not publish it', async () => {
-    preferences = { lastReasoningEffort: 'medium', modelReasoningEfforts: {} }
+    preferences = { defaultModel: null, lastReasoningEffort: 'medium', modelReasoningEfforts: {} }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -557,7 +557,7 @@ describe('App', () => {
   })
 
   it('chooses no tier for a model with no reasoning control', async () => {
-    preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
+    preferences = { defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -574,20 +574,41 @@ describe('App', () => {
     })
   })
 
-  it('remembers an explicit tier for next time, globally and against the model', async () => {
+  it('resolves a session with no model onto Orbit’s concrete default', async () => {
+    // PRODUCT RULE: Orbit owns its default model. A session that names none
+    // is resolved against the real catalogue as soon as that catalogue is
+    // known — it never sits on "let Antigravity choose".
+    await boot()
+
+    await waitFor(() =>
+      expect(api.conversations.setModel).toHaveBeenCalledWith({
+        conversationId: 'conversation_1',
+        model: 'gemini-3.8-flash',
+        reasoningEffort: 'medium'
+      })
+    )
+    // And the picker shows the model that was actually chosen.
+    expect(await screen.findByLabelText('Model and reasoning')).toHaveTextContent('3.8 Flash')
+  })
+
+  it('remembers an explicit tier for next time, globally and against the real model', async () => {
     await boot()
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
+    // Let the session settle onto its concrete model first.
+    await waitFor(() => expect(api.conversations.setModel).toHaveBeenCalled())
     await userEvent.click(trigger)
     await userEvent.click(screen.getByRole('button', { name: 'High' }))
 
+    // The tier is filed against the real model, never against a stand-in.
     expect(api.preferences.set).toHaveBeenCalledWith({
+      defaultModel: null,
       lastReasoningEffort: 'high',
-      modelReasoningEfforts: { 'antigravity:default': 'high' }
+      modelReasoningEfforts: { 'gemini-3.8-flash': 'high' }
     })
     expect(api.conversations.setModel).toHaveBeenCalledWith({
       conversationId: 'conversation_1',
-      model: null,
+      model: 'gemini-3.8-flash',
       reasoningEffort: 'high'
     })
   })
@@ -596,7 +617,7 @@ describe('App', () => {
     const legacy = conversation({ id: 'conversation_1', projectId: 'project_1', title: 'Improve Orbit UI', model: 'gemini-3.8-flash' })
     vi.mocked(api.projects.tree).mockResolvedValue([{ project: WEBSITE, conversations: [legacy] }])
     vi.mocked(api.projects.open).mockResolvedValue(snapshotFor(WEBSITE, [legacy]))
-    preferences = { lastReasoningEffort: 'low', modelReasoningEfforts: {} }
+    preferences = { defaultModel: null, lastReasoningEffort: 'low', modelReasoningEfforts: {} }
 
     await boot()
     await waitFor(() =>

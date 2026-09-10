@@ -8,6 +8,9 @@
 // question is just ordinary turn-ending assistant text, answered by the
 // user's next composer message in the same live session — so there is
 // deliberately no 'question' kind here.
+import type { ActivityKind } from '@shared/runtime-events'
+import { classifyToolName } from '@main/runtime/activityMapping'
+
 export interface InteractionOption {
   id: string
   label: string
@@ -408,6 +411,102 @@ export function progressiveAppendIndex(streamed: string, candidate: string): num
   const found = visible.join('').lastIndexOf(needle)
   if (found === -1) return -1
   return positions[found + needle.length - 1]! + 1
+}
+
+/** One piece of work agy drew on its own interactive screen. */
+export interface ScreenActivity {
+  /** Stable while the same work is on screen, so a redraw (a spinner tick,
+   *  a cursor blink) updates a step rather than appending a new one. */
+  key: string
+  kind: ActivityKind
+  /** agy's own wording, never rewritten here. */
+  label: string
+  command?: string
+  target?: string
+  durationSeconds?: number
+}
+
+// Real captured PTY shapes (agy 1.1.27/1.1.28 — see
+// docs/antigravity-transports.md and the checked-in frame fixtures):
+//
+//   "● Bash(npm run build) (ctrl+o to expand)"
+//   "▸ Thought for 11s"
+//   "⣽  Verifying Requirements Thoroughly..."
+//   "⢿  Working..."
+//
+// These are the interactive transport's ONLY account of what it is doing:
+// stream-json's structured `tool` steps do not exist here. They were
+// already being parsed out of the response body as chrome and thrown away;
+// this reads them instead of discarding them.
+const SCREEN_TOOL_CALL = /^\s*[●▸]\s*([A-Za-z][\w .-]*?)\s*\((.*)\)\s*$/
+const THOUGHT_LINE = /^\s*[●▸]\s*Thought for\s+(\d+(?:\.\d+)?)\s*s(?:econds?)?\b/i
+/** The trailing "(ctrl+o to expand)" affordance agy appends to a tool row —
+ *  a keyboard hint, not part of what the tool is doing. */
+const EXPAND_HINT = /\s*\((?:ctrl|cmd)\+\w+ to expand\)\s*$/i
+/** A Braille spinner frame followed by agy's own title for what it is
+ *  currently doing. The glyph itself rotates every frame and is dropped, so
+ *  the same work does not read as new work 8 times a second. */
+const SPINNER_STATUS = /^\s*[\u2800-\u28ff]\s+(\S.*?)\s*$/
+
+/** What agy says it is doing right now, read from the live PTY screen.
+ *
+ *  Purely descriptive: every value returned is text agy itself drew. When
+ *  the screen says nothing about the work, this returns nothing and the
+ *  caller reports nothing — Orbit never manufactures an activity to fill
+ *  the silence. */
+export function readScreenActivity(lines: string[]): ScreenActivity[] {
+  const found: ScreenActivity[] = []
+  const seen = new Set<string>()
+  const add = (activity: ScreenActivity): void => {
+    if (seen.has(activity.key)) return
+    seen.add(activity.key)
+    found.push(activity)
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    // The clipboard-paste confirmation shares the "▸" marker but is a
+    // transport receipt, not work — see MEDIA_ATTACHED_PATTERN.
+    if (MEDIA_ATTACHED_PATTERN.test(trimmed)) continue
+
+    const thought = THOUGHT_LINE.exec(trimmed)
+    if (thought) {
+      // agy prints this once the thinking is over and it knows how long it
+      // took, so it is reported as the finished step it describes.
+      add({ key: 'screen:thinking', kind: 'thinking', label: 'Thought', durationSeconds: Number(thought[1]) })
+      continue
+    }
+
+    const call = SCREEN_TOOL_CALL.exec(trimmed.replace(EXPAND_HINT, ''))
+    if (call) {
+      const tool = call[1]!.trim()
+      const argument = call[2]!.trim()
+      const facts = screenToolFacts(tool, argument)
+      add({ key: `screen:tool:${tool}:${argument}`, label: tool, ...facts })
+      continue
+    }
+
+    const spinner = SPINNER_STATUS.exec(line)
+    if (spinner) {
+      // "Verifying Requirements Thoroughly..." -> agy's own words, minus
+      // the animated ellipsis it redraws them with.
+      const title = spinner[1]!.replace(/\.{2,}$/, '').trim()
+      if (!title || READY_FOOTER.test(title) || BUSY_FOOTER.test(title)) continue
+      add({ key: `screen:status:${title.toLowerCase()}`, kind: 'working', label: title })
+    }
+  }
+  return found
+}
+
+/** Classifies a screen-drawn tool row. The argument agy shows in the
+ *  parentheses is the literal command or path, so a shell tool's argument
+ *  is preserved verbatim as the command rather than described. */
+function screenToolFacts(tool: string, argument: string): { kind: ActivityKind; command?: string; target?: string } {
+  const kind = classifyToolName(tool)
+  if (!argument) return { kind }
+  if (kind === 'running') return { kind, command: argument }
+  return { kind, target: argument }
 }
 
 export function readMediaAttachedCount(lines: string[]): number {

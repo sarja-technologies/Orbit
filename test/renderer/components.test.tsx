@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { InteractionCard, InactiveInteraction, ResolvedInteraction } from '../../src/renderer/app/components/InteractionCard'
@@ -178,7 +178,12 @@ describe('AttachmentChip', () => {
 })
 
 describe('activity rendering', () => {
-  const event = (label: string, status: ToolActivityEvent['status'], id: string): ToolActivityEvent => ({
+  const event = (
+    label: string,
+    status: ToolActivityEvent['status'],
+    id: string,
+    facts: Partial<ToolActivityEvent> = {}
+  ): ToolActivityEvent => ({
     type: 'tool.activity',
     projectId: 'p',
     conversationId: 'c',
@@ -187,28 +192,90 @@ describe('activity rendering', () => {
     createdAt: new Date().toISOString(),
     label,
     status,
-    providerStepId: id
+    providerStepId: id,
+    ...facts
   })
 
   it('shows a single live line, not an event feed', () => {
-    let state = applyActivity(emptyActivity(), event('Bash(npm run build)', 'running', '1'))
-    state = applyActivity(state, event('read_file(App.tsx)', 'running', '2'))
+    let state = applyActivity(emptyActivity(), event('run_command', 'running', '1', { kind: 'running', command: 'npm run build' }))
+    state = applyActivity(state, event('view_file', 'running', '2', { kind: 'reading', target: '/ws/src/App.tsx' }))
     render(<LiveActivity activity={state} />)
     // Only the current step is shown while running.
-    expect(screen.getByText('read_file(App.tsx)')).toBeInTheDocument()
-    expect(screen.queryByText('Bash(npm run build)')).not.toBeInTheDocument()
+    expect(screen.getByText('Reading App.tsx')).toBeInTheDocument()
+    expect(screen.queryByText('npm run build')).not.toBeInTheDocument()
+  })
+
+  it('shows the exact command a step is running, not a description of it', () => {
+    const state = applyActivity(
+      emptyActivity(),
+      event('run_command', 'running', '1', { kind: 'running', command: 'npm run build -- --watch' })
+    )
+    render(<LiveActivity activity={state} />)
+
+    expect(screen.getByText('Running')).toBeInTheDocument()
+    const command = screen.getByText('npm run build -- --watch')
+    expect(command.tagName).toBe('CODE')
+    // The whole command is always recoverable, however it is styled.
+    expect(command).toHaveAttribute('title', 'npm run build -- --watch')
+  })
+
+  it('names the real subject of every kind of step Antigravity reports', () => {
+    const cases: Array<[Partial<ToolActivityEvent>, string]> = [
+      [{ kind: 'thinking' }, 'Thinking'],
+      [{ kind: 'reading', target: '/ws/src/App.tsx' }, 'Reading App.tsx'],
+      [{ kind: 'listing', target: '/ws/src' }, 'Inspecting src'],
+      [{ kind: 'searching', target: 'useEffect' }, 'Searching project for “useEffect”'],
+      [{ kind: 'editing', target: '/ws/notes.md' }, 'Editing notes.md'],
+      [{ kind: 'waiting' }, 'Waiting for approval'],
+      [{ kind: 'working' }, 'Verifying Requirements Thoroughly'],
+      [{ kind: 'tool' }, 'Using some_tool']
+    ]
+    for (const [facts, expected] of cases) {
+      const label = facts.kind === 'working' ? 'Verifying Requirements Thoroughly' : 'some_tool'
+      const state = applyActivity(emptyActivity(), event(label, 'running', '1', facts))
+      const { unmount } = render(<LiveActivity activity={state} />)
+      expect(screen.getByText(expected), `${String(facts.kind)} should read as "${expected}"`).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('falls back to a restrained line rather than inventing an activity', () => {
+    // An event that named a tool and nothing else says exactly that much.
+    const state = applyActivity(emptyActivity(), event('mystery_tool', 'running', '1'))
+    render(<LiveActivity activity={state} />)
+    expect(screen.getByText('Using mystery_tool')).toBeInTheDocument()
+  })
+
+  it('reports the duration Antigravity measured rather than one of its own', () => {
+    const state = applyActivity(
+      emptyActivity(),
+      event('run_command', 'completed', '1', { kind: 'running', command: 'npm test', durationSeconds: 42 })
+    )
+    render(<LiveActivity activity={state} />)
+    expect(screen.getByText('42s')).toBeInTheDocument()
   })
 
   it('collapses a finished turn into a summary that expands on request', async () => {
-    let state = applyActivity(emptyActivity(), event('Bash(a)', 'completed', '1'))
-    state = applyActivity(state, event('write_file(b)', 'completed', '2'))
+    let state = applyActivity(emptyActivity(), event('run_command', 'completed', '1', { kind: 'running', command: 'a' }))
+    state = applyActivity(state, event('write_to_file', 'completed', '2', { kind: 'editing', target: '/ws/b.md' }))
     render(<ActivitySummary activity={state} />)
 
     expect(screen.getByText('Ran 1 command, edited 1 file')).toBeInTheDocument()
-    expect(screen.queryByText('Bash(a)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Editing b.md')).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: /Ran 1 command/ }))
-    expect(screen.getByText('Bash(a)')).toBeInTheDocument()
+    expect(screen.getByText('Editing b.md')).toBeInTheDocument()
+    expect(screen.getByText('a')).toBeInTheDocument()
+  })
+
+  it('counts a turn by what Antigravity said the steps were, not by their tool names', () => {
+    // `sed_file` reads as neither "edit" nor "read" by name; its reported
+    // kind is what makes the summary right.
+    let state = applyActivity(emptyActivity(), event('sed_file', 'completed', '1', { kind: 'editing', target: '/ws/a.ts' }))
+    state = applyActivity(state, event('thinking', 'completed', '2', { kind: 'thinking' }))
+    render(<ActivitySummary activity={state} />)
+    // Thinking is real work but not a countable step, so it is not padded in.
+    expect(screen.getByText('edited 1 file')).toBeInTheDocument()
   })
 })
 
@@ -314,32 +381,61 @@ describe('reply-in-progress state', () => {
       />
     )
 
+  const activityEvent = (facts: Partial<ToolActivityEvent>): ToolActivityEvent => ({
+    type: 'tool.activity',
+    projectId: 'p',
+    conversationId: 'c',
+    runId: 'r',
+    providerId: 'antigravity',
+    createdAt: new Date().toISOString(),
+    label: 'run_command',
+    status: 'running',
+    providerStepId: '1',
+    ...facts
+  })
+
   it('holds an animated assistant bubble open before the first token arrives', () => {
     const { container } = session()
 
-    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    // Antigravity has reported nothing yet, so the wait says only that much.
+    expect(screen.getByText('Working…')).toBeInTheDocument()
+    // And it never claims to be replying when no text has arrived.
+    expect(screen.queryByText('Antigravity is replying')).not.toBeInTheDocument()
     expect(container.querySelectorAll('.typing-dot')).toHaveLength(3)
     // The wait happens on the assistant's side, where the answer will land.
     expect(container.querySelector('.chat-row-assistant .chat-bubble-pending')).not.toBeNull()
   })
 
-  it('says working, not replying, once tool steps are running', () => {
-    const activity = applyActivity(emptyActivity(), {
-      type: 'tool.activity',
-      projectId: 'p',
-      conversationId: 'c',
-      runId: 'r',
-      providerId: 'antigravity',
-      createdAt: new Date().toISOString(),
-      label: 'Bash(npm test)',
-      status: 'running',
-      providerStepId: '1'
-    })
+  it('says what Antigravity is really doing, with the exact command', () => {
+    const activity = applyActivity(emptyActivity(), activityEvent({ kind: 'running', command: 'npm test -- --coverage' }))
     const { container } = session({ activityByRun: { r: activity } })
 
-    expect(screen.getByText('Antigravity is working')).toBeInTheDocument()
-    // Tool detail is subordinate to the reply, not a peer of it.
+    const pending = container.querySelector('.chat-bubble-pending') as HTMLElement
+    expect(within(pending).getByText('Running')).toBeInTheDocument()
+    expect(within(pending).getByText('npm test -- --coverage')).toBeInTheDocument()
+    expect(screen.queryByText('Antigravity is replying')).not.toBeInTheDocument()
+    // While the bubble IS the activity line, the subordinate rail would
+    // only repeat it.
+    expect(container.querySelector('.chat-aside .activity-live')).toBeNull()
+  })
+
+  it('moves the activity onto the subordinate rail once prose takes the bubble', () => {
+    const activity = applyActivity(emptyActivity(), activityEvent({ kind: 'running', command: 'npm test -- --coverage' }))
+    const { container } = session({ activityByRun: { r: activity }, streamText: 'Here is what I found.' })
+
+    // Tool detail is subordinate to the reply, not a peer of it — and it is
+    // shown exactly once.
     expect(container.querySelector('.chat-aside .activity-live')).not.toBeNull()
+    expect(container.querySelector('.chat-bubble-pending')).toBeNull()
+    expect(screen.getAllByText('npm test -- --coverage')).toHaveLength(1)
+  })
+
+  it('names the file a step is reading rather than describing the step', () => {
+    const activity = applyActivity(emptyActivity(), activityEvent({ label: 'view_file', kind: 'reading', target: '/ws/src/App.tsx' }))
+    const { container } = session({ activityByRun: { r: activity } })
+
+    const pending = container.querySelector('.chat-bubble-pending') as HTMLElement
+    expect(within(pending).getByText('Reading App.tsx')).toBeInTheDocument()
   })
 
   it('does not draw the subordinate rail for a run that has recorded no steps', () => {
@@ -349,7 +445,7 @@ describe('reply-in-progress state', () => {
     const { container } = session({ activityByRun: { r: emptyActivity() } })
 
     expect(container.querySelector('.chat-aside')).toBeNull()
-    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    expect(screen.getByText('Working…')).toBeInTheDocument()
   })
 
   it('keeps a streaming reply visibly unfinished while text is arriving', () => {
@@ -371,7 +467,7 @@ describe('reply-in-progress state', () => {
   })
 
   it('announces the pending row so the wait is not a silent one', () => {
-    const { container } = render(<PendingReply />)
+    const { container } = render(<PendingReply label="Working…" />)
     expect(container.querySelector('[aria-live="polite"]')).not.toBeNull()
   })
 })

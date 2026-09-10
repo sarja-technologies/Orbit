@@ -1,7 +1,8 @@
 import { memo, useMemo } from 'react'
 import type { Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
-import type { ActivityState } from '../lib/activity'
+import { currentActivityLine, type ActivityState } from '../lib/activity'
+import { describeActivity, fallbackActivity } from '../lib/activityCopy'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
@@ -163,15 +164,21 @@ export function WorkSession({
 
               {/* Nothing to read yet: a real assistant bubble holding animated
                   dots, so the wait happens where the answer will appear.
-                  A run opens with an empty activity state, which is not yet
-                  evidence of tool work — only real steps earn "working". */}
+                  What it says is whatever Antigravity is actually doing —
+                  the exact command, the file being read — falling back to a
+                  restrained `Working…` only when Antigravity has genuinely
+                  reported nothing (which is most of the thinking phase; see
+                  docs/antigravity-transports.md). */}
               {!pendingInteraction && !streamText ? (
-                <PendingReply label={hasSteps(activityByRun[activeRunId]) ? 'Antigravity is working' : 'Antigravity is replying'} />
+                <PendingReply {...pendingActivity(activityByRun[activeRunId])} />
               ) : null}
 
               {/* Tool work is subordinate to the reply: indented onto the
-                  assistant rail, never competing with the message itself. */}
-              {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
+                  assistant rail, never competing with the message itself.
+                  Only once prose has taken the bubble over, though — before
+                  that the bubble IS the activity line, and drawing both
+                  says the same thing twice. */}
+              {!pendingInteraction && streamText && hasSteps(activityByRun[activeRunId]) ? (
                 <div className="chat-aside">
                   <LiveActivity activity={activityByRun[activeRunId]!} />
                 </div>
@@ -233,6 +240,15 @@ const EMPTY_RESOLVED: ResolvedRecord[] = []
  *  subordinate rail draws itself with nothing on it. */
 function hasSteps(activity: ActivityState | undefined): boolean {
   return Boolean(activity && activity.items.length > 0)
+}
+
+/** What the waiting bubble says. A run with no reported step yet has no
+ *  evidence to show, and gets the restrained fallback rather than a
+ *  confident-sounding guess. */
+function pendingActivity(activity: ActivityState | undefined): { label: string; command: string | null } {
+  const current = activity ? currentActivityLine(activity) : null
+  const view = current ? describeActivity(current) : fallbackActivity()
+  return { label: view.text, command: view.command }
 }
 
 const MessageTurn = memo(function MessageTurn({

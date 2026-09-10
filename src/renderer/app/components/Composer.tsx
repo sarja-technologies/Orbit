@@ -15,7 +15,7 @@ interface ComposerProps {
   models: ModelOption[]
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
-  onSelectModel: (model: string | null) => void
+  onSelectModel: (model: string) => void
   onSelectEffort: (effort: ReasoningEffort) => void
   /** Lets the empty-state starters hand focus back to the composer after
    *  they fill it, so the user can keep typing without reaching for it. */

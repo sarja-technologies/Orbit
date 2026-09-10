@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { currentActivityLine, elapsedLabel, hasFailure, summarizeActivity, type ActivityState } from '../lib/activity'
+import { currentActivityLine, durationLabel, hasFailure, summarizeActivity, type ActivityItem, type ActivityState } from '../lib/activity'
+import { describeActivity } from '../lib/activityCopy'
 
 /** While a turn runs: one line that updates in place, so a long turn never
  *  looks frozen and never becomes an event feed. */
@@ -14,14 +15,44 @@ export function LiveActivity({ activity }: { activity: ActivityState }): JSX.Ele
   }, [current?.key, current?.status])
 
   if (!current) return null
-  const elapsed = current.status === 'running' ? elapsedLabel(current.startedAt, now) : null
+  const view = describeActivity(current)
+  const elapsed = durationLabel(current, now)
 
   return (
     <div className="activity activity-live" aria-live="polite">
       <span className="activity-pip" aria-hidden="true" />
-      <span className="activity-label">{current.label}</span>
+      <span className="activity-label">{view.text}</span>
+      {view.command ? <ActivityCommand command={view.command} /> : null}
       {elapsed ? <span className="activity-elapsed">{elapsed}</span> : null}
     </div>
+  )
+}
+
+/** The literal command Antigravity reported, shown as the command it is.
+ *  Never truncated into something that reads like a different command —
+ *  overflow is handled by the style, and the full text is the title. */
+function ActivityCommand({ command }: { command: string }): JSX.Element {
+  return (
+    <code className="activity-command" title={command}>
+      {command}
+    </code>
+  )
+}
+
+/** One finished step, as read back in the collapsed summary. */
+function ActivityItemLine({ item }: { item: ActivityItem }): JSX.Element {
+  const view = describeActivity(item)
+  const duration = durationLabel(item, 0)
+  return (
+    <li className={`activity-item activity-item-${item.status}`}>
+      <span className="activity-item-mark" aria-hidden="true">
+        {item.status === 'failed' ? '×' : '·'}
+      </span>
+      <span>{view.text}</span>
+      {view.command ? <ActivityCommand command={view.command} /> : null}
+      {duration ? <span className="activity-elapsed">{duration}</span> : null}
+      {item.status === 'failed' ? <span className="visually-hidden">failed</span> : null}
+    </li>
   )
 }
 
@@ -41,13 +72,7 @@ export function ActivitySummary({ activity }: { activity: ActivityState }): JSX.
       {open ? (
         <ol className="activity-items">
           {activity.items.map((item) => (
-            <li key={item.key} className={`activity-item activity-item-${item.status}`}>
-              <span className="activity-item-mark" aria-hidden="true">
-                {item.status === 'failed' ? '×' : '·'}
-              </span>
-              <span>{item.label}</span>
-              {item.status === 'failed' ? <span className="visually-hidden">failed</span> : null}
-            </li>
+            <ActivityItemLine key={item.key} item={item} />
           ))}
         </ol>
       ) : null}

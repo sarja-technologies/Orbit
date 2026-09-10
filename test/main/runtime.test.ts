@@ -12,10 +12,11 @@ import type { AgentProvider, ProviderSendInput } from '../../src/main/runtime/pr
 import type { ProviderStatus } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
+import { EXPECTED_DEFAULT_EFFORT, EXPECTED_DEFAULT_MODEL, NORMALIZED_CATALOGUE } from '../support/catalogue'
 
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
-  listModels = vi.fn(async () => [])
+  listModels = vi.fn(async () => NORMALIZED_CATALOGUE)
   cancelRun = vi.fn(async () => undefined)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
@@ -90,13 +91,43 @@ class HeadlessDenialProvider extends FakeProvider {
   }
 }
 
+/** Streams some text, then hands the test control of how the run ends.
+ *  Models the real Stop sequence: partial output already delivered, the
+ *  user stops, and the transport then reports whatever it reports. */
+class ControllableProvider implements AgentProvider {
+  emit: ((event: Partial<RuntimeEvent> & { type: RuntimeEvent['type'] }) => void) | null = null
+  listModels = vi.fn(async () => NORMALIZED_CATALOGUE)
+  respondToInteraction = vi.fn(async () => undefined)
+  releaseConversation = vi.fn(async () => undefined)
+  shutdown = vi.fn(async () => undefined)
+  cancelRun = vi.fn(async () => undefined)
+
+  async getStatus(): Promise<ProviderStatus> {
+    return { id: 'antigravity', state: 'ready', sdkAvailable: true, authConfigured: true, message: null, details: {} }
+  }
+
+  async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    const base = {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+    this.emit = (event) => onEvent({ ...base, ...event } as RuntimeEvent)
+    this.emit({ type: 'run.started', nativeConversationId: 'native-1' })
+    this.emit({ type: 'text.delta', delta: 'The bicycle stands as ' })
+    this.emit({ type: 'text.delta', delta: 'one of the most efficient' })
+  }
+}
+
 /** Mirrors the PTY session's deferred cancellation: the run is stopped while
  *  it is waiting on a model-change retirement, so there is no live process to
  *  interrupt and `run.cancelled` is emitted synchronously from cancelRun,
  *  while OrbitRuntime is still inside its own cancelRun. */
 class DeferredCancelProvider implements AgentProvider {
   private pending: { input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void } | null = null
-  listModels = vi.fn(async () => [])
+  listModels = vi.fn(async () => NORMALIZED_CATALOGUE)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
   shutdown = vi.fn(async () => undefined)
@@ -334,7 +365,7 @@ describe('OrbitRuntime', () => {
   })
 
   it('starts a session on the reasoning tier the user last chose', () => {
-    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: {} })
+    store.writePreferences({ defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: {} })
     const project = runtime.createProject('Seeded')
     expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('high')
     expect(runtime.createConversation(project.id, 'Another').reasoningEffort).toBe('high')
@@ -347,8 +378,8 @@ describe('OrbitRuntime', () => {
 
   it('round trips preferences through the runtime', () => {
     expect(runtime.getPreferences().lastReasoningEffort).toBeNull()
-    runtime.setPreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
-    expect(runtime.getPreferences()).toEqual({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    runtime.setPreferences({ defaultModel: null, lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    expect(runtime.getPreferences()).toEqual({ defaultModel: null, lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
   })
 
   it('passes cancellation to the provider', async () => {
@@ -387,6 +418,263 @@ describe('OrbitRuntime', () => {
     runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new FakeProvider(), dir, '0.1.0')
     const next = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'A later message' })
     await vi.waitFor(() => expect(store.requireRun(next.id).state).toBe('completed'))
+  })
+
+  describe('a stop is its own terminal state', () => {
+    const start = async (): Promise<{ provider: ControllableProvider; projectId: string; runId: string }> => {
+      const controllable = new ControllableProvider()
+      runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), controllable, dir, '0.1.0')
+      const project = runtime.createProject('Stop')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Tell me about bicycles' })
+      await vi.waitFor(() => expect(controllable.emit).not.toBeNull())
+      return { provider: controllable, projectId: project.id, runId: run.id }
+    }
+
+    const assistantFor = (projectId: string, runId: string) =>
+      store.listMessages(projectId).filter((message) => message.runId === runId && message.role === 'assistant')
+
+    it('keeps the text Antigravity had already produced', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+
+      const messages = assistantFor(projectId, runId)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+      // The partial answer survives the stop verbatim — nothing invented,
+      // nothing discarded.
+      expect(messages[0]!.content).toBe('The bicycle stands as one of the most efficient')
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+    })
+
+    it('never turns into a transport failure when the stopped process then dies', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+      // The exact race: agy's death is reported a beat after the stop was
+      // acknowledged. It must not overwrite the interruption.
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'Antigravity exited (143).', retryable: false } })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+      const messages = assistantFor(projectId, runId)
+      expect(messages, 'a late failure must not append a second assistant message').toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+    })
+
+    it('is not overwritten by a completion that arrives after it either', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer.', nativeConversationId: 'native-1' })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(assistantFor(projectId, runId)).toHaveLength(1)
+    })
+
+    it('leaves a genuine failure a genuine failure, with its real diagnostics', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      // No stop at all this time.
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'Antigravity exited (1). ENOENT', retryable: false } })
+
+      const run = store.requireRun(runId)
+      expect(run.state).toBe('failed')
+      expect(run.error?.code).toBe('provider.exited')
+      expect(run.error?.message).toContain('ENOENT')
+      expect(assistantFor(projectId, runId)[0]!.status).toBe('failed')
+    })
+
+    it('leaves an ordinary completion distinct from an interruption', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer.', nativeConversationId: 'native-1' })
+
+      expect(store.requireRun(runId).state).toBe('completed')
+      const messages = assistantFor(projectId, runId)
+      expect(messages[0]!.status).toBe('completed')
+      expect(messages[0]!.content).toBe('A whole answer.')
+    })
+
+    // PRODUCT RULE: accepting a Stop for an active run decides the outcome.
+    // Whatever the transport reports afterwards — a turn it had almost
+    // finished, or its own death from the signal — the run is interrupted.
+    it('stays interrupted when a SUCCESS lands after the Stop was accepted', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      expect(store.requireRun(runId).state, 'Stop accepted').toBe('cancelling')
+
+      // agy finishes the turn it was already most of the way through.
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer, finished after the stop.', nativeConversationId: 'native-1' })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+      const messages = assistantFor(projectId, runId)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+      // Nothing Antigravity produced is thrown away: a completion's own
+      // finalText is authoritative here exactly as it is on the ordinary
+      // path, so the answer it finished is what gets kept.
+      expect(messages[0]!.content).toBe('A whole answer, finished after the stop.')
+    })
+
+    it('stays interrupted when the stopped process then reports a failure', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'Antigravity exited (143).', retryable: false } })
+
+      expect(store.requireRun(runId).state).toBe('cancelled')
+      expect(store.requireRun(runId).error).toBeNull()
+      const messages = assistantFor(projectId, runId)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]!.status).toBe('cancelled')
+      // The partial answer streamed before the stop survives.
+      expect(messages[0]!.content).toBe('The bicycle stands as one of the most efficient')
+    })
+
+    it('leaves a turn that finished BEFORE the Stop completed', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      // The turn finishes first...
+      controllable.emit!({ type: 'run.completed', finalText: 'A whole answer.', nativeConversationId: 'native-1' })
+      expect(store.requireRun(runId).state).toBe('completed')
+
+      // ...and the Stop that arrives afterwards changes nothing. It must not
+      // drag a finished run into a stopping state it can never leave.
+      const returned = await runtime.cancelRun(runId)
+      expect(returned.state).toBe('completed')
+      expect(store.requireRun(runId).state).toBe('completed')
+      expect(controllable.cancelRun, 'a finished run is not interrupted').not.toHaveBeenCalled()
+      const messages = assistantFor(projectId, runId)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]!.status).toBe('completed')
+      expect(messages[0]!.content).toBe('A whole answer.')
+    })
+
+    it('leaves a turn that failed before the Stop failed', async () => {
+      const { provider: controllable, runId } = await start()
+      controllable.emit!({ type: 'run.failed', error: { code: 'provider.exited', message: 'ENOENT', retryable: false } })
+
+      const returned = await runtime.cancelRun(runId)
+      expect(returned.state).toBe('failed')
+      expect(returned.error?.message).toContain('ENOENT')
+      expect(controllable.cancelRun).not.toHaveBeenCalled()
+    })
+
+    it('frees the conversation so the next message can be sent immediately', async () => {
+      const { provider: controllable, projectId, runId } = await start()
+      const conversationId = store.requireRun(runId).conversationId
+      await runtime.cancelRun(runId)
+      controllable.emit!({ type: 'run.cancelled' })
+
+      expect(store.requireConversation(conversationId).status).toBe('idle')
+      const next = await runtime.sendMessage({ projectId, conversationId, content: 'Carry on then' })
+      expect(next.state).toBe('running')
+    })
+  })
+
+  describe('Orbit owns the default model', () => {
+    it('resolves a brand-new session to a concrete model before the run starts', async () => {
+      const project = runtime.createProject('Default model')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      expect(conversation.model, 'a fresh session starts with nothing chosen').toBeNull()
+
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+
+      // What agy was told...
+      expect(provider.lastInput?.model).toBe(EXPECTED_DEFAULT_MODEL)
+      expect(provider.lastInput?.reasoningEffort).toBe(EXPECTED_DEFAULT_EFFORT)
+      // ...is exactly what Orbit stored and will display.
+      const stored = store.requireConversation(conversation.id)
+      expect(stored.model).toBe(provider.lastInput?.model)
+      expect(stored.reasoningEffort).toBe(provider.lastInput?.reasoningEffort)
+    })
+
+    it('never sends a null model to the provider, whatever the session holds', async () => {
+      const project = runtime.createProject('Never null')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      for (const model of [null, 'gemini-9-imaginary']) {
+        store.setConversationModel(conversation.id, model, null)
+        await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+        expect(provider.lastInput?.model, `for stored model ${String(model)}`).toBeTruthy()
+        expect(NORMALIZED_CATALOGUE.some((candidate) => candidate.id === provider.lastInput?.model)).toBe(true)
+      }
+    })
+
+    it('honours the configured default model, so the setting is real', async () => {
+      runtime.setPreferences({ defaultModel: 'claude-sonnet-4-6', lastReasoningEffort: 'high', modelReasoningEfforts: {} })
+      const project = runtime.createProject('Configured')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+
+      expect(provider.lastInput?.model).toBe('claude-sonnet-4-6')
+      // Sonnet publishes no tiers; the remembered 'high' is not invented onto it.
+      expect(provider.lastInput?.reasoningEffort).toBeNull()
+    })
+
+    it('keeps a model the user chose, rather than resolving over the top of it', async () => {
+      const project = runtime.createProject('User choice')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      store.setConversationModel(conversation.id, 'gemini-3.1-pro', 'high')
+
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+
+      expect(provider.lastInput?.model).toBe('gemini-3.1-pro')
+      expect(provider.lastInput?.reasoningEffort).toBe('high')
+    })
+
+    it('changing the model changes what the next run asks agy for', async () => {
+      const project = runtime.createProject('Change')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'First' })
+      expect(provider.lastInput?.model).toBe(EXPECTED_DEFAULT_MODEL)
+
+      runtime.setConversationModel(conversation.id, 'gemini-3.1-pro', 'low')
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Second' })
+
+      expect(provider.lastInput?.model).toBe('gemini-3.1-pro')
+      expect(provider.lastInput?.reasoningEffort).toBe('low')
+      expect(store.requireConversation(conversation.id).model).toBe('gemini-3.1-pro')
+    })
+
+    it('migrates a legacy session that still carries the old Default null', async () => {
+      const project = runtime.createProject('Legacy')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      // Exactly the pre-change shape: no model, no tier.
+      store.setConversationModel(conversation.id, null, null)
+
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+
+      const migrated = store.requireConversation(conversation.id)
+      expect(migrated.model).toBe(EXPECTED_DEFAULT_MODEL)
+      expect(migrated.reasoningEffort).toBe(EXPECTED_DEFAULT_EFFORT)
+    })
+
+    it('corrects a stored tier the chosen model does not publish', async () => {
+      const project = runtime.createProject('Bad tier')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      // 3.1 Pro publishes low and high only.
+      store.setConversationModel(conversation.id, 'gemini-3.1-pro', 'medium')
+
+      await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })
+
+      expect(provider.lastInput?.model).toBe('gemini-3.1-pro')
+      expect(provider.lastInput?.reasoningEffort).toBe('low')
+      expect(store.requireConversation(conversation.id).reasoningEffort).toBe('low')
+    })
+
+    it('fails the turn honestly rather than letting Antigravity choose', async () => {
+      // A catalogue that could not be read leaves nothing concrete to name.
+      provider.listModels.mockResolvedValueOnce([])
+      const project = runtime.createProject('No catalogue')
+      const conversation = runtime.openProject(project.id).conversations[0]!
+
+      await expect(runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Hello' })).rejects.toThrow(
+        /model list/i
+      )
+      // Nothing was dispatched with an unresolved model.
+      expect(provider.lastInput).toBeNull()
+    })
   })
 
   it('persists intelligible provider failures as failed assistant messages', async () => {

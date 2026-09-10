@@ -9,6 +9,7 @@ import type { ID, ModelOption, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
+import { PATH_PARAMS, pickParameter, toolActivityFacts } from '@main/runtime/activityMapping'
 import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
 import { checkClipboardCapability } from './clipboardCapability'
 import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
@@ -16,7 +17,7 @@ import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
   conversation_id?: string
-  step_update?: { step_index?: number; state?: string; step_type?: string; text_delta?: string; tool_name?: string; tool_info?: { parameters?: Record<string, unknown>; error?: { message?: string } } }
+  step_update?: { step_index?: number; state?: string; step_type?: string; text_delta?: string; tool_name?: string; duration_seconds?: number; tool_info?: { parameters?: Record<string, unknown>; error?: { message?: string } } }
   result?: { conversation_id?: string; status?: string; response?: string; error?: string; usage?: Record<string, unknown>; denied_actions?: Array<{ action?: string; display_name?: string }> }
 }
 interface ActiveRun {
@@ -93,6 +94,16 @@ export class AntigravityProvider implements AgentProvider {
     // Resolve the model/effort choice against the real catalogue before
     // either transport spawns, so both launch paths agree.
     await this.loadModels()
+    // PRODUCT RULE, enforced at the only boundary that spawns agy: Orbit
+    // always names a concrete model. A catalogue that could not be read
+    // leaves nothing to name, and running anyway would mean agy picking —
+    // so the turn fails honestly instead of silently deferring the choice.
+    if (!resolveInvocation(input.model, input.reasoningEffort, this.rawModels).model) {
+      throw codedError(
+        'provider.model_unresolved',
+        'Orbit could not read Antigravity’s model list, so it cannot name the model to run. Orbit never lets Antigravity choose one for it. Check that `agy models` works, then try again.'
+      )
+    }
     if (input.transport === 'pty') {
       let session = this.ptySessions.get(input.conversationId)
       if (!session) {
@@ -185,7 +196,21 @@ export class AntigravityProvider implements AgentProvider {
       if (step.step_type === 'tool') {
         const status = step.state === 'ACTIVE' ? 'running' : step.state === 'ERROR' ? 'failed' : 'completed'
         const label = step.tool_name ?? 'Antigravity tool'
-        this.emit(active, { type: 'tool.activity', label, status, providerStepId: String(step.step_index ?? '') })
+        // agy names both the tool and what it is acting on. Both are
+        // carried through as facts — the exact command verbatim, the exact
+        // path — and turned into product language in the renderer, so a
+        // step is never reduced to "Antigravity is replying".
+        const facts = toolActivityFacts(label, step.tool_info?.parameters)
+        this.emit(active, {
+          type: 'tool.activity',
+          label,
+          status,
+          providerStepId: String(step.step_index ?? ''),
+          ...facts,
+          // Only agy's own measurement is reported; a still-running step
+          // has none and the UI times it itself.
+          ...(typeof step.duration_seconds === 'number' ? { durationSeconds: step.duration_seconds } : {})
+        })
         this.discoverArtifact(active, label, step.tool_info?.parameters)
       }
       // agy 1.1.27 represents headless ask_question/ask_permission as an
@@ -230,7 +255,10 @@ export class AntigravityProvider implements AgentProvider {
   }
   private discoverArtifact(active: ActiveRun, tool: string, parameters: Record<string, unknown> | undefined): void {
     if (!/(write|create|edit|save)/i.test(tool) || !parameters) return
-    const candidate = [parameters.path, parameters.file_path, parameters.filename].find((value): value is string => typeof value === 'string')
+    // CRITICAL: agy 1.1.28 names this `TargetFile`, not `path`/`file_path`
+    // (captured live — see activityMapping.ts). Matching only the older
+    // snake_case spellings meant every file agy wrote went undiscovered.
+    const candidate = pickParameter(parameters, PATH_PARAMS)
     if (!candidate) return
     const sourcePath = resolve(active.input.workspacePath, candidate)
     const workspace = `${resolve(active.input.workspacePath)}/`
@@ -242,8 +270,22 @@ export class AntigravityProvider implements AgentProvider {
     this.emit(active, { type: 'run.completed', finalText, nativeConversationId: active.nativeConversationId, ...(usage ? { usage } : {}) })
     this.activeRuns.delete(active.input.runId)
   }
+  /** CRITICAL (real bug): a run the user stopped can still produce every
+   *  shape of failure on its way down — agy writes a non-SUCCESS `result`
+   *  as SIGTERM lands, the pipe reports an error, the process exits
+   *  non-zero. Each of those used to reach the renderer as
+   *  `provider.failed` ("Antigravity's response couldn't be read... Your
+   *  conversation is safe..."), so pressing Stop looked like a crash.
+   *
+   *  Every failure path in this provider funnels through here, so making
+   *  cancellation win *here* makes it win by construction rather than by
+   *  each caller remembering to check. A stop the user asked for is a
+   *  cancellation whatever the transport says on its way out; a genuine
+   *  failure of a run nobody stopped is untouched and keeps its real code
+   *  and diagnostics. */
   private fail(active: ActiveRun, code: string, message: string): void {
     if (active.settled) return
+    if (active.cancelled) return this.cancelled(active)
     active.settled = true; this.emit(active, { type: 'run.failed', error: { code, message, retryable: false } }); this.activeRuns.delete(active.input.runId)
   }
   private cancelled(active: ActiveRun): void {

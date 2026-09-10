@@ -139,6 +139,9 @@ function harness() {
 const deltas = (events: RuntimeEvent[]): string[] =>
   events.filter((event): event is Extract<RuntimeEvent, { type: 'text.delta' }> => event.type === 'text.delta').map((event) => event.delta)
 
+const activities = (events: RuntimeEvent[]): Array<Extract<RuntimeEvent, { type: 'tool.activity' }>> =>
+  events.filter((event): event is Extract<RuntimeEvent, { type: 'tool.activity' }> => event.type === 'tool.activity')
+
 describe('AntigravityPtySession progressive response streaming', () => {
   it('emits the answer as text.delta while agy is still drawing it, in order and without repetition', () => {
     const { events, start } = harness()
@@ -386,6 +389,128 @@ describe('AntigravityPtySession progressive response streaming', () => {
     session.send(input(), (event) => events.push(event))
     transports.at(-1)!.stream([...BANNER, ...SETTLED_COMPOSE])
     expect(deltas(events)).toEqual([])
+  })
+})
+
+// The interactive transport has no structured step channel: agy's own
+// screen is the only account of what it is doing there. Every line replayed
+// below is a real captured shape (see the frame fixture and
+// docs/antigravity-transports.md).
+describe('AntigravityPtySession live activity from the interactive screen', () => {
+  it('reports the exact command agy shows itself running', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame(['● Bash(npm run build) (ctrl+o to expand)', P1]))
+
+    const running = activities(events).filter((event) => event.status === 'running')
+    expect(running.at(-1)).toMatchObject({ kind: 'running', command: 'npm run build', status: 'running' })
+    // The keyboard affordance agy appends is chrome, not part of the command.
+    expect(running.at(-1)!.command).toBe('npm run build')
+  })
+
+  it('reports agy\'s own word for what it is doing, not a generic one', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame(['⣽  Verifying Requirements Thoroughly...', P1]))
+
+    expect(activities(events).at(-1)).toMatchObject({ kind: 'working', label: 'Verifying Requirements Thoroughly', status: 'running' })
+  })
+
+  it('does not treat a rotating spinner glyph as new work', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    // The same status, redrawn with the next Braille frame — real captured
+    // behaviour, eight times a second.
+    transport.stream(frame(['⣽  Working...', P1]))
+    transport.stream(frame(['⢿  Working...', P1]))
+    transport.stream(frame(['⣻  Working...', P1]))
+
+    expect(activities(events).filter((event) => event.label === 'Working')).toHaveLength(1)
+  })
+
+  it('reports the thinking agy says it did, with the duration agy measured', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame([P1]))
+
+    // `▸ Thought for 11s` describes work that is already over.
+    expect(activities(events).find((event) => event.kind === 'thinking')).toMatchObject({
+      status: 'completed',
+      durationSeconds: 11
+    })
+  })
+
+  it('completes a step once agy has taken it off screen', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame(['● Bash(npm run build) (ctrl+o to expand)', P1]))
+    transport.stream(frame([P1, P2]))
+
+    const command = activities(events).filter((event) => event.command === 'npm run build')
+    expect(command.map((event) => event.status)).toEqual(['running', 'completed'])
+  })
+
+  it('never reports agy\'s startup banner or a clipboard receipt as activity', () => {
+    const { session, events, transports } = harness()
+    session.send(input(), (event) => events.push(event))
+    const transport = transports.at(-1)!
+
+    // Still bootstrapping: this screen is agy's banner, which carries the
+    // signed-in account's email.
+    transport.stream(BANNER)
+    expect(activities(events)).toHaveLength(0)
+
+    transport.handlers!.onReadyForInput()
+    transport.stream(frame(['▸ 📎 1 media attached (clipboard, 141 B, image/png)', P1]))
+    // The paste confirmation shares the marker but is a transport receipt.
+    expect(activities(events).some((event) => event.label.includes('media'))).toBe(false)
+  })
+
+  it('stops reporting activity once the turn has been stopped', () => {
+    const { session, events, start } = harness()
+    const transport = start()
+    transport.stream(frame(['● Bash(npm run build) (ctrl+o to expand)', P1]))
+    const before = activities(events).length
+
+    session.cancel()
+    transport.stream(frame(['● Bash(rm -rf build) (ctrl+o to expand)', P1, P2]))
+
+    expect(activities(events)).toHaveLength(before)
+  })
+
+  it('reads activity from an idle snapshot too, for a turn that never streams', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.snapshot(frame(['● Bash(npm test) (ctrl+o to expand)', P1]))
+
+    expect(activities(events).some((event) => event.command === 'npm test')).toBe(true)
+  })
+
+  it('starts each turn with a clean slate rather than replaying the last one', () => {
+    const { session, events, start } = harness()
+    const transport = start()
+    transport.stream(frame(['● Bash(npm run build) (ctrl+o to expand)', P1]))
+    transport.snapshot(frame([P1, P2], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+    expect(events.some((event) => event.type === 'run.completed')).toBe(true)
+
+    // The same live process takes the next turn — its screen still shows
+    // the previous turn's work until agy redraws.
+    const nextPrompt = 'And now the printing press.'
+    session.send(input({ runId: 'run_2', prompt: nextPrompt }), (event) => events.push(event))
+    const second = activities(events).filter((event) => event.runId === 'run_2')
+    expect(second, 'nothing is reported for a turn before its own screen has been seen').toHaveLength(0)
+
+    transport.stream([...BANNER, `> ${nextPrompt}`, '', '● Bash(npm test) (ctrl+o to expand)', P1, ...COMPOSE])
+    const reported = activities(events).filter((event) => event.runId === 'run_2')
+    expect(reported.some((event) => event.command === 'npm test')).toBe(true)
+    expect(reported.some((event) => event.command === 'npm run build')).toBe(false)
   })
 })
 

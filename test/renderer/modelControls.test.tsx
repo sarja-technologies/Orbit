@@ -135,12 +135,14 @@ describe('closed composer control', () => {
 })
 
 describe('compact model menu', () => {
-  it('shows the default model and Gemini only, because Antigravity is a Gemini workflow', async () => {
+  it('shows Gemini only, because Antigravity is a Gemini workflow', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
 
-    expect(screen.getByRole('menuitemradio', { name: /Default model/ })).toBeInTheDocument()
+    // There is no "Default model" row: Orbit owns its default and every
+    // selectable option is a real catalogue model.
+    expect(screen.queryByRole('menuitemradio', { name: /Default model/ })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toBeInTheDocument()
     expect(screen.queryByRole('menuitemradio', { name: /Claude Sonnet/ })).not.toBeInTheDocument()
@@ -306,12 +308,14 @@ describe('reasoning control', () => {
     expect(screen.getByText('Reasoning is controlled by the model.')).toBeInTheDocument()
   })
 
-  it('gives Antigravity’s own default model a real three-tier control', async () => {
+  it('offers no reasoning control for a selection that has not resolved yet', async () => {
+    // A null model is the brief pre-resolution moment, not a choice. It has
+    // no tiers of its own to offer, because it is not a model.
     const user = userEvent.setup()
     renderControls(null, 'medium')
     await openPopover(user)
-    expect((document.querySelector('.reasoning-scale') as HTMLElement).style.getPropertyValue('--stops')).toBe('3')
-    expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Medium')
+    expect(document.querySelector('.reasoning-scale')).toBeNull()
+    expect(screen.queryByRole('slider')).not.toBeInTheDocument()
   })
 
   it('selects a tier when its label is clicked', async () => {

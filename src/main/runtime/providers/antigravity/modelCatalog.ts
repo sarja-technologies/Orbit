@@ -26,6 +26,8 @@
 // never guessed here.
 import { spawn } from 'node:child_process'
 import type { ModelOption, ReasoningEffort } from '@shared/domain'
+import { pickDefaultModelId } from '@shared/defaultModel'
+import { DEFAULT_REASONING_EFFORT, nearestSupportedEffort } from '@shared/reasoningPolicy'
 
 export const REASONING_TIERS: readonly ReasoningEffort[] = ['low', 'medium', 'high'] as const
 
@@ -93,7 +95,16 @@ export interface AntigravityInvocation {
 
 /** The one place a model + effort choice becomes real `--model`/`--effort`
  *  arguments. `rawCatalog` must be the same un-normalized list
- *  normalizeModels() consumes. */
+ *  normalizeModels() consumes.
+ *
+ *  PRODUCT RULE: this never produces an invocation without a `--model`
+ *  while a catalogue exists. Orbit owns its default model (see
+ *  shared/defaultModel.ts) and always names it explicitly; the old
+ *  behaviour of omitting `--model` so agy would pick — for a null
+ *  selection, and for a multi-tier base whose tier was missing — is gone.
+ *  The only model-less result left is an empty catalogue, which callers
+ *  must treat as a failure rather than as agy's default (see
+ *  AntigravityProvider.sendMessage). */
 export function resolveInvocation(
   model: string | null | undefined,
   reasoningEffort: string | null | undefined,
@@ -101,31 +112,38 @@ export function resolveInvocation(
 ): AntigravityInvocation {
   const effort = (reasoningEffort || undefined) as ReasoningEffort | undefined
 
-  // Reasoning chosen with model left on default — agy accepts `--effort`
-  // alone, applying it to its own default model. Nothing is guessed.
-  if (!model) return effort ? { effort } : {}
+  // No selection: Orbit picks a concrete model from the real catalogue
+  // rather than handing the decision to agy.
+  const requested = model || pickDefaultModelId(normalizeModels(rawCatalog))
+  // The catalogue could not be read at all. There is nothing concrete to
+  // name, and naming nothing means agy chooses — which is exactly what this
+  // must never do. The caller turns this into an honest error.
+  if (!requested) return {}
 
   // Already a real, self-contained raw id (a combined id, or a genuinely
   // single-tier model). agy accepts this alone; never send a redundant or
   // conflicting --effort alongside an id that already encodes one.
-  if (rawCatalog.some((candidate) => candidate.id === model)) return { model }
+  if (rawCatalog.some((candidate) => candidate.id === requested)) return { model: requested }
 
   // Otherwise it must be a normalized BASE id — find its real tiers.
-  const variantPrefix = `${model}-`
-  const variantIds = new Set(rawCatalog.filter((candidate) => candidate.id.startsWith(variantPrefix)).map((candidate) => candidate.id))
+  const variantPrefix = `${requested}-`
+  const variantTiers = REASONING_TIERS.filter((tier) => rawCatalog.some((candidate) => candidate.id === `${variantPrefix}${tier}`))
 
   // Unrecognized entirely (stale/future catalogue drift) — pass it through
   // rather than silently dropping the choice, so agy's own "unknown model"
   // error surfaces like any other bad launch configuration.
-  if (variantIds.size === 0) return effort ? { model, effort } : { model }
+  if (variantTiers.length === 0) return effort ? { model: requested, effort } : { model: requested }
 
-  if (effort && variantIds.has(`${model}-${effort}`)) return { model, effort }
+  if (effort && variantTiers.includes(effort)) return { model: requested, effort }
 
-  // A multi-tier base with no valid effort selected. agy's CLI requires
-  // --effort here, and no default tier is discoverable, so the honest
-  // choice is to omit the model entirely and let agy use its own default
-  // rather than send a combination known to fail.
-  return {}
+  // A multi-tier base whose tier is missing or not one this model publishes.
+  // agy's CLI requires --effort here. Orbit chooses the tier — the nearest
+  // one this model really has to the documented default — instead of
+  // dropping the model and letting agy choose the whole thing.
+  const resolved =
+    nearestSupportedEffort({ id: requested, label: requested, supportedReasoningEfforts: variantTiers }, DEFAULT_REASONING_EFFORT) ??
+    variantTiers[0]!
+  return { model: requested, effort: resolved }
 }
 
 /** Parses `agy models` stdout. Two real shapes are tolerated: `<id>\t<label>`
