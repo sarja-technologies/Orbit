@@ -233,9 +233,10 @@ export function App(): JSX.Element {
     void persistModel(activeConversation.id, activeConversation.model, effort)
   }, [activeConversation, models, preferences])
 
-  // Remember where the user is, so the next launch reopens it. Written only
-  // when it actually changes, and only once a real session is open — an
-  // in-progress load must not overwrite the position being restored.
+  // Remember where the user is. The next launch uses the project to decide
+  // where its fresh session goes; the conversation id is kept as a record of
+  // position and deliberately does not reopen anything. Written only when it
+  // actually changes, and only once a real session is open.
   const lastActiveRef = useRef<string>('')
   useEffect(() => {
     const projectId = workspace.activeProjectId
@@ -267,16 +268,31 @@ export function App(): JSX.Element {
       .list()
       .then(setModels)
       .catch(() => setModels([]))
-    // Reopen where the user actually was. `lastActive*` is their own last
-    // position; groups are already ordered by recency, so the fallback is
-    // the most recently touched project rather than an arbitrary one.
-    // Nothing here creates a session: an empty project opens empty, and
-    // only an explicit New Session makes one.
+    // Every launch opens on one brand-new session, never on whatever
+    // conversation happened to be open last time. The main process decides
+    // and creates it — see startupSession.ts — because it is the only place
+    // that knows an *application launch* from a renderer remount, an HMR
+    // reload or a bridge reconnect. Asking again here is therefore safe:
+    // it returns the same session rather than making a second one.
+    // `lastActiveProjectId` still matters, but only to choose which project
+    // the fresh session belongs to. Old conversations stay in the sidebar,
+    // untouched and selectable.
+    const startup = await orbit.startup.session().catch(() => null)
+    if (startup) {
+      setExpandedProjectIds((current) => (current.includes(startup.projectId) ? current : [...current, startup.projectId]))
+      await openProject(startup.projectId, startup.conversationId)
+      setFocusPendingId(startup.conversationId)
+      return
+    }
+    // No session to open on. Either this is first run and there is no
+    // project to hold one (the create-project state below is correct), or
+    // creating it failed — in which case the project still opens, on its
+    // own most recent session, but never on a restored `lastActive` one.
     const remembered = groups.find((group) => group.project.id === storedPreferences.lastActiveProjectId)?.project
     const target = remembered ?? groups[0]?.project
     if (!target) return
     setExpandedProjectIds((current) => (current.includes(target.id) ? current : [...current, target.id]))
-    await openProject(target.id, storedPreferences.lastActiveConversationId)
+    await openProject(target.id)
   }
 
   async function openProject(projectId: ID, preferredConversationId?: ID | null): Promise<void> {

@@ -60,6 +60,7 @@ export function registerIpc(runtime: OrbitRuntime): void {
     const parsed = setConversationWorkingDirectorySchema.parse(input)
     return runtime.setConversationWorkingDirectory(parsed.conversationId, parsed.workingDirectory)
   })
+  ipcMain.handle(IPC_CHANNELS.startupSession, () => runtime.ensureStartupSession())
   ipcMain.handle(IPC_CHANNELS.preferencesGet, () => runtime.getPreferences())
   ipcMain.handle(IPC_CHANNELS.preferencesSet, (_event, input: unknown) => runtime.setPreferences(preferencesSchema.parse(input)))
   // The one place Orbit asks the OS where work should happen. Directory-only
