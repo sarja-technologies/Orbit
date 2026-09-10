@@ -254,7 +254,10 @@ describe('streaming hand-off to the persisted assistant message', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
     expect(screen.queryByText('Half an answ'), 'the partial reply hands over to the stored cancellation').not.toBeInTheDocument()
     // A cancelled turn renders as the transcript's own note, exactly once.
-    expect(screen.getAllByText('Cancelled')).toHaveLength(1)
+    // A user-requested stop is a lifecycle state, stated calmly — never
+    // an error, and never a prompt to retry.
+    expect(screen.getAllByText('You stopped this response')).toHaveLength(1)
+    expect(document.body.textContent).not.toMatch(/couldn’t be read|went wrong|try again/i)
   })
 
   it('clears the live run once the refreshed transcript has taken over', async () => {

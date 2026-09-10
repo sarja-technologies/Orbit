@@ -5,8 +5,8 @@ import { reasoningTheme } from '../lib/reasoningVisual'
 import { isGeminiModel, providerForModel } from '../lib/providers'
 import { modelForSelection } from '@shared/reasoningPolicy'
 import { ReasoningControl } from './ReasoningControl'
-import { ModelBrowser, ModelRow, Tick, AutoGlyph } from './ModelBrowser'
-import { ProviderLogo } from './ProviderLogo'
+import { ModelBrowser, ModelRow, Tick } from './ModelBrowser'
+import { AutoGlyph, ProviderLogo } from './ProviderLogo'
 
 interface ModelControlsProps {
   models: ModelOption[]

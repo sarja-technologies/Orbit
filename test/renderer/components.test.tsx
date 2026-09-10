@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { InteractionCard, InactiveInteraction, ResolvedInteraction } from '../../src/renderer/app/components/InteractionCard'
@@ -9,7 +9,7 @@ import { Markdown } from '../../src/renderer/app/components/Markdown'
 import { MessageBlock } from '../../src/renderer/app/components/MessageBlock'
 import { PendingReply } from '../../src/renderer/app/components/ChatRow'
 import { WorkSession } from '../../src/renderer/app/components/WorkSession'
-import { applyActivity, emptyActivity } from '../../src/renderer/app/lib/activity'
+import { applyActivity, emptyActivity, finalizeActivity } from '../../src/renderer/app/lib/activity'
 import type { DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import type { Conversation, Message, Project } from '../../src/shared/domain'
 import type { InteractionRequiredEvent, ToolActivityEvent } from '../../src/shared/runtime-events'
@@ -178,7 +178,12 @@ describe('AttachmentChip', () => {
 })
 
 describe('activity rendering', () => {
-  const event = (label: string, status: ToolActivityEvent['status'], id: string): ToolActivityEvent => ({
+  const event = (
+    label: string,
+    status: ToolActivityEvent['status'],
+    id: string,
+    kind: ToolActivityEvent['kind'] = 'tool'
+  ): ToolActivityEvent => ({
     type: 'tool.activity',
     projectId: 'p',
     conversationId: 'c',
@@ -187,28 +192,104 @@ describe('activity rendering', () => {
     createdAt: new Date().toISOString(),
     label,
     status,
+    kind,
     providerStepId: id
   })
 
   it('shows a single live line, not an event feed', () => {
-    let state = applyActivity(emptyActivity(), event('Bash(npm run build)', 'running', '1'))
-    state = applyActivity(state, event('read_file(App.tsx)', 'running', '2'))
+    let state = applyActivity(emptyActivity(), event('Running npm run build', 'running', '1', 'command'))
+    state = applyActivity(state, event('Reading App.tsx', 'running', '2', 'read'))
     render(<LiveActivity activity={state} />)
     // Only the current step is shown while running.
-    expect(screen.getByText('read_file(App.tsx)')).toBeInTheDocument()
-    expect(screen.queryByText('Bash(npm run build)')).not.toBeInTheDocument()
+    expect(screen.getByText('Reading App.tsx')).toBeInTheDocument()
+    expect(screen.queryByText('Running npm run build')).not.toBeInTheDocument()
   })
 
-  it('collapses a finished turn into a summary that expands on request', async () => {
-    let state = applyActivity(emptyActivity(), event('Bash(a)', 'completed', '1'))
-    state = applyActivity(state, event('write_file(b)', 'completed', '2'))
+  it('shows the real command a run is on, not a generic working label', () => {
+    const state = applyActivity(emptyActivity(), event('Running npm run build', 'running', '1', 'command'))
+    render(<LiveActivity activity={state} />)
+
+    expect(screen.getByText('Running npm run build')).toBeInTheDocument()
+    expect(screen.queryByText(/is working/)).not.toBeInTheDocument()
+  })
+
+  it('counts up while a command is running, and stops the moment it finishes', () => {
+    vi.useFakeTimers()
+    try {
+      const started = Date.now()
+      const state = applyActivity(emptyActivity(), event('Running npm run build', 'running', '1', 'command'), started)
+      const { rerender, container } = render(<LiveActivity activity={state} />)
+
+      const elapsed = (): string => container.querySelector('.activity-elapsed')?.textContent?.trim() ?? ''
+      expect(elapsed()).toBe('')
+
+      act(() => {
+        vi.advanceTimersByTime(12_000)
+      })
+      expect(elapsed()).toContain('12s')
+
+      act(() => {
+        vi.advanceTimersByTime(122_000)
+      })
+      expect(elapsed()).toContain('2m 14s')
+
+      // The command completes at 134s. Its time is now a fact about what
+      // happened, and no amount of further waiting may change it.
+      const done = applyActivity(state, event('Running npm run build', 'completed', '1', 'command'), started + 134_000)
+      rerender(<LiveActivity activity={done} />)
+      expect(elapsed()).toContain('2m 14s')
+
+      act(() => {
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(elapsed()).toContain('2m 14s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops counting a step left open by a cancelled run', () => {
+    vi.useFakeTimers()
+    try {
+      const started = Date.now()
+      const state = applyActivity(emptyActivity(), event('Running npm run build', 'running', '1', 'command'), started)
+      const { rerender, container } = render(<LiveActivity activity={state} />)
+      act(() => {
+        vi.advanceTimersByTime(8_000)
+      })
+
+      // Exactly what App does on run.cancelled: close every open step.
+      rerender(<LiveActivity activity={finalizeActivity(state, started + 8_000)} />)
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
+
+      expect(container.querySelector('.activity-elapsed')?.textContent).toContain('8s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks the live row with the working model\u2019s own logo', () => {
+    const state = applyActivity(emptyActivity(), event('Running npm run build', 'running', '1', 'command'))
+    const { container } = render(
+      <LiveActivity activity={state} identity={{ provider: 'anthropic', name: 'Claude Sonnet 4.6' }} />
+    )
+    expect(container.querySelector('.activity-agent [data-provider="anthropic"]')).not.toBeNull()
+  })
+
+  it('collapses a finished turn into a summary that expands on request, with each step\u2019s real time', async () => {
+    let state = applyActivity(emptyActivity(), event('Running npm test', 'running', '1', 'command'), 1000)
+    state = applyActivity(state, event('Running npm test', 'completed', '1', 'command'), 4000)
+    state = applyActivity(state, event('Editing styles.css', 'completed', '2', 'edit'), 5000)
     render(<ActivitySummary activity={state} />)
 
     expect(screen.getByText('Ran 1 command, edited 1 file')).toBeInTheDocument()
-    expect(screen.queryByText('Bash(a)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Running npm test')).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: /Ran 1 command/ }))
-    expect(screen.getByText('Bash(a)')).toBeInTheDocument()
+    expect(screen.getByText('Running npm test')).toBeInTheDocument()
+    expect(screen.getByText('3s')).toBeInTheDocument()
   })
 })
 
@@ -304,6 +385,8 @@ describe('reply-in-progress state', () => {
         activeRunId="r"
         streamText=""
         activityByRun={{}}
+        identity={{ provider: 'gemini', name: '3.8 Flash' }}
+        stopping={false}
         pendingInteraction={null}
         unavailableInteraction={null}
         staleInteraction={false}
@@ -314,13 +397,50 @@ describe('reply-in-progress state', () => {
       />
     )
 
-  it('holds an animated assistant bubble open before the first token arrives', () => {
+  it('holds an animated assistant bubble open before the first token arrives, named after the working model', () => {
     const { container } = session()
 
-    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    expect(screen.getByText('3.8 Flash is replying')).toBeInTheDocument()
     expect(container.querySelectorAll('.typing-dot')).toHaveLength(3)
     // The wait happens on the assistant's side, where the answer will land.
     expect(container.querySelector('.chat-row-assistant .chat-bubble-pending')).not.toBeNull()
+  })
+
+  it('marks the working turn with the model\u2019s own logo, never Orbit\u2019s', () => {
+    const { container } = session()
+    const mark = container.querySelector('.chat-mark')
+
+    expect(mark).toHaveAttribute('data-provider', 'gemini')
+    expect(mark!.querySelector('[data-provider="gemini"]')).not.toBeNull()
+    // Orbit's own Saturn mark stands for the app, not for the AI.
+    expect(container.querySelector('.orbit-logo')).toBeNull()
+  })
+
+  it('says which vendor is answering for Claude and for OpenAI too', () => {
+    const claude = session({ identity: { provider: 'anthropic', name: 'Claude Opus 4.6' } })
+    expect(screen.getByText('Claude Opus 4.6 is replying')).toBeInTheDocument()
+    expect(claude.container.querySelector('.chat-mark')).toHaveAttribute('data-provider', 'anthropic')
+    claude.unmount()
+
+    const openai = session({ identity: { provider: 'openai', name: 'GPT-5 Codex' } })
+    expect(screen.getByText('GPT-5 Codex is replying')).toBeInTheDocument()
+    expect(openai.container.querySelector('.chat-mark')).toHaveAttribute('data-provider', 'openai')
+  })
+
+  it('draws a neutral mark, not a guessed vendor, when the model is Antigravity\u2019s own default', () => {
+    const { container } = session({ identity: { provider: null, name: 'Antigravity' } })
+
+    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    expect(container.querySelector('.chat-mark')).toHaveAttribute('data-provider', 'unknown')
+    expect(container.querySelector('.chat-mark [data-provider="unknown"]')).not.toBeNull()
+  })
+
+  it('states a deliberate stop as a stop, while the run finishes tearing down', () => {
+    session({ stopping: true })
+
+    expect(screen.getByText('Stopping…')).toBeInTheDocument()
+    expect(screen.getAllByText('Stopping').length).toBeGreaterThan(0)
+    expect(document.body.textContent).not.toMatch(/couldn’t be read|went wrong|try again/i)
   })
 
   it('says working, not replying, once tool steps are running', () => {
@@ -331,15 +451,37 @@ describe('reply-in-progress state', () => {
       runId: 'r',
       providerId: 'antigravity',
       createdAt: new Date().toISOString(),
-      label: 'Bash(npm test)',
+      label: 'Running npm test',
       status: 'running',
+      kind: 'command',
       providerStepId: '1'
     })
     const { container } = session({ activityByRun: { r: activity } })
 
-    expect(screen.getByText('Antigravity is working')).toBeInTheDocument()
-    // Tool detail is subordinate to the reply, not a peer of it.
+    expect(screen.getByText('3.8 Flash is working')).toBeInTheDocument()
+    // Tool detail is subordinate to the reply, not a peer of it — and it
+    // carries the real command, not a restatement of "working".
     expect(container.querySelector('.chat-aside .activity-live')).not.toBeNull()
+    expect(screen.getByText('Running npm test')).toBeInTheDocument()
+  })
+
+  it('drops back to replying once every step has finished', () => {
+    let activity = applyActivity(emptyActivity(), {
+      type: 'tool.activity',
+      projectId: 'p',
+      conversationId: 'c',
+      runId: 'r',
+      providerId: 'antigravity',
+      createdAt: new Date().toISOString(),
+      label: 'Running npm test',
+      status: 'running',
+      kind: 'command',
+      providerStepId: '1'
+    })
+    activity = finalizeActivity(activity)
+
+    session({ activityByRun: { r: activity } })
+    expect(screen.getByText('3.8 Flash is replying')).toBeInTheDocument()
   })
 
   it('does not draw the subordinate rail for a run that has recorded no steps', () => {
@@ -349,7 +491,7 @@ describe('reply-in-progress state', () => {
     const { container } = session({ activityByRun: { r: emptyActivity() } })
 
     expect(container.querySelector('.chat-aside')).toBeNull()
-    expect(screen.getByText('Antigravity is replying')).toBeInTheDocument()
+    expect(screen.getByText('3.8 Flash is replying')).toBeInTheDocument()
   })
 
   it('keeps a streaming reply visibly unfinished while text is arriving', () => {

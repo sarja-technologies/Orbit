@@ -1,32 +1,66 @@
 import { useEffect, useState } from 'react'
-import { currentActivityLine, elapsedLabel, hasFailure, summarizeActivity, type ActivityState } from '../lib/activity'
+import {
+  currentActivityLine,
+  hasFailure,
+  isRunning,
+  itemElapsedLabel,
+  summarizeActivity,
+  type ActivityItem,
+  type ActivityState
+} from '../lib/activity'
+import type { AgentIdentity } from '../lib/agentIdentity'
+import { AgentMark } from './ProviderLogo'
 
-/** While a turn runs: one line that updates in place, so a long turn never
- *  looks frozen and never becomes an event feed. */
-export function LiveActivity({ activity }: { activity: ActivityState }): JSX.Element | null {
+/** While a turn runs: one line that updates in place, carrying what the
+ *  agent is actually doing right now and how long it has been doing it.
+ *
+ *  The elapsed time is the whole point of the row: a legitimate 40-second
+ *  build and a frozen app look identical without it. It ticks only while
+ *  the step is genuinely running, and stops the moment the step ends —
+ *  including when the run is cancelled, which finalizes every open step. */
+export function LiveActivity({ activity, identity }: { activity: ActivityState; identity?: AgentIdentity }): JSX.Element | null {
   const current = currentActivityLine(activity)
+  const live = current !== null && isRunning(current)
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    if (!current || current.status !== 'running') return
+    if (!live) return
+    // Re-read immediately so a row that mounts mid-step is never a second
+    // behind, then keep it honest every second.
+    setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
-  }, [current?.key, current?.status])
+  }, [current?.key, live])
 
   if (!current) return null
-  const elapsed = current.status === 'running' ? elapsedLabel(current.startedAt, now) : null
+  const elapsed = itemElapsedLabel(current, now)
 
   return (
     <div className="activity activity-live" aria-live="polite">
-      <span className="activity-pip" aria-hidden="true" />
-      <span className="activity-label">{current.label}</span>
-      {elapsed ? <span className="activity-elapsed">{elapsed}</span> : null}
+      {identity ? (
+        <span className="activity-agent">
+          <AgentMark identity={identity} size={13} />
+        </span>
+      ) : (
+        <span className="activity-pip" aria-hidden="true" />
+      )}
+      {live ? <span className="activity-pip" aria-hidden="true" /> : null}
+      <span className="activity-label" title={current.label}>
+        {current.label}
+      </span>
+      {elapsed ? (
+        <span className="activity-elapsed">
+          <span aria-hidden="true"> · </span>
+          {elapsed}
+        </span>
+      ) : null}
     </div>
   )
 }
 
 /** After the turn settles: a single collapsed summary, expandable to a
- *  short ordered list. Raw stdout/stderr is never shown here. */
+ *  short ordered list with each step's real duration. Raw stdout/stderr is
+ *  never shown here. */
 export function ActivitySummary({ activity }: { activity: ActivityState }): JSX.Element | null {
   const [open, setOpen] = useState(false)
   const summary = summarizeActivity(activity)
@@ -41,17 +75,30 @@ export function ActivitySummary({ activity }: { activity: ActivityState }): JSX.
       {open ? (
         <ol className="activity-items">
           {activity.items.map((item) => (
-            <li key={item.key} className={`activity-item activity-item-${item.status}`}>
-              <span className="activity-item-mark" aria-hidden="true">
-                {item.status === 'failed' ? '×' : '·'}
-              </span>
-              <span>{item.label}</span>
-              {item.status === 'failed' ? <span className="visually-hidden">failed</span> : null}
-            </li>
+            <SettledItem key={item.key} item={item} />
           ))}
         </ol>
       ) : null}
     </div>
+  )
+}
+
+/** One finished step. Its duration comes from the step's own start and end,
+ *  so it is a fact about what happened rather than a clock that is still
+ *  running — a settled row never counts up. */
+function SettledItem({ item }: { item: ActivityItem }): JSX.Element {
+  // `endedAt` is what a settled row reads from; the `Date.now()` fallback
+  // only applies to a row still genuinely open, which the live line owns.
+  const elapsed = itemElapsedLabel(item, item.endedAt ?? Date.now())
+  return (
+    <li className={`activity-item activity-item-${item.status}`} data-kind={item.kind}>
+      <span className="activity-item-mark" aria-hidden="true">
+        {item.status === 'failed' ? '×' : '·'}
+      </span>
+      <span className="activity-item-label">{item.label}</span>
+      {elapsed ? <span className="activity-elapsed">{elapsed}</span> : null}
+      {item.status === 'failed' ? <span className="visually-hidden">failed</span> : null}
+    </li>
   )
 }
 

@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ModelControls } from '../../src/renderer/app/components/ModelControls'
 import { EmptySession, STARTERS } from '../../src/renderer/app/components/EmptySession'
-import { compactModelLabel, descendingEfforts, isReasoningAdjustable, reasoningSummary } from '../../src/renderer/app/lib/modelDisplay'
+import { compactModelLabel, descendingEfforts, isReasoningAdjustable } from '../../src/renderer/app/lib/modelDisplay'
+import { describeModel, modelDescriptionLine } from '../../src/renderer/app/lib/modelDescriptions'
 import { reasoningTheme, stopOffset, tierAtFraction, trackFill } from '../../src/renderer/app/lib/reasoningVisual'
 import { groupByProvider, matchesQuery, providerForModel } from '../../src/renderer/app/lib/providers'
 import type { ModelOption, ReasoningEffort } from '../../src/shared/domain'
@@ -147,11 +148,31 @@ describe('compact model menu', () => {
     expect(screen.queryByRole('menuitemradio', { name: /GPT-OSS/ })).not.toBeInTheDocument()
   })
 
-  it('describes each model’s real reasoning capability', () => {
-    expect(reasoningSummary(MODELS[0]!)).toBe('High · Medium · Low reasoning')
-    expect(reasoningSummary(MODELS[1]!)).toBe('High · Low reasoning')
-    expect(reasoningSummary(MODELS[2]!)).toBe('No reasoning setting')
-    expect(reasoningSummary(MODELS[3]!)).toBe('Medium reasoning only')
+  it('describes what each model is for, under its name', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openPopover(user)
+
+    const row = screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })
+    expect(row).toHaveTextContent('Google’s fast Gemini model')
+    expect(row).toHaveTextContent('quick everyday coding and iteration')
+  })
+
+  it('never spends the description line on the reasoning tiers', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.8-flash')
+    await openPopover(user)
+
+    // The tiers are a live setting with their own control; restating them
+    // under every model's name said nothing about what the model is. The
+    // tier LABELS are what must be gone — a description is still free to
+    // use "reasoning" as an ordinary word ("complex reasoning").
+    for (const name of [/Gemini 3\.8 Flash/, /Gemini 3\.1 Pro/, /Default model/]) {
+      const hint = screen.getByRole('menuitemradio', { name }).querySelector('.model-row-hint')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent, `${name} subtitle`).not.toMatch(/\b(High|Medium|Low)\b/)
+      expect(hint!.textContent).not.toMatch(/reasoning (only|setting)/i)
+    }
   })
 
   it('reports the chosen model without deciding its tier', async () => {

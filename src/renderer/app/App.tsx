@@ -29,7 +29,8 @@ import { Composer } from './components/Composer'
 import { ComposerHints, EmptySession, type Starter } from './components/EmptySession'
 import { ContextPanel, type ContextTab } from './components/ContextPanel'
 import { ProviderLogoSprite } from './components/ProviderLogo'
-import { applyActivity, emptyActivity, type ActivityState } from './lib/activity'
+import { applyActivity, emptyActivity, finalizeActivity, pruneActivity, type ActivityState } from './lib/activity'
+import { agentIdentity } from './lib/agentIdentity'
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
@@ -75,6 +76,11 @@ export function App(): JSX.Element {
   const [resolvedRecords, setResolvedRecords] = useState<ResolvedRecord[]>([])
   const [respondingId, setRespondingId] = useState<string | null>(null)
   const [staleRunIds, setStaleRunIds] = useState<string[]>([])
+  /** Runs the user has pressed Stop on that have not reported their ending
+   *  yet. Purely presentational: it turns the gap between the request and
+   *  the acknowledgement into a stated "Stopping…" rather than a stall that
+   *  looks like the app hanging. Cleared by the run's real ending. */
+  const [stoppingRunIds, setStoppingRunIds] = useState<string[]>([])
   const [contextTab, setContextTab] = useState<ContextTab | null>(null)
   const [expandedProjectIds, setExpandedProjectIds] = useState<ID[]>(readExpanded)
   const [creatingProject, setCreatingProject] = useState(false)
@@ -101,6 +107,14 @@ export function App(): JSX.Element {
    *  started and must see what is true *now*, not what was true when the run
    *  completed — see `refreshAfterRun`. */
   const runsAwaitingInteraction = useRef(new Set<ID>())
+  /** A mirror of `runningRunByConversation`, readable from the asynchronous
+   *  project load. Pruning per-run state has to know which runs are still
+   *  in flight, and that load resolves long after it was started — reading
+   *  the state variable there would see whatever was true when the load
+   *  began, which for a run started moments earlier is nothing. */
+  const runningRunByConversationRef = useRef<Record<string, string>>({})
+
+  runningRunByConversationRef.current = runningRunByConversation
 
   const projects = useMemo(() => tree.map((group) => group.project), [tree])
   const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
@@ -108,6 +122,9 @@ export function App(): JSX.Element {
   const conversations = activeGroup?.conversations ?? []
   const activeConversation = conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
+  // Who is actually working: the session's own model, resolved against the
+  // real catalogue. Orbit's Saturn stands for Orbit and is never used here.
+  const identity = useMemo(() => agentIdentity(models, activeConversation?.model ?? null), [models, activeConversation?.model])
   const nativeMediaAvailable = providerStatus?.details?.nativeMedia !== false
 
   // An attachment that can only ever be shared as a workspace reference
@@ -238,6 +255,13 @@ export function App(): JSX.Element {
     setTree(groups)
     setWorkspace(fromSnapshot(snapshot, preferredConversationId ?? workspaceConversationFor(groups, projectId, preferredConversationId)))
     setSelectedArtifactId((current) => current ?? snapshot.artifacts[0]?.id ?? null)
+    // Live per-run state belongs to the project that is open. Anything for
+    // a run this project does not contain is another project's — dropping
+    // it here is what keeps switching projects from accumulating other
+    // runs' activity (and their timers) for the rest of the session. A run
+    // that is still going is kept regardless: its snapshot row exists, but
+    // the guard is explicit so an in-flight run can never be pruned.
+    setActivityByRun((current) => pruneActivity(current, [...snapshot.runs.map((run) => run.id), ...Object.values(runningRunByConversationRef.current)]))
   }
 
   async function refreshProject(preferred?: ID | null): Promise<void> {
@@ -298,6 +322,11 @@ export function App(): JSX.Element {
         delete next[runId]
         return next
       })
+      // The turn is over and the composer is live again; put the cursor
+      // back in it so the next message needs no click. Only when this
+      // session is the one on screen — focusing a composer the user is not
+      // looking at would steal their cursor from wherever they are.
+      if (workspace.activeConversationId === conversationId) composerFocusRef.current?.()
     }
   }
 
@@ -348,6 +377,17 @@ export function App(): JSX.Element {
         delete next[event.runId]
         return next
       })
+      // CRITICAL: the run is over, so nothing it started may still be
+      // counting. Any step left mid-flight — which is exactly what a
+      // cancelled or crashed turn leaves behind — is closed here, so no
+      // activity row can outlive the run that created it.
+      setActivityByRun((current) => {
+        const activity = current[event.runId]
+        if (!activity) return current
+        const settled = finalizeActivity(activity)
+        return settled === activity ? current : { ...current, [event.runId]: settled }
+      })
+      setStoppingRunIds((current) => (current.includes(event.runId) ? current.filter((id) => id !== event.runId) : current))
       // The live run and its streamed text are what the transcript is
       // currently drawing the reply from; the persisted assistant message
       // only exists after the refresh below has come back. Dropping them
@@ -475,9 +515,24 @@ export function App(): JSX.Element {
     void persistModel(activeConversation.id, activeConversation.model, effort)
   }
 
+  /** Stopping is a normal thing to ask for, and Orbit says so immediately.
+   *
+   *  The run is marked stopping before the request goes out, so the pause
+   *  between pressing Stop and the transport acknowledging it reads as
+   *  "Stopping…" rather than as the app having frozen. The real
+   *  `run.cancelled` clears the mark and hands the composer back; a
+   *  request that could not even be delivered clears it too, so the UI can
+   *  never be left claiming to be stopping something it is not. */
   async function cancel(): Promise<void> {
-    if (!activeRunId) return
-    await requireOrbitApi().runs.cancel({ runId: activeRunId })
+    const runId = activeRunId
+    if (!runId) return
+    setStoppingRunIds((current) => (current.includes(runId) ? current : [...current, runId]))
+    try {
+      await requireOrbitApi().runs.cancel({ runId })
+    } catch (error) {
+      setStoppingRunIds((current) => current.filter((id) => id !== runId))
+      setNotice(error instanceof Error ? error.message : 'That run could not be stopped.')
+    }
   }
 
   async function respond(optionId: string): Promise<void> {
@@ -652,6 +707,8 @@ export function App(): JSX.Element {
               activeRunId={activeRunId}
               streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
               activityByRun={activityByRun}
+              identity={identity}
+              stopping={Boolean(activeRunId && stoppingRunIds.includes(activeRunId))}
               pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
               unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}
               staleInteraction={Boolean(activeRunId && staleRunIds.includes(activeRunId))}

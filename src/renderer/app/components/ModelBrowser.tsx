@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
 import type { ModelOption } from '@shared/domain'
 import { groupByProvider, matchesQuery } from '../lib/providers'
-import { reasoningSummary } from '../lib/modelDisplay'
+import { describeModel } from '../lib/modelDescriptions'
 import { Modal, ModalHeader } from './Modal'
-import { ProviderLogo } from './ProviderLogo'
+import { AutoGlyph, ProviderLogo } from './ProviderLogo'
 
 interface ModelBrowserProps {
   models: ModelOption[]
@@ -104,7 +104,9 @@ export function ModelRow({
       </span>
       <span className="model-row-text">
         <span className="model-row-name">{model.label}</span>
-        <span className="model-row-hint">{reasoningSummary(model)}</span>
+        {/* What this model is for — never its reasoning tiers, which are a
+            separate, adjustable setting with their own control. */}
+        <ModelHint parts={describeModel(model).parts} />
       </span>
       <Tick checked={selected} />
     </button>
@@ -120,13 +122,18 @@ export function Tick({ checked }: { checked: boolean }): JSX.Element | null {
   )
 }
 
-/** Marks the "let Antigravity decide" row. Deliberately not a provider mark:
- *  no single vendor owns that choice. */
-export function AutoGlyph(): JSX.Element {
+/** The description line under a model's name. The separator lives here so
+ *  a one-part description never renders a dangling dot. */
+export function ModelHint({ parts }: { parts: string[] }): JSX.Element | null {
+  if (parts.length === 0) return null
   return (
-    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="8" r="5.4" stroke="currentColor" strokeWidth="1.4" fill="none" strokeDasharray="2.6 2.4" />
-      <circle cx="8" cy="8" r="1.7" fill="currentColor" />
-    </svg>
+    <span className="model-row-hint" title={parts.join(' • ')}>
+      {parts.map((part, index) => (
+        <span key={part}>
+          {index > 0 ? <span className="model-row-hint-sep" aria-hidden="true"> • </span> : null}
+          {part}
+        </span>
+      ))}
+    </span>
   )
 }
