@@ -5,6 +5,7 @@ import type { AntigravityPtyHandlers, IAntigravityPtyTransport, PtyInteraction }
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import { progressiveAppendIndex } from '../../src/main/terminal/TerminalInteractionDetector'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 // Every frame below is modelled line-for-line on real `agy 1.1.27` screens
 // captured while investigating issue #2 (raw capture and analysis in
@@ -105,7 +106,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     ...overrides
   }

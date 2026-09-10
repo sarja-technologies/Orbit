@@ -8,6 +8,7 @@ import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src
 import type { ID } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 let workspaceRoot: string
 beforeEach(() => {
@@ -81,7 +82,7 @@ function baseInput(conversationId: ID, runId: string, overrides: Partial<Provide
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     ...overrides
   }

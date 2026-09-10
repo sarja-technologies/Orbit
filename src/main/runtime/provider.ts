@@ -16,9 +16,10 @@ export interface ProviderSendInput {
    *  that can surface and answer native questions/permission prompts and
    *  attach images natively; 'structured' is the default headless path. */
   transport: ConversationTransport
-  /** The conversation's persisted model choice; null means Antigravity's
-   *  own default. Resolved into real --model/--effort args by the provider. */
-  model: string | null
+  /** The conversation's model — always concrete. Orbit owns the default, so
+   *  there is no "null means agy decides" state here; it is resolved into
+   *  real --model/--effort args by the provider. */
+  model: string
   reasoningEffort: ReasoningEffort | null
 }
 

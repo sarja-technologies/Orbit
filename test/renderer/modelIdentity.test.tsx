@@ -8,6 +8,7 @@ import { describeModel, modelDescriptionLine } from '../../src/renderer/app/lib/
 import { agentIdentity, agentVendor, RUNTIME_NAME } from '../../src/renderer/app/lib/agentIdentity'
 import { PROVIDERS, providerForModelId } from '../../src/renderer/app/lib/providers'
 import type { ModelOption } from '../../src/shared/domain'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 /** Shaped exactly as `agy models` normalizes: one entry per base model,
  *  carrying only the tiers Antigravity genuinely publishes for it. */
@@ -119,10 +120,12 @@ describe('provider marks in the chooser', () => {
     expect(trigger.querySelector('[data-provider]')).toHaveAttribute('data-provider', 'anthropic')
   })
 
-  it('draws the neutral glyph, not a vendor logo, for Antigravity’s own default', () => {
+  it('draws the default model’s own vendor logo for a legacy null selection', () => {
+    // A null selection is Orbit's default model, which Orbit can name — so
+    // the trigger shows Gemini's mark, not a neutral "who knows" glyph.
     renderControls(null)
     const trigger = screen.getByLabelText('Model and reasoning')
-    expect(trigger.querySelector('[data-provider]')).toHaveAttribute('data-provider', 'unknown')
+    expect(trigger.querySelector('[data-provider]')).toHaveAttribute('data-provider', 'gemini')
   })
 })
 
@@ -133,11 +136,18 @@ describe('agentIdentity', () => {
     expect(agentIdentity(MODELS, 'gpt-5-codex')).toEqual({ provider: 'openai', name: 'GPT-5 Codex' })
   })
 
-  it('never guesses a vendor for Antigravity’s own default model', () => {
-    // agy does not report which model its default is, so claiming one
-    // would put the wrong logo on every default session.
-    expect(agentIdentity(MODELS, null)).toEqual({ provider: null, name: RUNTIME_NAME })
-    expect(agentVendor(agentIdentity(MODELS, null))).toBeNull()
+  it('names Orbit’s own default model for a legacy null selection', () => {
+    // Orbit picks the default now, so a null session is not anonymous: it
+    // is the real default model, with that model's vendor and label.
+    expect(agentIdentity(MODELS, null)).toEqual(agentIdentity(MODELS, ORBIT_DEFAULT_MODEL_ID))
+    expect(agentIdentity(MODELS, null)).toEqual({ provider: 'gemini', name: '3.8 Flash' })
+    expect(agentVendor(agentIdentity(MODELS, null))).toBe('Google')
+  })
+
+  it('falls back to the runtime only when the vendor is genuinely unknowable', () => {
+    // Still true, and still the reason RUNTIME_NAME exists.
+    expect(RUNTIME_NAME).toBe('Antigravity')
+    expect(agentIdentity(MODELS, 'mystery-model-1').provider).toBeNull()
   })
 
   it('keeps a stale selection’s vendor and id rather than silently reverting', () => {

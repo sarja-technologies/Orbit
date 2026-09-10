@@ -9,6 +9,7 @@ import { describeModel, modelDescriptionLine } from '../../src/renderer/app/lib/
 import { reasoningTheme, stopOffset, tierAtFraction, trackFill } from '../../src/renderer/app/lib/reasoningVisual'
 import { groupByProvider, matchesQuery, providerForModel } from '../../src/renderer/app/lib/providers'
 import type { ModelOption, ReasoningEffort } from '../../src/shared/domain'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 /** Normalized exactly as Antigravity publishes it: uneven tier coverage, a
  *  single-tier model, and models with no reasoning setting at all. */
@@ -136,12 +137,41 @@ describe('closed composer control', () => {
 })
 
 describe('compact model menu', () => {
-  it('shows the default model and Gemini only, because Antigravity is a Gemini workflow', async () => {
+  it('names the real default model on the closed control, never “Default model”', () => {
+    // A legacy null session. The user must see which model will answer.
+    renderControls(null)
+    const trigger = screen.getByLabelText('Model and reasoning')
+    expect(trigger).toHaveTextContent('3.8 Flash')
+    expect(trigger).not.toHaveTextContent('Default model')
+  })
+
+  it('selects the genuine catalogue id when the default row is chosen', async () => {
+    const user = userEvent.setup()
+    const { onSelectModel } = renderControls(null)
+    await openPopover(user)
+    await user.click(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ }))
+    // Not a sentinel, not null — the real id agy will receive.
+    expect(onSelectModel).toHaveBeenCalledWith(ORBIT_DEFAULT_MODEL_ID)
+  })
+
+  it('badges Orbit’s default on its own real row', async () => {
+    const user = userEvent.setup()
+    renderControls('gemini-3.1-pro')
+    await openPopover(user)
+    const defaultRow = screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })
+    expect(defaultRow.querySelector('.model-row-default')).not.toBeNull()
+    const otherRow = screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })
+    expect(otherRow.querySelector('.model-row-default')).toBeNull()
+  })
+
+  it('shows Gemini only, because Antigravity is a Gemini workflow', async () => {
     const user = userEvent.setup()
     renderControls('gemini-3.8-flash')
     await openPopover(user)
 
-    expect(screen.getByRole('menuitemradio', { name: /Default model/ })).toBeInTheDocument()
+    // There is no synthetic "Default model" row any more: Orbit's default is
+    // one of these real rows, badged as such.
+    expect(screen.queryByRole('menuitemradio', { name: /^Default model/ })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toBeInTheDocument()
     expect(screen.queryByRole('menuitemradio', { name: /Claude Sonnet/ })).not.toBeInTheDocument()
@@ -167,7 +197,7 @@ describe('compact model menu', () => {
     // under every model's name said nothing about what the model is. The
     // tier LABELS are what must be gone — a description is still free to
     // use "reasoning" as an ordinary word ("complex reasoning").
-    for (const name of [/Gemini 3\.8 Flash/, /Gemini 3\.1 Pro/, /Default model/]) {
+    for (const name of [/Gemini 3\.8 Flash/, /Gemini 3\.1 Pro/]) {
       const hint = screen.getByRole('menuitemradio', { name }).querySelector('.model-row-hint')
       expect(hint).not.toBeNull()
       expect(hint!.textContent, `${name} subtitle`).not.toMatch(/\b(High|Medium|Low)\b/)

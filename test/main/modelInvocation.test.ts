@@ -8,6 +8,7 @@ import type { ID, ModelOption } from '../../src/shared/domain'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 let workspaceRoot: string
 beforeEach(() => {
@@ -67,7 +68,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     attachments: [],
     referencedArtifacts: [],
     transport: 'structured',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     ...overrides
   }
@@ -161,10 +162,14 @@ describe('model and effort reach the structured launch', () => {
     spawnCalls.length = 0
   })
 
-  it('passes neither flag when the conversation has no selection', async () => {
-    const args = await structuredArgs({})
-    expect(args).not.toContain('--model')
-    expect(args).not.toContain('--effort')
+  it('passes Orbit’s own default explicitly when the conversation carries a legacy null', () => {
+    // The invariant this whole design exists for: agy is NEVER spawned
+    // without --model, so Orbit can always name the model that answered.
+    return structuredArgs({}).then((args) => {
+      expect(args).toContain('--model')
+      expect(args[args.indexOf('--model') + 1]).toBe(ORBIT_DEFAULT_MODEL_ID)
+      expect(args[args.indexOf('--effort') + 1]).toBe('medium')
+    })
   })
 
   it('passes a single-tier model without an effort flag', async () => {
@@ -180,10 +185,12 @@ describe('model and effort reach the structured launch', () => {
     expect(args[args.indexOf('--effort') + 1]).toBe('medium')
   })
 
-  it('never guesses a tier for a multi-tier model left on default effort', async () => {
+  it('keeps a multi-tier model on default effort and sends a tier it really has', async () => {
+    // agy requires --effort for this model, so the launch must carry one —
+    // taken from the catalogue (low/high), never an invented medium.
     const args = await structuredArgs({ model: 'gemini-3.1-pro', reasoningEffort: null })
-    expect(args).not.toContain('--model')
-    expect(args).not.toContain('--effort')
+    expect(args[args.indexOf('--model') + 1]).toBe('gemini-3.1-pro')
+    expect(args[args.indexOf('--effort') + 1]).toBe('low')
   })
 })
 
@@ -211,6 +218,38 @@ describe('model and effort reach the interactive PTY launch', () => {
     expect(ptyArgs).toContain('--add-dir')
     expect(ptyArgs[ptyArgs.indexOf('--model') + 1]).toBe('gemini-3.8-flash')
     expect(ptyArgs[ptyArgs.indexOf('--effort') + 1]).toBe('low')
+  })
+
+  it('spawns the pty with an explicit model for a legacy null selection too', async () => {
+    // The invariant must hold on BOTH transports: there is no interactive
+    // path that still lets agy choose the model in secret.
+    let ptyArgs: string[] = []
+    const instance = new AntigravityProvider(
+      (deps, conversationId) =>
+        new AntigravityPtySession(
+          {
+            ...deps,
+            createTransport: (_executable: string, _cwd: string, args: string[]) => {
+              ptyArgs = args
+              return new NoopTransport()
+            },
+            findConversationId: () => null
+          },
+          conversationId
+        ),
+      async () => RAW_CATALOG
+    )
+
+    // Cast: the type no longer permits null, which is the point — this
+    // simulates a legacy value reaching the provider at runtime anyway.
+    await instance.sendMessage(
+      input({ transport: 'pty', model: null as unknown as string, reasoningEffort: null }),
+      () => undefined
+    )
+
+    expect(ptyArgs).toContain('--model')
+    expect(ptyArgs[ptyArgs.indexOf('--model') + 1]).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(ptyArgs[ptyArgs.indexOf('--effort') + 1]).toBe('medium')
   })
 })
 

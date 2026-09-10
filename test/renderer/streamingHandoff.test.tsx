@@ -6,6 +6,7 @@ import { App } from '../../src/renderer/app/App'
 import type { OrbitApi } from '../../src/shared/contracts'
 import type { Conversation, Message, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RunEventListener, RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 const PROJECT: Project = { id: 'project_1', name: 'Orbit', rootPath: '/home/dev/orbit', createdAt: 'now', updatedAt: 'now' }
 const SESSION: Conversation = {
@@ -16,7 +17,7 @@ const SESSION: Conversation = {
   nativeConversationId: null,
   status: 'idle',
   transport: 'structured',
-  model: null,
+  model: ORBIT_DEFAULT_MODEL_ID,
   reasoningEffort: 'medium',
   workingDirectory: null,
   createdAt: 'now',

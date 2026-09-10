@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 // Real `agy 1.1.27 --print … --output-format stream-json` output, captured
 // from live turns while investigating issue #2 (see
@@ -89,7 +90,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     attachments: [],
     referencedArtifacts: [],
     transport: 'structured',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     ...overrides
   }

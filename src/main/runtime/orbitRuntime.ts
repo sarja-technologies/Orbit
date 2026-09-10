@@ -24,6 +24,7 @@ import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
 import { effortForNewSession } from '@shared/reasoningPolicy'
+import { ORBIT_DEFAULT_MODEL_ID } from '@shared/defaultModel'
 import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 
@@ -33,6 +34,13 @@ interface ActiveRunState {
 
 export class OrbitRuntime extends EventEmitter {
   private readonly activeRuns = new Map<ID, ActiveRunState>()
+  /** The most recent normalized catalogue, so a new session can be given a
+   *  tier the default model genuinely publishes without `createConversation`
+   *  becoming async. Warmed by `listModels()` (which the renderer calls at
+   *  startup) and by `warmModelCatalogue()`. Empty until one of those has
+   *  succeeded, which `effortForNewSession` treats as "unknown tiers" rather
+   *  than as an excuse to guess. */
+  private cachedModels: ModelOption[] = []
 
   constructor(
     private readonly store: OrbitStore,
@@ -80,10 +88,11 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.openProjectSnapshot(projectId)
   }
 
-  /** New sessions open on the reasoning level the user last chose (medium
-   *  until they ever choose one). Antigravity accepts `--effort` without
-   *  `--model`, so this is a real setting from the very first turn rather
-   *  than an inert default.
+  /** New sessions open on Orbit's own default model, concretely — never on
+   *  a placeholder that leaves agy to choose. The reasoning level is the one
+   *  the user last chose (medium until they ever choose one), mapped onto
+   *  the tiers that model genuinely publishes; null until the catalogue is
+   *  readable, rather than a guessed tier.
    *
    *  A session needs nothing from the user to exist: no name (it starts as
    *  `New Session` and names itself from the first prompt — see
@@ -92,7 +101,8 @@ export class OrbitRuntime extends EventEmitter {
   createConversation(projectId: ID, title = DEFAULT_SESSION_TITLE, workingDirectory: string | null = null): Conversation {
     return this.store.createConversation(projectId, title, {
       workingDirectory,
-      reasoningEffort: effortForNewSession(this.store.readPreferences())
+      model: ORBIT_DEFAULT_MODEL_ID,
+      reasoningEffort: effortForNewSession(this.store.readPreferences(), this.cachedModels)
     })
   }
 
@@ -240,8 +250,21 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.setConversationTransport(conversationId, transport)
   }
 
-  listModels(): Promise<ModelOption[]> {
-    return this.provider.listModels()
+  async listModels(): Promise<ModelOption[]> {
+    const models = await this.provider.listModels()
+    if (models.length > 0) this.cachedModels = models
+    return models
+  }
+
+  /** Best-effort catalogue warm-up. Fire-and-forget at startup so the very
+   *  first session created in a launch already knows the default model's
+   *  real reasoning tiers. A failure is not an error here — it simply
+   *  leaves the cache empty, and effort is settled once a catalogue loads. */
+  warmModelCatalogue(): void {
+    void this.listModels().catch(() => {
+      // Nothing to do: an unreadable catalogue is reported through provider
+      // status, and a session created meanwhile settles its tier later.
+    })
   }
 
   /** Persists a conversation's model/effort choice. The provider decides

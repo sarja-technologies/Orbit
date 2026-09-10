@@ -18,6 +18,8 @@
 //   - `agy --model gemini-3.7-flash --effort high`  -> succeeds
 //   - `agy --model gemini-3.7-flash-low`            -> succeeds (combined id)
 //   - `agy --effort high` (no --model)              -> succeeds, agy's default
+//     (a real CLI fact, but NOT one Orbit uses any more: Orbit owns its
+//      default model and always sends --model — see defaultModel.ts)
 //   - `agy --model gemini-3.6-flash` (multi-tier base, NO --effort)
 //       -> ERROR: "requires --effort (available: low, medium, high)"
 //   - `agy --model claude-sonnet-4-6` (no tiers)    -> succeeds
@@ -26,6 +28,8 @@
 // never guessed here.
 import { spawn } from 'node:child_process'
 import type { ModelOption, ReasoningEffort } from '@shared/domain'
+import { resolveModelId } from '@shared/defaultModel'
+import { nearestSupportedEffort } from '@shared/reasoningPolicy'
 
 export const REASONING_TIERS: readonly ReasoningEffort[] = ['low', 'medium', 'high'] as const
 
@@ -93,39 +97,54 @@ export interface AntigravityInvocation {
 
 /** The one place a model + effort choice becomes real `--model`/`--effort`
  *  arguments. `rawCatalog` must be the same un-normalized list
- *  normalizeModels() consumes. */
+ *  normalizeModels() consumes.
+ *
+ *  INVARIANT: every invocation carries an explicit `--model`. There is no
+ *  longer a path that omits it and lets agy choose in secret — a legacy
+ *  null resolves to Orbit's own default before anything else happens, so
+ *  both transports spawn against a model Orbit can name. */
 export function resolveInvocation(
   model: string | null | undefined,
   reasoningEffort: string | null | undefined,
   rawCatalog: ModelOption[]
 ): AntigravityInvocation {
   const effort = (reasoningEffort || undefined) as ReasoningEffort | undefined
-
-  // Reasoning chosen with model left on default — agy accepts `--effort`
-  // alone, applying it to its own default model. Nothing is guessed.
-  if (!model) return effort ? { effort } : {}
+  // A legacy `null` is Orbit's default, not agy's. Resolved here as well as
+  // at the store boundary so a caller holding an older object in memory
+  // still cannot produce a model-less launch.
+  const selected = resolveModelId(model)
 
   // Already a real, self-contained raw id (a combined id, or a genuinely
   // single-tier model). agy accepts this alone; never send a redundant or
   // conflicting --effort alongside an id that already encodes one.
-  if (rawCatalog.some((candidate) => candidate.id === model)) return { model }
+  if (rawCatalog.some((candidate) => candidate.id === selected)) return { model: selected }
 
   // Otherwise it must be a normalized BASE id — find its real tiers.
-  const variantPrefix = `${model}-`
+  const variantPrefix = `${selected}-`
   const variantIds = new Set(rawCatalog.filter((candidate) => candidate.id.startsWith(variantPrefix)).map((candidate) => candidate.id))
 
-  // Unrecognized entirely (stale/future catalogue drift) — pass it through
-  // rather than silently dropping the choice, so agy's own "unknown model"
-  // error surfaces like any other bad launch configuration.
-  if (variantIds.size === 0) return effort ? { model, effort } : { model }
+  // Unrecognized entirely — a stale selection, a future catalogue, or a
+  // catalogue that could not be read at all. Pass the choice through rather
+  // than silently dropping it, so agy's own "unknown model" error surfaces
+  // like any other bad launch configuration. Critically this still sends
+  // `--model`: a failed catalogue must not quietly restore the old "agy
+  // picks whatever it wants" behaviour.
+  if (variantIds.size === 0) return effort ? { model: selected, effort } : { model: selected }
 
-  if (effort && variantIds.has(`${model}-${effort}`)) return { model, effort }
+  if (effort && variantIds.has(`${selected}-${effort}`)) return { model: selected, effort }
 
-  // A multi-tier base with no valid effort selected. agy's CLI requires
-  // --effort here, and no default tier is discoverable, so the honest
-  // choice is to omit the model entirely and let agy use its own default
-  // rather than send a combination known to fail.
-  return {}
+  // A multi-tier base whose selected effort is missing or not one this model
+  // publishes. agy's CLI REQUIRES --effort here, so omitting it would be a
+  // launch known to fail — and omitting the model instead is the hidden
+  // default this design removed. The honest resolution is the nearest tier
+  // the model genuinely lists, taken from the catalogue by the same policy
+  // the UI uses. Nothing is fabricated: every candidate is a real variant.
+  const published = REASONING_TIERS.filter((tier) => variantIds.has(`${selected}-${tier}`))
+  const resolved = nearestSupportedEffort(
+    { id: selected, label: selected, supportedReasoningEfforts: published },
+    effort ?? 'medium'
+  )
+  return resolved ? { model: selected, effort: resolved } : { model: selected }
 }
 
 /** Parses `agy models` stdout. Two real shapes are tolerated: `<id>\t<label>`
