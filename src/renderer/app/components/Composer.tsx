@@ -1,9 +1,12 @@
 import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent } from 'react'
-import type { ModelOption, ReasoningEffort } from '@shared/domain'
+import type { Conversation, ConversationTransport, ID, ModelOption, Project, ReasoningEffort } from '@shared/domain'
 import type { DraftAttachment } from '../lib/attachments'
 import { imageItemsFromClipboard } from '../lib/attachments'
 import { AttachmentChip } from './AttachmentChip'
+import { ComposerControlProvider } from './ComposerControl'
+import { ApprovalsControl } from './ApprovalsControl'
 import { ModelControls } from './ModelControls'
+import { ProjectControl } from './ProjectControl'
 
 interface ComposerProps {
   value: string
@@ -13,10 +16,32 @@ interface ComposerProps {
   /** Set when the next message answers a question Antigravity just asked. */
   replying: boolean
   models: ModelOption[]
+  /** Always a concrete catalogue id once the catalogue is readable. null is
+   *  only the brief moment before App has resolved one (see
+   *  shared/defaultModel.ts), or the retired "no model chosen" state that
+   *  App migrates on sight. */
   selectedModel: string | null
   selectedEffort: ReasoningEffort | null
+  /** Whether Antigravity can stop and ask during this turn. Passed
+   *  separately from `conversation` because a launch draft has one of these
+   *  and not the other. */
+  transport: ConversationTransport
   onSelectModel: (model: string) => void
   onSelectEffort: (effort: ReasoningEffort) => void
+  /** The working context the next message will act in — the project, its
+   *  folder, and whether Antigravity can stop and ask about what it does
+   *  there. Passed in rather than read here: the composer renders the
+   *  session's real state, it does not own it.
+   *
+   *  `conversation` is null while the user is composing the first message of
+   *  a session that does not exist yet; `project` is not, because a fresh
+   *  chat still has a working folder. */
+  project: Project | null
+  conversation: Conversation | null
+  projects: readonly Project[]
+  onSelectProject: (projectId: ID) => void
+  onChangeProjectFolder: () => void
+  onSelectTransport: (transport: ConversationTransport) => void
   /** Lets the empty-state starters hand focus back to the composer after
    *  they fill it, so the user can keep typing without reaching for it. */
   registerFocus?: (focus: () => void) => void
@@ -51,8 +76,15 @@ export function Composer({
   models,
   selectedModel,
   selectedEffort,
+  transport,
   onSelectModel,
   onSelectEffort,
+  project,
+  conversation,
+  projects,
+  onSelectProject,
+  onChangeProjectFolder,
+  onSelectTransport,
   registerFocus
 }: ComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -130,16 +162,34 @@ export function Composer({
             <PlusGlyph />
           </button>
 
-          <div className="composer-spacer" />
+          {/* Project, Model, Approvals — the three things that decide what
+              the next message will actually do, in one row, sharing one
+              trigger shape and one open-at-a-time popover. */}
+          <ComposerControlProvider>
+            <div className="composer-context">
+              <ProjectControl
+                project={project}
+                conversation={conversation}
+                projects={projects}
+                disabled={disabled}
+                onSelectProject={onSelectProject}
+                onChangeFolder={onChangeProjectFolder}
+              />
 
-          <ModelControls
-            models={models}
-            selectedModel={selectedModel}
-            selectedEffort={selectedEffort}
-            disabled={disabled}
-            onSelectModel={onSelectModel}
-            onSelectEffort={onSelectEffort}
-          />
+              <ModelControls
+                models={models}
+                selectedModel={selectedModel}
+                selectedEffort={selectedEffort}
+                disabled={disabled}
+                onSelectModel={onSelectModel}
+                onSelectEffort={onSelectEffort}
+              />
+
+              <ApprovalsControl transport={transport} disabled={disabled} onSelect={onSelectTransport} />
+            </div>
+          </ComposerControlProvider>
+
+          <div className="composer-spacer" />
 
           {running ? (
             <button type="button" className="composer-send is-stop" onClick={onCancel} aria-label="Stop generating">

@@ -178,6 +178,13 @@ describe('App', () => {
     await screen.findByText('Projects')
   }
 
+  /** Every launch opens a blank chat now, so a test about a stored session
+   *  has to click into one first — exactly as the user does. */
+  const openSession = async (name: RegExp): Promise<void> => {
+    await userEvent.click(await screen.findByRole('button', { name }))
+    await screen.findByLabelText('Message Antigravity')
+  }
+
   /** Which project a session lives in, for the stateful mock backend. */
   const activeProjectOf = (conversationId: string): string =>
     Object.keys(sessions).find((projectId) => sessions[projectId]!.some((item) => item.id === conversationId)) ?? 'project_1'
@@ -388,11 +395,25 @@ describe('App', () => {
 
   it('keeps the project and session breadcrumb, and drops the provider status line', async () => {
     await boot()
+    await openSession(/^Improve Orbit UI/)
     const header = document.querySelector('.chrome') as HTMLElement
     expect(within(header).getByText('AgentDock Website')).toBeInTheDocument()
     expect(within(header).getByText('Improve Orbit UI')).toBeInTheDocument()
-    expect(within(header).getByText('/home/dev/agentdock')).toBeInTheDocument()
     expect(screen.queryByText('Antigravity online')).not.toBeInTheDocument()
+  })
+
+  it('moves the working folder off the header and onto the project control, in full', async () => {
+    const user = userEvent.setup()
+    await boot()
+    const header = document.querySelector('.chrome') as HTMLElement
+    // An ellipsised path in the corner was the wrong home for the single
+    // most important fact about a turn.
+    expect(within(header).queryByText('/home/dev/agentdock')).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Project: AgentDock Website'))
+    const popover = screen.getByRole('dialog', { name: 'Project' })
+    expect(within(popover).getByText('/home/dev/agentdock')).toBeInTheDocument()
+    expect(within(popover).getByText('Every session in this project runs here.')).toBeInTheDocument()
   })
 
   it('still reports a real provider problem', async () => {
@@ -466,7 +487,7 @@ describe('App', () => {
       ]
     })
     await boot()
-    await screen.findByLabelText('Message Antigravity')
+    await openSession(/^Improve Orbit UI/)
     expect(screen.queryByRole('heading', { name: 'What should we work on?' })).not.toBeInTheDocument()
   })
 
@@ -526,6 +547,7 @@ describe('App', () => {
   it('persists a model choice, carrying the remembered reasoning level onto it', async () => {
     preferences = { defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -542,6 +564,7 @@ describe('App', () => {
   it('maps a remembered level onto a model that does not publish it', async () => {
     preferences = { defaultModel: null, lastReasoningEffort: 'medium', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -559,6 +582,7 @@ describe('App', () => {
   it('chooses no tier for a model with no reasoning control', async () => {
     preferences = { defaultModel: null, lastReasoningEffort: 'high', modelReasoningEfforts: {} }
     await boot()
+    await openSession(/^Improve Orbit UI/)
 
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
@@ -579,6 +603,9 @@ describe('App', () => {
     // is resolved against the real catalogue as soon as that catalogue is
     // known — it never sits on "let Antigravity choose".
     await boot()
+    // Launch opens a blank chat, so the stored session is opened explicitly;
+    // resolution happens when the session is opened, not when the app is.
+    await openSession(/^Improve Orbit UI/)
 
     await waitFor(() =>
       expect(api.conversations.setModel).toHaveBeenCalledWith({
@@ -593,6 +620,7 @@ describe('App', () => {
 
   it('remembers an explicit tier for next time, globally and against the real model', async () => {
     await boot()
+    await openSession(/^Improve Orbit UI/)
     const trigger = await screen.findByLabelText('Model and reasoning')
     await waitFor(() => expect(trigger).toBeEnabled())
     // Let the session settle onto its concrete model first.
@@ -600,7 +628,9 @@ describe('App', () => {
     await userEvent.click(trigger)
     await userEvent.click(screen.getByRole('button', { name: 'High' }))
 
-    // The tier is filed against the real model, never against a stand-in.
+    // Remembered against the concrete model the session was settled onto,
+    // never against a stand-in: there is no 'antigravity:default' bucket any
+    // more, because there is no default model the user can be on.
     expect(api.preferences.set).toHaveBeenCalledWith({
       defaultModel: null,
       lastReasoningEffort: 'high',
@@ -620,6 +650,7 @@ describe('App', () => {
     preferences = { defaultModel: null, lastReasoningEffort: 'low', modelReasoningEfforts: {} }
 
     await boot()
+    await openSession(/^Improve Orbit UI/)
     await waitFor(() =>
       expect(api.conversations.setModel).toHaveBeenCalledWith({
         conversationId: 'conversation_1',
@@ -629,11 +660,17 @@ describe('App', () => {
     )
   })
 
-  it('does not expose a manual transport control', async () => {
+  it('expresses transports as Approvals, and never as raw transport chrome', async () => {
     await boot()
     await screen.findByLabelText('Message Antigravity')
+
+    // The composer states the approval behaviour in product language...
+    expect(screen.getByLabelText('Approvals: No approval prompts')).toBeInTheDocument()
+    // ...and nothing about transports, interactive mode, or permission
+    // policy leaks onto the surface itself.
     expect(screen.queryByText(/interactive mode/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/PTY/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/permission/i)).not.toBeInTheDocument()
   })
 
   it('shows a startup diagnostic when the preload API is missing', async () => {

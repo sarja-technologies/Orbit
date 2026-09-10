@@ -142,7 +142,7 @@ describe('compact model menu', () => {
 
     // There is no "Default model" row: Orbit owns its default and every
     // selectable option is a real catalogue model.
-    expect(screen.queryByRole('menuitemradio', { name: /Default model/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: /Default/i })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.8 Flash/ })).toBeInTheDocument()
     expect(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ })).toBeInTheDocument()
     expect(screen.queryByRole('menuitemradio', { name: /Claude Sonnet/ })).not.toBeInTheDocument()
@@ -310,7 +310,9 @@ describe('reasoning control', () => {
 
   it('offers no reasoning control for a selection that has not resolved yet', async () => {
     // A null model is the brief pre-resolution moment, not a choice. It has
-    // no tiers of its own to offer, because it is not a model.
+    // no tiers of its own to offer, because it is not a model — App settles
+    // it onto a concrete one from shared/defaultModel.ts, and the tiers come
+    // from that.
     const user = userEvent.setup()
     renderControls(null, 'medium')
     await openPopover(user)

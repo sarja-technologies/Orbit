@@ -369,6 +369,7 @@ describe('reply-in-progress state', () => {
         projectFiles={[]}
         thumbnails={{}}
         activeRunId="r"
+        drafting={false}
         streamText=""
         activityByRun={{}}
         pendingInteraction={null}

@@ -1,12 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ModelOption, ReasoningEffort } from '@shared/domain'
-import { EFFORT_LABEL, compactModelLabel } from '../lib/modelDisplay'
+import { EFFORT_LABEL } from '../lib/modelDisplay'
 import { reasoningTheme } from '../lib/reasoningVisual'
 import { isGeminiModel, providerForModel } from '../lib/providers'
+import { describeModel, describeModelForAssistiveText } from '../lib/modelSelection'
+import { useDismiss } from '../lib/useDismiss'
 import { modelForSelection } from '@shared/reasoningPolicy'
 import { ReasoningControl } from './ReasoningControl'
-import { ModelBrowser, ModelRow, Tick, AutoGlyph } from './ModelBrowser'
+import { ModelBrowser, ModelRow } from './ModelBrowser'
 import { ProviderLogo } from './ProviderLogo'
+import { ComposerControlButton, ComposerPopover, useComposerControl } from './ComposerControl'
 
 interface ModelControlsProps {
   models: ModelOption[]
@@ -24,8 +27,17 @@ interface ModelControlsProps {
   onSelectEffort: (effort: ReasoningEffort) => void
 }
 
+const CONTROL_ID = 'model'
+
 /** One compact control in the composer footer that opens one popover:
  *  models on the left, reasoning on the right.
+ *
+ *  The closed control names a concrete model, always. There is no "Default"
+ *  row and no "Orbit decides" state: a picker whose selected entry cannot
+ *  tell you which model you are talking to is not answering the question it
+ *  exists to answer. Orbit owns the default and settles every session onto a
+ *  real catalogue id — see shared/defaultModel.ts, which is the only place
+ *  that decision is made. This control never picks one of its own.
  *
  *  The popover lists Gemini only, because Antigravity is a Gemini workflow
  *  and dumping every vendor into a menu this size makes the common choice
@@ -39,97 +51,83 @@ export function ModelControls({
   onSelectModel,
   onSelectEffort
 }: ModelControlsProps): JSX.Element {
-  const [open, setOpen] = useState(false)
+  const { open, setOpen, toggle } = useComposerControl(CONTROL_ID)
   const [browsing, setBrowsing] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
-  const selected = models.find((model) => model.id === selectedModel) ?? null
-  const reasoningModel = modelForSelection(models, selectedModel)
-  const theme = reasoningTheme(reasoningModel, selectedEffort)
 
   // The full browser is a modal and owns its own dismissal; the popover must
   // not also close on the clicks and Escapes happening inside it.
-  useEffect(() => {
-    if (!open || browsing) return
-    const onDown = (event: MouseEvent): void => {
-      if (!wrapperRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: globalThis.KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open, browsing])
+  useDismiss(wrapperRef, open, () => setOpen(false), { suspended: browsing })
 
+  const display = describeModel(selectedModel, models)
+  // Reasoning belongs to the concrete model the session is actually on.
+  const reasoningModel = modelForSelection(models, selectedModel)
+  const theme = reasoningTheme(reasoningModel, selectedEffort)
   const geminiModels = models.filter(isGeminiModel)
 
   return (
-    <div className="model-control" ref={wrapperRef}>
-      <button
-        type="button"
-        className="model-trigger"
+    <div className="composer-control model-control" ref={wrapperRef}>
+      <ComposerControlButton
+        name="Model"
+        icon={<ProviderLogo provider={providerForModel(display.model)} size={15} />}
+        label={display.label}
+        ariaLabel="Model and reasoning"
+        title={models.length === 0 ? 'Antigravity’s model list is unavailable' : describeModelForAssistiveText(display)}
+        open={open}
         disabled={disabled || models.length === 0}
-        aria-label="Model and reasoning"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        title={models.length === 0 ? 'Antigravity’s model list is unavailable' : undefined}
-        onClick={() => setOpen((value) => !value)}
-      >
-        {selected ? <ProviderLogo provider={providerForModel(selected)} size={15} /> : <AutoGlyph />}
-        {/* A session always resolves to a real model (see
-            shared/defaultModel.ts). "Resolving…" is the brief moment before
-            the catalogue has loaded — never a standing state, and never an
-            offer to let Antigravity choose. */}
-        <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : 'Resolving…'}</span>
-        {/* The closed control carries the live tier in the same treatment the
-            open control uses, so changing it is visible without reopening. */}
-        {selectedEffort ? (
-          <span className="model-trigger-effort" data-theme={theme}>
-            {EFFORT_LABEL[selectedEffort]}
-          </span>
-        ) : null}
-        <ChevronGlyph />
-      </button>
+        trailing={
+          // The closed control carries the live tier in the same treatment
+          // the open control uses, so changing it is visible without
+          // reopening.
+          selectedEffort ? (
+            <span className="model-trigger-effort" data-theme={theme}>
+              {EFFORT_LABEL[selectedEffort]}
+            </span>
+          ) : null
+        }
+        onClick={toggle}
+      />
 
       {open ? (
-        <div className="model-popover" role="dialog" aria-label="Model and reasoning">
-          <section className="popover-pane pane-models">
-            <h3 className="pane-title">AI Model</h3>
-            <div className="model-list">
-              {geminiModels.map((model) => (
-                <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelectModel(model.id)} />
-              ))}
-            </div>
+        <ComposerPopover label="Model and reasoning" width={560}>
+          <div className="model-popover-body">
+            <section className="popover-pane pane-models">
+              <h3 className="pane-title">AI Model</h3>
+              {/* Concrete models only. The row that used to sit above these
+                  and mean "let Antigravity decide" is gone. */}
+              <div className="model-list">
+                {geminiModels.map((model) => (
+                  <ModelRow key={model.id} model={model} selected={model.id === display.id} onSelect={() => onSelectModel(model.id)} />
+                ))}
+              </div>
 
-            <button type="button" className="model-more" onClick={() => setBrowsing(true)}>
-              <span>Other models…</span>
-              <ChevronGlyph />
-            </button>
-          </section>
+              <button type="button" className="model-more" onClick={() => setBrowsing(true)}>
+                <span>Other models…</span>
+                <MoreChevron />
+              </button>
+            </section>
 
-          {/* The reasoning pane always states something true: an adjustable
-              control when there is a real choice, the fixed level when there
-              is exactly one, and who owns the decision when there is none. */}
-          <section className="popover-pane pane-reasoning">
-            {/* No level badge here: the active stop below already states it,
-                and a second copy only made the title wrap. */}
-            <h3 className="pane-title">Reasoning effort</h3>
+            {/* The reasoning pane always states something true: an adjustable
+                control when there is a real choice, the fixed level when there
+                is exactly one, and who owns the decision when there is none. */}
+            <section className="popover-pane pane-reasoning">
+              {/* No level badge here: the active stop below already states it,
+                  and a second copy only made the title wrap. */}
+              <h3 className="pane-title">Reasoning effort</h3>
 
-            <ReasoningControl model={reasoningModel} effort={selectedEffort} onChange={onSelectEffort} />
+              <ReasoningControl model={reasoningModel} effort={selectedEffort} onChange={onSelectEffort} />
 
-            {/* Kept visible because it is a real Antigravity concept, kept
-                disabled because agy 1.1.27 exposes no fast-mode setting. It
-                changes nothing anywhere while that is true. */}
-            <div className="fast-mode" aria-disabled="true">
-              <BoltGlyph />
-              <span className="fast-mode-label">Fast mode</span>
-              <span className="fast-mode-note">Not available in Antigravity yet</span>
-            </div>
-          </section>
-        </div>
+              {/* Kept visible because it is a real Antigravity concept, kept
+                  disabled because agy 1.1.27 exposes no fast-mode setting. It
+                  changes nothing anywhere while that is true. */}
+              <div className="fast-mode" aria-disabled="true">
+                <BoltGlyph />
+                <span className="fast-mode-label">Fast mode</span>
+                <span className="fast-mode-note">Not available in Antigravity yet</span>
+              </div>
+            </section>
+          </div>
+        </ComposerPopover>
       ) : null}
 
       {browsing ? (
@@ -156,7 +154,7 @@ function BoltGlyph(): JSX.Element {
   )
 }
 
-function ChevronGlyph(): JSX.Element {
+function MoreChevron(): JSX.Element {
   return (
     <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false" className="chevron-glyph">
       <path d="M4 6.5l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Conversation, ID, ProjectGroup } from '@shared/domain'
 import { relativeTime } from '../lib/relativeTime'
+import { useDismiss } from '../lib/useDismiss'
 
 export type SessionIndicator = 'running' | 'attention' | null
 
@@ -11,6 +12,9 @@ interface ProjectSidebarProps {
   expandedProjectIds: readonly ID[]
   indicatorFor: (conversationId: ID) => SessionIndicator
   collapsed: boolean
+  /** Applied as the nav's own width so the resizer and the sidebar cannot
+   *  disagree about how wide it is. */
+  width: number
   onToggleProject: (projectId: ID) => void
   onSelectSession: (projectId: ID, conversationId: ID) => void
   /** Opens the project-creation dialog: a project genuinely needs a name
@@ -36,6 +40,7 @@ export function ProjectSidebar({
   expandedProjectIds,
   indicatorFor,
   collapsed,
+  width,
   onToggleProject,
   onSelectSession,
   onNewProject,
@@ -68,7 +73,7 @@ export function ProjectSidebar({
   }
 
   return (
-    <nav className="sidebar" aria-label="Projects and sessions">
+    <nav className="sidebar" aria-label="Projects and sessions" style={{ width: `${width}px` }}>
       <div className="sidebar-brand">
         <OrbitLogo />
         <span className="brand-text">
@@ -94,10 +99,16 @@ export function ProjectSidebar({
               className={group.project.id === activeProjectId ? 'project-group current' : 'project-group'}
             >
               <div className="project-row">
+                {/* The one project Antigravity is actually operating in is
+                    marked with aria-current rather than a hidden word: a
+                    hidden "Working project" would end up inside the row's
+                    announced name on every read. Visually it is carried by
+                    the row's own accent edge and weight. */}
                 <button
                   type="button"
                   className="project-open"
                   aria-expanded={expanded}
+                  aria-current={group.project.id === activeProjectId ? 'true' : undefined}
                   onClick={() => onToggleProject(group.project.id)}
                   title={group.project.rootPath ?? 'Orbit-managed workspace'}
                 >
@@ -174,22 +185,7 @@ interface CreateMenuProps {
 function CreateMenu({ activeProjectId, onNewProject, onNewSession }: CreateMenuProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent): void => {
-      if (!wrapperRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: globalThis.KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  useDismiss(wrapperRef, open, () => setOpen(false))
 
   return (
     <div className="create-menu" ref={wrapperRef}>
@@ -333,15 +329,7 @@ function SessionRow({
 function SessionMenu({ onRename, onDelete, title }: { onRename: () => void; onDelete: () => void; title: string }): JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const close = (event: MouseEvent): void => {
-      if (!wrapperRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [open])
+  useDismiss(wrapperRef, open, () => setOpen(false))
 
   return (
     <div className="session-menu" ref={wrapperRef}>

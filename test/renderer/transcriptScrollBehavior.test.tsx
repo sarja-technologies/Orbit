@@ -215,6 +215,7 @@ function props(overrides: Partial<Props> = {}): Props {
     projectFiles: [],
     thumbnails: {},
     activeRunId: null,
+    drafting: false,
     streamText: '',
     activityByRun: {},
     pendingInteraction: null,

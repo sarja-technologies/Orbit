@@ -6,7 +6,7 @@ import { describeActivity, fallbackActivity } from '../lib/activityCopy'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
-import { ActivitySummary, LiveActivity } from './ActivityLine'
+import { ActivitySummary, LiveActivity, WaitingActivity } from './ActivityLine'
 import { InactiveInteraction, InteractionCard, ResolvedInteraction } from './InteractionCard'
 import { useTranscriptScroll } from '../lib/useTranscriptScroll'
 
@@ -24,6 +24,11 @@ interface WorkSessionProps {
   projectFiles: ProjectFile[]
   thumbnails: Record<string, string>
   activeRunId: ID | null
+  /** True while the user is composing the first message of a session that
+   *  does not exist yet. There is no transcript to draw and nothing to
+   *  prompt them to create — the empty-session invitation below owns the
+   *  canvas — so this renders nothing at all. */
+  drafting: boolean
   streamText: string
   activityByRun: Record<string, ActivityState>
   pendingInteraction: InteractionRequiredEvent | null
@@ -42,6 +47,7 @@ export function WorkSession({
   projectFiles,
   thumbnails,
   activeRunId,
+  drafting,
   streamText,
   activityByRun,
   pendingInteraction,
@@ -110,6 +116,7 @@ export function WorkSession({
   )
 
   if (!conversation) {
+    if (drafting) return <div className="transcript-drafting" aria-hidden="true" />
     return (
       <div className="transcript-empty">
         <p>{project ? 'Create a session to start working.' : 'Create a project to begin.'}</p>
@@ -184,12 +191,21 @@ export function WorkSession({
                 </div>
               ) : null}
 
+              {/* The activity rail keeps stating the turn's current state even
+                  when that state is "stopped, waiting on you" — otherwise the
+                  rail simply vanishes at the one moment the turn is most
+                  obviously not progressing. */}
               {pendingInteraction ? (
-                <InteractionCard
-                  event={pendingInteraction}
-                  busy={respondingInteractionId === pendingInteraction.interactionId}
-                  onRespond={onRespond}
-                />
+                <>
+                  <div className="chat-aside">
+                    <WaitingActivity />
+                  </div>
+                  <InteractionCard
+                    event={pendingInteraction}
+                    busy={respondingInteractionId === pendingInteraction.interactionId}
+                    onRespond={onRespond}
+                  />
+                </>
               ) : null}
             </div>
           ) : null}

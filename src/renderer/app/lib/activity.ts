@@ -65,7 +65,6 @@ export function currentActivityLine(state: ActivityState): ActivityItem | null {
 const COMMAND_TOOLS = /(bash|shell|command|terminal|run|exec)/i
 const EDIT_TOOLS = /(write|edit|create|replace|patch|save)/i
 const READ_TOOLS = /(read|view|open|search|grep|glob|list|find)/i
-
 /** Which family a finished step counts as in the summary. Uses the kind the
  *  provider reported; the label patterns remain as the fallback for an
  *  event that carried no kind. */

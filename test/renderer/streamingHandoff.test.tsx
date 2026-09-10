@@ -131,6 +131,9 @@ describe('streaming hand-off to the persisted assistant message', () => {
   const startRun = async (): Promise<void> => {
     render(<App />)
     await screen.findByText('Projects')
+    // Launch lands on a blank chat, so these hand-off cases — all of which
+    // are about a turn inside a stored session — open the stored one first.
+    await userEvent.click(await screen.findByRole('button', { name: /^Main/ }))
     await userEvent.type(screen.getByRole('textbox', { name: /message/i }), 'Tell me about bicycles')
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     await waitFor(() => expect(api.messages.send).toHaveBeenCalled())
@@ -330,6 +333,9 @@ describe('streaming hand-off to the persisted assistant message', () => {
 
     render(<App />)
     await screen.findByText('Projects')
+    // Launch lands on a blank chat; this case is about a turn inside the
+    // stored session, so open it the way a user would.
+    await userEvent.click(await screen.findByRole('button', { name: /^Main/ }))
     await userEvent.type(screen.getByRole('textbox', { name: /message/i }), 'Build it')
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     await waitFor(() => expect(releaseSend).not.toBe(null))

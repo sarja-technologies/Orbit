@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
 import { ChatRow } from './ChatRow'
+import { MessageActions } from './MessageActions'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
 
@@ -41,7 +42,12 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error }:
   const isUser = message.role === 'user'
   return (
     // Real send time from the stored message — never a placeholder.
-    <ChatRow role={isUser ? 'user' : 'assistant'} showIdentity={showRole} timestamp={message.createdAt}>
+    <ChatRow
+      role={isUser ? 'user' : 'assistant'}
+      showIdentity={showRole}
+      timestamp={message.createdAt}
+      actions={<MessageActions text={message.content} label={isUser ? 'your message' : 'Antigravity’s reply'} />}
+    >
       {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
     </ChatRow>

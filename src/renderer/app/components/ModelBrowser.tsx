@@ -1,12 +1,15 @@
 import { useMemo, useState } from 'react'
 import type { ModelOption } from '@shared/domain'
 import { groupByProvider, matchesQuery } from '../lib/providers'
+import { isDescriptive, modelDescription } from '../lib/modelMetadata'
 import { reasoningSummary } from '../lib/modelDisplay'
 import { Modal, ModalHeader } from './Modal'
 import { ProviderLogo } from './ProviderLogo'
 
 interface ModelBrowserProps {
   models: ModelOption[]
+  /** The concrete id the session is on, already resolved by the caller —
+   *  this component never has to reason about what "no model" means. */
   selectedModel: string | null
   onSelect: (modelId: string) => void
   onClose: () => void
@@ -43,6 +46,7 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
         ) : null}
       </ModalHeader>
 
+      {/* Concrete models only — every row here is a real catalogue entry. */}
       <div className="modal-body model-browser">
         {groups.map((group) => (
           <section key={group.provider.key} className="model-group">
@@ -74,12 +78,18 @@ export function ModelRow({
   onSelect: () => void
 }): JSX.Element {
   const provider = groupByProvider([model])[0]!.provider
+  // What this model is *for*. The reasoning tiers used to live on this line
+  // and told you nothing a chooser needs — the reasoning control right next
+  // to it is where that decision is made.
+  const description = modelDescription(model)
   return (
     <button
       type="button"
       role="menuitemradio"
       aria-checked={selected}
       className={selected ? 'model-row selected' : 'model-row'}
+      // The catalogue id and the real tier coverage stay one hover away.
+      title={`${model.id} · ${reasoningSummary(model)}`}
       onClick={onSelect}
     >
       <span className="model-row-mark" aria-hidden="true">
@@ -87,7 +97,7 @@ export function ModelRow({
       </span>
       <span className="model-row-text">
         <span className="model-row-name">{model.label}</span>
-        <span className="model-row-hint">{reasoningSummary(model)}</span>
+        <span className={isDescriptive(model) ? 'model-row-hint' : 'model-row-hint is-identifier'}>{description}</span>
       </span>
       <Tick checked={selected} />
     </button>
@@ -103,13 +113,3 @@ export function Tick({ checked }: { checked: boolean }): JSX.Element | null {
   )
 }
 
-/** Marks the "let Antigravity decide" row. Deliberately not a provider mark:
- *  no single vendor owns that choice. */
-export function AutoGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="8" r="5.4" stroke="currentColor" strokeWidth="1.4" fill="none" strokeDasharray="2.6 2.4" />
-      <circle cx="8" cy="8" r="1.7" fill="currentColor" />
-    </svg>
-  )
-}

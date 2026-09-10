@@ -19,6 +19,12 @@ interface ChatRowProps {
   status?: ReactNode
   /** Widens the bubble's own class list, e.g. to mark it streaming. */
   bubbleClassName?: string
+  /** Actions for this message, shown on hover or focus in a strip beneath
+   *  the bubble. The strip's height is reserved whether or not it is
+   *  visible, so pointing at a message never moves the conversation. Omitted
+   *  by rows whose content is still arriving — there is nothing settled to
+   *  act on yet. */
+  actions?: ReactNode
   children: ReactNode
 }
 
@@ -33,7 +39,7 @@ interface ChatRowProps {
  *  Deliberately not memoized: `children` is a fresh element on every
  *  render, so a memo here could never hit. The barrier that actually keeps
  *  settled messages from re-rendering is MessageBlock's, one level up. */
-export function ChatRow({ role, showIdentity, timestamp, status, bubbleClassName, children }: ChatRowProps): JSX.Element {
+export function ChatRow({ role, showIdentity, timestamp, status, bubbleClassName, actions, children }: ChatRowProps): JSX.Element {
   const isUser = role === 'user'
   const time = timestamp ? clockTime(timestamp) : ''
 
@@ -47,6 +53,7 @@ export function ChatRow({ role, showIdentity, timestamp, status, bubbleClassName
         </div>
       ) : null}
       <div className={`chat-bubble chat-bubble-${role}${bubbleClassName ? ` ${bubbleClassName}` : ''}`}>{children}</div>
+      {actions ? <div className="chat-actions">{actions}</div> : null}
     </div>
   )
 }
