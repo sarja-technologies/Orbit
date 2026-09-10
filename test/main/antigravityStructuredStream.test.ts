@@ -220,4 +220,87 @@ describe('structured transport streaming (real captured agy event shapes)', () =
     expect(events.at(-1)).toMatchObject({ type: 'run.cancelled' })
     await provider.shutdown()
   })
+
+  it('stays cancelled when agy answers the interrupt with an error result', async () => {
+    // THE REAL BUG. SIGTERM makes agy tear its turn down, and what it
+    // writes on the way out races the exit handler. Here it wins that
+    // race with `status: "ERROR"`, which used to be reported as
+    // `provider.failed` — rendered as "Antigravity's response couldn't be
+    // read", a crash report for something the user asked for.
+    const interrupted = {
+      event: 'result',
+      result: { conversation_id: CONVERSATION_ID, status: 'ERROR', error: 'Turn interrupted by signal' }
+    }
+    process.env.ORBIT_AGY_PATH = fakeAgy([INIT, USER_INPUT_STEP, activeDelta('Partial answer')])
+    fs.appendFileSync(
+      process.env.ORBIT_AGY_PATH,
+      `process.on('SIGTERM', () => { process.stdout.write(${JSON.stringify(`${JSON.stringify(interrupted)}\n`)}); setTimeout(() => process.exit(0), 50) })\n` +
+        'setTimeout(() => {}, 60_000)\n'
+    )
+    const provider = new AntigravityProvider(undefined, async () => [])
+    const events: RuntimeEvent[] = []
+    await new Promise<void>((resolve) => {
+      void provider.sendMessage(input(), (event) => {
+        events.push(event)
+        if (event.type === 'text.delta') void provider.cancelRun('run_1')
+        if (event.type === 'run.cancelled' || event.type === 'run.completed' || event.type === 'run.failed') resolve()
+      })
+    })
+
+    expect(events.some((event) => event.type === 'run.failed'), JSON.stringify(events)).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: 'run.cancelled' })
+    await provider.shutdown()
+  })
+
+  it('still reports a genuine failure as a failure when nothing was cancelled', async () => {
+    // The guard above must not swallow real errors: an untouched run that
+    // dies still ends as run.failed, with agy's own message intact.
+    const events = await replay([INIT, USER_INPUT_STEP, activeDelta('Starting')])
+    expect(events.some((event) => event.type === 'run.cancelled')).toBe(false)
+    expect(events.find((event) => event.type === 'run.failed')).toMatchObject({ error: { code: 'provider.exited' } })
+  })
+
+  it('reports the real command a tool step is running, not just the tool’s name', async () => {
+    const toolStep = (state: string) => ({
+      event: 'step_update',
+      step_update: {
+        conversation_id: CONVERSATION_ID,
+        step_index: 2,
+        state,
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: { parameters: { command: 'npm run build' } }
+      }
+    })
+    const events = await replay([INIT, USER_INPUT_STEP, toolStep('ACTIVE'), toolStep('DONE'), success('Built.')])
+    const activity = events.filter((event) => event.type === 'tool.activity')
+
+    expect(activity).toHaveLength(2)
+    expect(activity[0]).toMatchObject({ label: 'Running npm run build', status: 'running', kind: 'command', detail: 'npm run build' })
+    expect(activity[1]).toMatchObject({ label: 'Running npm run build', status: 'completed', kind: 'command' })
+  })
+
+  it('reports the real file a read or edit step is touching', async () => {
+    const step = (index: number, tool: string, parameters: Record<string, unknown>) => ({
+      event: 'step_update',
+      step_update: {
+        conversation_id: CONVERSATION_ID,
+        step_index: index,
+        state: 'ACTIVE',
+        step_type: 'tool',
+        tool_name: tool,
+        tool_info: { parameters }
+      }
+    })
+    const events = await replay([
+      INIT,
+      USER_INPUT_STEP,
+      step(2, 'read_file', { path: 'src/components/WorkSession.tsx' }),
+      step(3, 'write_file', { path: 'styles.css' }),
+      success('Done.')
+    ])
+    const labels = events.filter((event) => event.type === 'tool.activity').map((event) => (event as { label: string }).label)
+
+    expect(labels).toEqual(['Reading src/components/WorkSession.tsx', 'Editing styles.css'])
+  })
 })

@@ -12,6 +12,7 @@ import { nowIso } from '@main/util/ids'
 import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
 import { checkClipboardCapability } from './clipboardCapability'
 import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
+import { describeToolActivity } from './toolActivity'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -184,9 +185,19 @@ export class AntigravityProvider implements AgentProvider {
       if (step.step_type === 'agent_response' && step.text_delta) { active.text += step.text_delta; this.emit(active, { type: 'text.delta', delta: step.text_delta }) }
       if (step.step_type === 'tool') {
         const status = step.state === 'ACTIVE' ? 'running' : step.state === 'ERROR' ? 'failed' : 'completed'
-        const label = step.tool_name ?? 'Antigravity tool'
-        this.emit(active, { type: 'tool.activity', label, status, providerStepId: String(step.step_index ?? '') })
-        this.discoverArtifact(active, label, step.tool_info?.parameters)
+        // The real command line / path / query agy reported, not just the
+        // tool's name — this is the whole difference between "Antigravity
+        // is working" and "Running npm run build".
+        const described = describeToolActivity(step.tool_name, step.tool_info?.parameters, active.input.workspacePath)
+        this.emit(active, {
+          type: 'tool.activity',
+          label: described.label,
+          status,
+          kind: described.kind,
+          ...(described.detail ? { detail: described.detail } : {}),
+          providerStepId: String(step.step_index ?? '')
+        })
+        this.discoverArtifact(active, step.tool_name ?? '', step.tool_info?.parameters)
       }
       // agy 1.1.27 represents headless ask_question/ask_permission as an
       // opaque unknown step, then completes after skipping it. Record the
@@ -242,8 +253,19 @@ export class AntigravityProvider implements AgentProvider {
     this.emit(active, { type: 'run.completed', finalText, nativeConversationId: active.nativeConversationId, ...(usage ? { usage } : {}) })
     this.activeRuns.delete(active.input.runId)
   }
+  /** CRITICAL (real bug): once the user has pressed Stop, this run has
+   *  exactly one honest outcome — cancelled. SIGTERM makes agy tear its
+   *  turn down, and what it writes on the way out is a losing race against
+   *  the exit handler: a `result` line with a non-SUCCESS status, or a
+   *  broken pipe. Both used to arrive here first and end the turn as
+   *  `provider.failed`, which the UI renders as "Antigravity's response
+   *  couldn't be read" — a crash report for something the user asked for.
+   *  A user-requested cancellation is a lifecycle state, so every failure
+   *  path after a cancellation is redirected to it rather than each caller
+   *  having to remember to check. */
   private fail(active: ActiveRun, code: string, message: string): void {
     if (active.settled) return
+    if (active.cancelled) return this.cancelled(active)
     active.settled = true; this.emit(active, { type: 'run.failed', error: { code, message, retryable: false } }); this.activeRuns.delete(active.input.runId)
   }
   private cancelled(active: ActiveRun): void {

@@ -40,11 +40,25 @@ export interface StepStartedEvent extends RuntimeEventBase {
   providerStepId?: string
 }
 
+/** What a step is actually doing, as classified by the provider that read
+ *  it — never by matching words in a display label. The renderer groups and
+ *  summarizes on this, so rewording a label can never silently reclassify
+ *  the step it describes. */
+export type ToolActivityKind = 'command' | 'read' | 'edit' | 'search' | 'list' | 'status' | 'tool'
+
 export interface ToolActivityEvent extends RuntimeEventBase {
   type: 'tool.activity'
+  /** The line a person reads, e.g. `Running npm run build`. Built by the
+   *  provider out of the runtime's own event data — never invented, and
+   *  never a reconstruction of anything the runtime did not emit. */
   label: string
   status: 'running' | 'completed' | 'failed'
   providerStepId?: string
+  kind?: ToolActivityKind
+  /** The real command line, path or query the runtime supplied, when it
+   *  supplied one. Absent means the runtime named the tool and nothing
+   *  more, so the label carries only what was genuinely reported. */
+  detail?: string
 }
 
 /** A provider observed an interaction it cannot safely complete alone. */
