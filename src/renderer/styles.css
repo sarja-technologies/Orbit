@@ -13,24 +13,24 @@
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Ubuntu Mono', Menlo, Consolas, monospace;
 
   /* The surface ladder. The sidebar recedes; the composer steps forward. */
-  --bg-sidebar: #1c2025;
-  --bg-rail: #20252b;
-  --bg-canvas: #24282f;
-  --bg-drawer: #272c34;
-  --bg-elevated: #30363f;
-  --bg-float: #353c46;
-  --bg-inset: #1e2228;
+  --bg-sidebar: #171b21;
+  --bg-rail: #1d222a;
+  --bg-canvas: #232932;
+  --bg-drawer: #2a313b;
+  --bg-elevated: #333b47;
+  --bg-float: #3b434f;
+  --bg-inset: #1a1f26;
 
-  --bg-hover: rgba(255, 255, 255, 0.06);
-  --bg-active: rgba(255, 255, 255, 0.105);
-  --bg-selected: rgba(255, 255, 255, 0.085);
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --bg-selected: rgba(255, 255, 255, 0.08);
 
-  --text-primary: #edf0f5;
-  --text-secondary: #aeb7c3;
-  --text-muted: #7d8794;
+  --text-primary: #f2f5f9;
+  --text-secondary: #b8c1cd;
+  --text-muted: #8691a0;
 
-  --border: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.145);
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.155);
 
   --accent: #4c8dff;
   --accent-hover: #6ba0ff;
@@ -311,6 +311,49 @@ textarea {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 650;
+}
+
+/* ---------- sidebar resizer ---------- */
+
+/* A hit area wide enough to grab, holding a line thin enough to ignore.
+   The line only shows itself on approach, so the divider is a tool rather
+   than another piece of furniture in the layout. */
+.sidebar-resizer {
+  flex: none;
+  width: 9px;
+  margin-left: -4px;
+  margin-right: -4px;
+  z-index: 5;
+  cursor: col-resize;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.sidebar-resizer-line {
+  width: 1px;
+  background: var(--border);
+  transition: background 120ms ease, width 120ms ease;
+}
+
+.sidebar-resizer:hover .sidebar-resizer-line,
+.sidebar-resizer:focus-visible .sidebar-resizer-line {
+  width: 2px;
+  background: var(--accent);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+/* While a drag is live the whole document stops selecting text, so pulling
+   the divider across the transcript resizes instead of highlighting. */
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* ---------- sidebar ---------- */
@@ -3124,4 +3167,279 @@ textarea {
     right: 40px;
     width: 300px;
   }
+}
+
+
+/* ---------- composer: project + permission controls ---------- */
+
+/* Both controls share the model control's register: quiet until hovered,
+   stating a fact rather than advertising a button. */
+.project-control,
+.permission-control {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.project-trigger,
+.permission-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 230px;
+  padding: 5px var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-meta);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.project-trigger:hover:not(:disabled),
+.permission-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-trigger:disabled,
+.permission-trigger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.project-trigger-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.project-trigger-name {
+  font-weight: 550;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* The real folder, secondary to the project name it belongs to. */
+.project-trigger-path {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Skipping approvals is a real change in what the agent may do on its own,
+   so the control says so in the one place the user will look. */
+.permission-trigger.is-permissive {
+  color: var(--attention);
+}
+
+.permission-trigger.is-permissive:hover:not(:disabled) {
+  color: var(--attention);
+  background: var(--attention-soft);
+}
+
+.project-popover,
+.permission-popover {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 40;
+  width: 320px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 12px);
+  background: var(--bg-float);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+}
+
+.permission-popover {
+  left: auto;
+  right: 0;
+}
+
+.project-popover-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.project-popover-name {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.project-popover-role {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.project-popover-path {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.project-popover-empty,
+.project-popover-note,
+.permission-note {
+  margin: 0 0 var(--space-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.permission-note {
+  margin: var(--space-2) 0 0;
+}
+
+.project-popover-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.project-popover-action {
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-meta);
+  cursor: pointer;
+}
+
+.project-popover-action:hover {
+  background: var(--bg-hover);
+}
+
+.permission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.permission-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.permission-row:hover {
+  background: var(--bg-hover);
+}
+
+.permission-row.selected {
+  background: var(--bg-selected);
+}
+
+.permission-row-mark {
+  display: flex;
+  padding-top: 1px;
+  color: var(--text-secondary);
+}
+
+.permission-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.permission-row-name {
+  font-size: var(--text-meta);
+  font-weight: 550;
+}
+
+.permission-row-hint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* ---------- message actions ---------- */
+
+/* Revealed by hover or by focus landing anywhere in the row, so the copy
+   button is reachable with a pointer and with the keyboard alike, without
+   parking a control under every message permanently. */
+.message-actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chat-row:hover .message-actions,
+.chat-row:focus-within .message-actions {
+  opacity: 1;
+}
+
+.chat-row-user .message-actions {
+  justify-content: flex-end;
+}
+
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.message-action:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* A copy that did not happen must not look like one that did. */
+.message-action.is-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Keyboard users get the actions the moment they are focused, even before
+   the row is hovered. */
+.message-action:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }

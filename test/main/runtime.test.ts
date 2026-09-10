@@ -14,6 +14,7 @@ import type { AgentProvider, ProviderSendInput } from '../../src/main/runtime/pr
 import type { ProviderStatus } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
+import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 
 /** The default model exactly as the normalized catalogue publishes it, so
  *  a new session's reasoning tier is resolved from real tiers rather than
@@ -382,7 +383,7 @@ describe('OrbitRuntime', () => {
 
   it('starts a session on the reasoning tier the user last chose', async () => {
     await runtime.listModels()
-    store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: {} })
+    store.writePreferences({ ...EMPTY_PREFERENCES, lastReasoningEffort: 'high' })
     const project = runtime.createProject('Seeded')
     expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('high')
     expect(runtime.createConversation(project.id, 'Another').reasoningEffort).toBe('high')
@@ -412,8 +413,8 @@ describe('OrbitRuntime', () => {
 
   it('round trips preferences through the runtime', () => {
     expect(runtime.getPreferences().lastReasoningEffort).toBeNull()
-    runtime.setPreferences({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
-    expect(runtime.getPreferences()).toEqual({ lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    runtime.setPreferences({ ...EMPTY_PREFERENCES, lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
+    expect(runtime.getPreferences()).toEqual({ ...EMPTY_PREFERENCES, lastReasoningEffort: 'low', modelReasoningEfforts: { 'gemini-3.8-flash': 'low' } })
   })
 
   it('passes cancellation to the provider', async () => {

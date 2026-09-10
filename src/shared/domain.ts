@@ -1,3 +1,6 @@
+import type { PermissionMode } from './permissionMode'
+export type { PermissionMode } from './permissionMode'
+
 export type ID = string
 
 export type ProviderId = 'antigravity'
@@ -48,6 +51,10 @@ export interface Conversation {
    *  Antigravity pick something"; legacy `null` rows resolve to Orbit's
    *  default as the store reads them. */
   model: string
+  /** How tool-permission requests are handled for this session. Applied as
+   *  a real agy launch flag, so changing it retires and respawns the
+   *  session exactly the way a model change does — see permissionMode.ts. */
+  permissionMode: PermissionMode
   /** null means no explicit tier chosen yet — a session created before the
    *  catalogue was readable. It is settled from the real catalogue as soon
    *  as one arrives, rather than being filled with a manufactured tier. */
@@ -182,6 +189,17 @@ export interface OrbitPreferences {
   /** Explicit per-model choices, so switching away from a model and back
    *  returns the tier that model was left on. Keyed by normalized model id. */
   modelReasoningEfforts: Record<string, ReasoningEffort>
+  /** The sidebar's width in pixels, as the user last dragged it. null means
+   *  they never have, and the default width applies. Clamped on read, so a
+   *  hand-edited or stale value can never render an unusable sidebar. */
+  sidebarWidth: number | null
+  /** Where the user was when they last quit, so Orbit reopens the
+   *  conversation they were actually working in rather than whichever one
+   *  happens to have been written to most recently. Both are null on first
+   *  run, and either may name something since deleted — resolution falls
+   *  back to recency, never to creating a session. */
+  lastActiveProjectId: string | null
+  lastActiveConversationId: string | null
 }
 
 export interface ProjectSnapshot {

@@ -11,6 +11,10 @@ interface ProjectSidebarProps {
   expandedProjectIds: readonly ID[]
   indicatorFor: (conversationId: ID) => SessionIndicator
   collapsed: boolean
+  /** The user's dragged width, applied inline because it is live state, not
+   *  a stylesheet constant. Ignored while collapsed, which has its own
+   *  fixed rail width. */
+  width: number
   onToggleProject: (projectId: ID) => void
   onSelectSession: (projectId: ID, conversationId: ID) => void
   /** Opens the project-creation dialog: a project genuinely needs a name
@@ -36,6 +40,7 @@ export function ProjectSidebar({
   expandedProjectIds,
   indicatorFor,
   collapsed,
+  width,
   onToggleProject,
   onSelectSession,
   onNewProject,
@@ -68,7 +73,7 @@ export function ProjectSidebar({
   }
 
   return (
-    <nav className="sidebar" aria-label="Projects and sessions">
+    <nav className="sidebar" aria-label="Projects and sessions" style={{ width }}>
       <div className="sidebar-brand">
         <OrbitLogo />
         <span className="brand-text">

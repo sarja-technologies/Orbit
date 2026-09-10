@@ -19,8 +19,11 @@ import type {
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor, rememberEffort } from '@shared/reasoningPolicy'
 import { resolveModelId } from '@shared/defaultModel'
+import { resolveSidebarWidth } from '@shared/reasoningPolicy'
+import type { PermissionMode } from '@shared/permissionMode'
+import { SidebarResizer } from './components/SidebarResizer'
 import { StartupError } from './ErrorBoundary'
-import { getOrbitApi } from './orbitApi'
+import { getOrbitApi, requireOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
 import { ProjectSidebar, type SessionIndicator } from './components/ProjectSidebar'
 import { CreateProjectDialog } from './components/CreateDialogs'
@@ -91,6 +94,10 @@ export function App(): JSX.Element {
    *  does not exist at all. Cleared by the effect that lands the focus. */
   const [focusPendingId, setFocusPendingId] = useState<ID | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  /** The sidebar's live width. Seeded from the stored preference once it
+   *  loads, then owned here — App is the single source of truth for it, and
+   *  the resizer is a control over this value rather than a second copy. */
+  const [sidebarWidth, setSidebarWidth] = useState(() => resolveSidebarWidth(null))
   const [selectedArtifactId, setSelectedArtifactId] = useState<ID | null>(null)
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -226,6 +233,21 @@ export function App(): JSX.Element {
     void persistModel(activeConversation.id, activeConversation.model, effort)
   }, [activeConversation, models, preferences])
 
+  // Remember where the user is, so the next launch reopens it. Written only
+  // when it actually changes, and only once a real session is open — an
+  // in-progress load must not overwrite the position being restored.
+  const lastActiveRef = useRef<string>('')
+  useEffect(() => {
+    const projectId = workspace.activeProjectId
+    const conversationId = workspace.activeConversationId
+    if (!projectId || !conversationId) return
+    const signature = `${projectId}:${conversationId}`
+    if (lastActiveRef.current === signature) return
+    lastActiveRef.current = signature
+    if (preferences.lastActiveProjectId === projectId && preferences.lastActiveConversationId === conversationId) return
+    savePreferences({ ...preferences, lastActiveProjectId: projectId, lastActiveConversationId: conversationId })
+  }, [workspace.activeProjectId, workspace.activeConversationId, preferences])
+
   if (startupError) return <StartupError message={startupError.message} detail={startupError.detail} />
 
   async function loadInitial(): Promise<void> {
@@ -237,6 +259,7 @@ export function App(): JSX.Element {
     ])
     setProviderStatus(status)
     setPreferences(storedPreferences)
+    setSidebarWidth(resolveSidebarWidth(storedPreferences.sidebarWidth))
     setTree(groups)
     // The catalogue comes from Antigravity itself. If it cannot be read we
     // show no models at all rather than inventing plausible-looking ones.
@@ -244,10 +267,16 @@ export function App(): JSX.Element {
       .list()
       .then(setModels)
       .catch(() => setModels([]))
-    const first = groups[0]?.project
-    if (!first) return
-    setExpandedProjectIds((current) => (current.includes(first.id) ? current : [...current, first.id]))
-    await openProject(first.id)
+    // Reopen where the user actually was. `lastActive*` is their own last
+    // position; groups are already ordered by recency, so the fallback is
+    // the most recently touched project rather than an arbitrary one.
+    // Nothing here creates a session: an empty project opens empty, and
+    // only an explicit New Session makes one.
+    const remembered = groups.find((group) => group.project.id === storedPreferences.lastActiveProjectId)?.project
+    const target = remembered ?? groups[0]?.project
+    if (!target) return
+    setExpandedProjectIds((current) => (current.includes(target.id) ? current : [...current, target.id]))
+    await openProject(target.id, storedPreferences.lastActiveConversationId)
   }
 
   async function openProject(projectId: ID, preferredConversationId?: ID | null): Promise<void> {
@@ -523,6 +552,78 @@ export function App(): JSX.Element {
     void persistModel(activeConversation.id, activeConversation.model, effort)
   }
 
+  /** Writes preferences through in one place, so every caller updates the
+   *  same object rather than racing with a stale copy of it. */
+  function savePreferences(next: OrbitPreferences): void {
+    setPreferences(next)
+    void requireOrbitApi()
+      .preferences.set(next)
+      .catch(() => {
+        // A preference that failed to persist still applies to this launch;
+        // it simply will not be remembered next time.
+      })
+  }
+
+  /** Committed once a resize gesture ends, never on every pointer move. */
+  function commitSidebarWidth(width: number): void {
+    savePreferences({ ...preferences, sidebarWidth: width })
+  }
+
+  /** How this session answers permission requests. A real agy launch flag,
+   *  so it lands on the conversation and takes effect on its next turn. */
+  async function selectPermissionMode(mode: PermissionMode): Promise<void> {
+    if (!activeConversation) return
+    const conversationId = activeConversation.id
+    setTree((current) =>
+      current.map((group) => ({
+        ...group,
+        conversations: group.conversations.map((item) =>
+          item.id === conversationId ? { ...item, permissionMode: mode } : item
+        )
+      }))
+    )
+    try {
+      await requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })
+      await refreshProject()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That permission mode could not be applied.')
+      await refreshProject()
+    }
+  }
+
+  /** The project's real folder, chosen through the main process. The
+   *  renderer never touches the filesystem: it asks for a folder and
+   *  persists whatever the dialog returns. */
+  async function chooseProjectFolder(): Promise<void> {
+    if (!activeProject) return
+    const orbit = requireOrbitApi()
+    try {
+      const picked = await orbit.dialog.pickFolder({
+        title: 'Choose the project folder',
+        ...(activeProject.rootPath ? { defaultPath: activeProject.rootPath } : {})
+      })
+      if (!picked) return
+      await orbit.projects.setRoot({ projectId: activeProject.id, rootPath: picked })
+      await refreshProject()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That folder could not be set.')
+    }
+  }
+
+  /** Drops a session's own folder override so it follows its project again. */
+  async function useProjectFolder(): Promise<void> {
+    if (!activeConversation) return
+    try {
+      await requireOrbitApi().conversations.setWorkingDirectory({
+        conversationId: activeConversation.id,
+        workingDirectory: null
+      })
+      await refreshProject()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That session folder could not be cleared.')
+    }
+  }
+
   /** Stopping is a normal thing to ask for, and Orbit says so immediately.
    *
    *  The run is marked stopping before the request goes out, so the pause
@@ -670,6 +771,7 @@ export function App(): JSX.Element {
         expandedProjectIds={expandedProjectIds}
         indicatorFor={indicatorFor}
         collapsed={sidebarCollapsed}
+        width={sidebarWidth}
         onToggleProject={(projectId) =>
           setExpandedProjectIds((current) =>
             current.includes(projectId) ? current.filter((id) => id !== projectId) : [...current, projectId]
@@ -682,6 +784,12 @@ export function App(): JSX.Element {
         onDelete={(conversationId) => void deleteSession(conversationId)}
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
+
+      {/* Only while the sidebar is showing: there is nothing to resize when
+          it is collapsed to its fixed rail. */}
+      {sidebarCollapsed ? null : (
+        <SidebarResizer width={sidebarWidth} onResize={setSidebarWidth} onCommit={commitSidebarWidth} />
+      )}
 
       <div className="workspace">
         <ChromeBar
@@ -742,6 +850,12 @@ export function App(): JSX.Element {
                 selectedEffort={activeConversation.reasoningEffort}
                 onSelectModel={selectModel}
                 onSelectEffort={selectEffort}
+                project={activeProject}
+                conversation={activeConversation}
+                permissionMode={activeConversation.permissionMode}
+                onSelectPermissionMode={(mode) => void selectPermissionMode(mode)}
+                onChooseProjectFolder={() => void chooseProjectFolder()}
+                onUseProjectFolder={() => void useProjectFolder()}
                 registerFocus={(focus) => {
                   composerFocusRef.current = focus
                 }}
@@ -830,12 +944,6 @@ export function App(): JSX.Element {
     setNotice(`Referenced in ${target?.title ?? 'session'}.`)
     await refreshProject()
   }
-}
-
-function requireOrbitApi(): NonNullable<ReturnType<typeof getOrbitApi>> {
-  const orbit = getOrbitApi()
-  if (!orbit) throw new Error('The Orbit preload API is unavailable.')
-  return orbit
 }
 
 /** The folder the header reports. A session override wins; otherwise the

@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { InteractionRequiredEvent, RuntimeEvent } from '../../src/shared/runtime-events'
+import { spawnSync } from 'node:child_process'
+import { PERMISSION_MODES, permissionArgs } from '../../src/shared/permissionMode'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 // Explicitly opt-in: this calls the user's signed-in Antigravity account.
@@ -25,7 +27,43 @@ describe('AntigravityProvider live integration', () => {
     expect(result.nativeConversationId).toMatch(/^[0-9a-f-]{20,}$/i)
     await provider.shutdown()
   }, 120_000)
+
+  /** The permission control's whole claim is that it changes what agy
+   *  actually does. agy reports its own resulting state in the `init` event
+   *  it emits, so this asserts on that rather than on Orbit's argv — the
+   *  mapping is only meaningful if the real CLI acts on it.
+   *
+   *  It spawns agy with exactly the flags permissionArgs() produces, which
+   *  is the same function both transports use. */
+  it.runIf(live)('puts agy into the permission state each Orbit mode claims', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-perm-'))
+    dirs.push(dir)
+    for (const mode of PERMISSION_MODES) {
+      const observed = livePermissionMode(dir, permissionArgs(mode.id))
+      expect(observed, `Orbit's "${mode.id}" mode`).toBe(mode.nativeMode)
+    }
+  }, 180_000)
 })
+
+/** Runs the real agy with the given flags and returns the permission state
+ *  it announces in its own `init` event. */
+function livePermissionMode(cwd: string, extraArgs: string[]): string | null {
+  const result = spawnSync(
+    'agy',
+    ['--model', ORBIT_DEFAULT_MODEL_ID, '--effort', 'low', ...extraArgs, '--output-format', 'stream-json', '-p', 'Reply with exactly: OK'],
+    { cwd, encoding: 'utf8', timeout: 150_000 }
+  )
+  for (const line of (result.stdout ?? '').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as { event?: string; init?: { permission_mode?: string } }
+      if (parsed.event === 'init' && parsed.init?.permission_mode) return parsed.init.permission_mode
+    } catch {
+      // Non-JSON chrome on stdout is not an error here.
+    }
+  }
+  return null
+}
 
 // Real, live PTY session tests against the installed signed-in `agy` CLI.
 // Whether agy raises a workspace-trust or command-permission prompt at all
@@ -510,6 +548,7 @@ function input(workspacePath: string, prompt: string): ProviderSendInput {
     referencedArtifacts: [],
     transport: 'structured',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null
   }
 }

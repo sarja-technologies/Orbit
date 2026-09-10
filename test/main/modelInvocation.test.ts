@@ -69,6 +69,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     referencedArtifacts: [],
     transport: 'structured',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null,
     ...overrides
   }
@@ -191,6 +192,54 @@ describe('model and effort reach the structured launch', () => {
     const args = await structuredArgs({ model: 'gemini-3.1-pro', reasoningEffort: null })
     expect(args[args.indexOf('--model') + 1]).toBe('gemini-3.1-pro')
     expect(args[args.indexOf('--effort') + 1]).toBe('low')
+  })
+})
+
+describe('permission mode reaches the real launch', () => {
+  it('adds no permission flag when the session asks first, because that is agy’s own default', async () => {
+    const args = await structuredArgs({ permissionMode: 'ask' })
+    expect(args).not.toContain('--dangerously-skip-permissions')
+    // And it must not reach for agy's execution modes either.
+    expect(args).not.toContain('--mode')
+    expect(args).not.toContain('--sandbox')
+  })
+
+  it('passes the real skip-permissions flag on the structured transport', async () => {
+    const args = await structuredArgs({ permissionMode: 'skip' })
+    expect(args).toContain('--dangerously-skip-permissions')
+    // The model invariant still holds alongside it.
+    expect(args[args.indexOf('--model') + 1]).toBe(ORBIT_DEFAULT_MODEL_ID)
+  })
+
+  it('passes the same flag on the interactive PTY transport', async () => {
+    let ptyArgs: string[] = []
+    const instance = new AntigravityProvider(
+      (deps, conversationId) =>
+        new AntigravityPtySession(
+          {
+            ...deps,
+            createTransport: (_executable: string, _cwd: string, args: string[]) => {
+              ptyArgs = args
+              return new NoopTransport()
+            },
+            findConversationId: () => null
+          },
+          conversationId
+        ),
+      async () => RAW_CATALOG
+    )
+
+    await instance.sendMessage(input({ transport: 'pty', permissionMode: 'skip' }), () => undefined)
+    expect(ptyArgs).toContain('--dangerously-skip-permissions')
+  })
+
+  it('never sends a flag agy would reject for a permission mode', async () => {
+    for (const permissionMode of ['ask', 'skip'] as const) {
+      const args = await structuredArgs({ permissionMode })
+      for (const arg of args.filter((candidate) => candidate.startsWith('--'))) {
+        expect(['--add-dir', '--model', '--effort', '--dangerously-skip-permissions', '--output-format', '--print', '--conversation']).toContain(arg)
+      }
+    }
   })
 })
 

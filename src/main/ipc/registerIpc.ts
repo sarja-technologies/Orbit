@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import { IPC_CHANNELS } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { OrbitRuntime } from '@main/runtime/orbitRuntime'
@@ -9,6 +9,8 @@ import {
   attachPathsSchema,
   cancelRunSchema,
   createConversationSchema,
+  setPermissionModeSchema,
+  clipboardTextSchema,
   createProjectSchema,
   createReferenceSchema,
   deleteConversationSchema,
@@ -42,6 +44,17 @@ export function registerIpc(runtime: OrbitRuntime): void {
   ipcMain.handle(IPC_CHANNELS.conversationsCreate, (_event, input: unknown) => {
     const parsed = createConversationSchema.parse(input)
     return runtime.createConversation(parsed.projectId, parsed.title, parsed.workingDirectory ?? null)
+  })
+  ipcMain.handle(IPC_CHANNELS.conversationsSetPermissionMode, (_event, input: unknown) => {
+    const parsed = setPermissionModeSchema.parse(input)
+    return runtime.setConversationPermissionMode(parsed.conversationId, parsed.permissionMode)
+  })
+  // Narrowly typed: text only, size-bounded, and it reports whether the
+  // write actually happened so the UI never claims a copy it did not make.
+  ipcMain.handle(IPC_CHANNELS.clipboardWriteText, (_event, input: unknown) => {
+    const text = clipboardTextSchema.parse(input)
+    clipboard.writeText(text)
+    return clipboard.readText() === text
   })
   ipcMain.handle(IPC_CHANNELS.conversationsSetWorkingDirectory, (_event, input: unknown) => {
     const parsed = setConversationWorkingDirectorySchema.parse(input)

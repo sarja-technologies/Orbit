@@ -8,6 +8,7 @@ import type { Conversation, ModelOption, OrbitPreferences, Project, ProjectSnaps
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { deriveSessionTitle, hasDefaultSessionTitle } from '../../src/shared/sessionTitle'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
+import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 
 const WEBSITE: Project = { id: 'project_1', name: 'AgentDock Website', rootPath: '/home/dev/agentdock', createdAt: 'now', updatedAt: 'now' }
 const RENDERER: Project = { id: 'project_2', name: 'Renderer Check', rootPath: null, createdAt: 'now', updatedAt: 'now' }
@@ -19,6 +20,7 @@ function conversation(overrides: Partial<Conversation> & { id: string; projectId
     status: 'idle',
     transport: 'structured',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null,
     workingDirectory: null,
     createdAt: 'now',
@@ -63,7 +65,7 @@ describe('App', () => {
 
   beforeEach(() => {
     window.localStorage.clear()
-    preferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
+    preferences = { ...EMPTY_PREFERENCES }
     sessions = { project_1: [IMPROVE, HYBRID], project_2: [CHECK] }
     created = 0
     userNamed = new Set()
@@ -134,9 +136,11 @@ describe('App', () => {
         }),
         delete: vi.fn(),
         setTransport: vi.fn(),
+        setPermissionMode: vi.fn(),
         setModel: vi.fn(),
         setWorkingDirectory: vi.fn()
       },
+      clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => MODELS) },
       messages: {
         // Mirrors OrbitRuntime.sendMessage: a still-unnamed session is named
@@ -199,6 +203,99 @@ describe('App', () => {
       })
     })
   }
+
+  it('reopens the conversation the user was last in, not merely the newest', async () => {
+    // The second session in the second project: neither the first project
+    // nor the first session, so recency alone could not produce it.
+    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_2', lastActiveConversationId: 'conversation_3' }
+    await boot()
+    await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
+  })
+
+  it('falls back to the most recent project when the remembered one is gone', async () => {
+    // A deleted project must not strand the user on a blank app.
+    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_deleted', lastActiveConversationId: 'conversation_gone' }
+    await boot()
+    await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_1'))
+  })
+
+  it('creates no session at all just because Orbit launched', async () => {
+    await boot()
+    // Opening the app is not a request for a new session — only the New
+    // Session control is.
+    expect(api.conversations.create).not.toHaveBeenCalled()
+  })
+
+  it('remembers where the user is, so the next launch can reopen it', async () => {
+    await boot()
+    await waitFor(() =>
+      expect(api.preferences.set).toHaveBeenCalledWith(
+        expect.objectContaining({ lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' })
+      )
+    )
+  })
+
+  it('opens the sidebar at the stored width, and persists a new one only when the drag ends', async () => {
+    preferences = { ...EMPTY_PREFERENCES, sidebarWidth: 340 }
+    await boot()
+    const sidebar = screen.getByRole('navigation', { name: 'Projects and sessions' })
+    expect(sidebar).toHaveStyle({ width: '340px' })
+
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    handle.focus()
+    await userEvent.keyboard('{ArrowRight}')
+    await waitFor(() => expect(sidebar).toHaveStyle({ width: '356px' }))
+    await waitFor(() => expect(api.preferences.set).toHaveBeenCalledWith(expect.objectContaining({ sidebarWidth: 356 })))
+  })
+
+  it('clamps a stored width that would make the sidebar unusable', async () => {
+    preferences = { ...EMPTY_PREFERENCES, sidebarWidth: 9000 }
+    await boot()
+    expect(screen.getByRole('navigation', { name: 'Projects and sessions' })).toHaveStyle({ width: '520px' })
+  })
+
+  it('still collapses the sidebar, and hides the resizer when it is collapsed', async () => {
+    await boot()
+    expect(screen.getByRole('separator', { name: 'Resize sidebar' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Hide projects' }))
+    expect(screen.queryByRole('separator', { name: 'Resize sidebar' })).not.toBeInTheDocument()
+    // And it comes back.
+    await userEvent.click(screen.getByRole('button', { name: 'Show projects' }))
+    expect(screen.getByRole('separator', { name: 'Resize sidebar' })).toBeInTheDocument()
+  })
+
+  it('states the session’s project and real working folder beside the composer', async () => {
+    await boot()
+    const control = await screen.findByLabelText('Project and working folder')
+    expect(control).toHaveTextContent('AgentDock Website')
+    // The genuine path the project carries, not a placeholder.
+    expect(control).toHaveAttribute('title', '/home/dev/agentdock')
+  })
+
+  it('sets a project folder through the main-process dialog, never from the renderer', async () => {
+    vi.mocked(api.dialog.pickFolder).mockResolvedValue('/home/dev/chosen')
+    await boot()
+    await userEvent.click(await screen.findByLabelText('Project and working folder'))
+    await userEvent.click(screen.getByRole('button', { name: /Change project folder/ }))
+
+    await waitFor(() => expect(api.dialog.pickFolder).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(api.projects.setRoot).toHaveBeenCalledWith({ projectId: 'project_1', rootPath: '/home/dev/chosen' })
+    )
+  })
+
+  it('persists a permission change against the session it belongs to', async () => {
+    await boot()
+    await userEvent.click(await screen.findByLabelText('Permissions'))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
+
+    await waitFor(() =>
+      expect(api.conversations.setPermissionMode).toHaveBeenCalledWith({
+        conversationId: 'conversation_1',
+        permissionMode: 'skip'
+      })
+    )
+  })
 
   it('groups sessions under the project they belong to', async () => {
     await boot()
@@ -525,7 +622,7 @@ describe('App', () => {
   })
 
   it('persists a model choice, carrying the remembered reasoning level onto it', async () => {
-    preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
+    preferences = { ...EMPTY_PREFERENCES, lastReasoningEffort: 'high' }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -541,7 +638,7 @@ describe('App', () => {
   })
 
   it('maps a remembered level onto a model that does not publish it', async () => {
-    preferences = { lastReasoningEffort: 'medium', modelReasoningEfforts: {} }
+    preferences = { ...EMPTY_PREFERENCES, lastReasoningEffort: 'medium' }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -558,7 +655,7 @@ describe('App', () => {
   })
 
   it('chooses no tier for a model with no reasoning control', async () => {
-    preferences = { lastReasoningEffort: 'high', modelReasoningEfforts: {} }
+    preferences = { ...EMPTY_PREFERENCES, lastReasoningEffort: 'high' }
     await boot()
 
     const trigger = await screen.findByLabelText('Model and reasoning')
@@ -582,10 +679,12 @@ describe('App', () => {
     await userEvent.click(trigger)
     await userEvent.click(screen.getByRole('button', { name: 'High' }))
 
-    expect(api.preferences.set).toHaveBeenCalledWith({
-      lastReasoningEffort: 'high',
-      modelReasoningEfforts: { [ORBIT_DEFAULT_MODEL_ID]: 'high' }
-    })
+    expect(api.preferences.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastReasoningEffort: 'high',
+        modelReasoningEfforts: { [ORBIT_DEFAULT_MODEL_ID]: 'high' }
+      })
+    )
     expect(api.conversations.setModel).toHaveBeenCalledWith({
       conversationId: 'conversation_1',
       model: ORBIT_DEFAULT_MODEL_ID,
@@ -597,7 +696,7 @@ describe('App', () => {
     const legacy = conversation({ id: 'conversation_1', projectId: 'project_1', title: 'Improve Orbit UI', model: 'gemini-3.8-flash' })
     vi.mocked(api.projects.tree).mockResolvedValue([{ project: WEBSITE, conversations: [legacy] }])
     vi.mocked(api.projects.open).mockResolvedValue(snapshotFor(WEBSITE, [legacy]))
-    preferences = { lastReasoningEffort: 'low', modelReasoningEfforts: {} }
+    preferences = { ...EMPTY_PREFERENCES, lastReasoningEffort: 'low' }
 
     await boot()
     await waitFor(() =>

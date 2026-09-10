@@ -91,6 +91,7 @@ function input(overrides: Partial<ProviderSendInput> = {}): ProviderSendInput {
     referencedArtifacts: [],
     transport: 'structured',
     model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: 'ask' as const,
     reasoningEffort: null,
     ...overrides
   }
