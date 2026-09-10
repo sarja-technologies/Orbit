@@ -19,6 +19,7 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { extractResponseText, progressiveAppendIndex, promptHasBeenSubmitted } from '@main/terminal/TerminalInteractionDetector'
+import { readScreenActivity } from '@main/terminal/TerminalActivityReader'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
@@ -132,6 +133,11 @@ export class AntigravityPtySession {
   private pending: PendingInteraction | null = null
   private interactionCounter = 0
   private cancelRequested = false
+  /** The one activity row currently shown as running for this turn, if any
+   *  — see `observeActivity`. Null means nothing is live, which is the
+   *  state every turn ending must leave behind. */
+  private currentActivity: { label: string; id: number } | null = null
+  private activityCounter = 0
   /** Runs whose *deferred* work must never happen — see
    *  `awaitingDeferredSpawn`. A run lands here when the user stops it while
    *  it is waiting on a retirement rather than on a process of its own: the
@@ -229,6 +235,7 @@ export class AntigravityPtySession {
     this.text = ''
     this.streamedText = ''
     this.deliveredPrompt = null
+    this.currentActivity = null
     this.cancelRequested = false
     this.nativeConversationId = input.nativeConversationId ?? this.nativeConversationId
     const images: ImageAttachment[] = (input.attachments ?? [])
@@ -451,8 +458,16 @@ export class AntigravityPtySession {
       onReadyForInput: () => { if (isCurrent()) this.handleReady() },
       onBusy: () => { if (isCurrent()) this.handleBusy() },
       onExit: (code, signal) => { if (isCurrent()) this.handleExit(code, signal) },
-      onStreamText: (lines) => { if (isCurrent()) this.handleStreamText(lines) },
-      onScreenText: (lines) => { if (isCurrent()) this.observeScreen(lines) }
+      onStreamText: (lines) => {
+        if (!isCurrent()) return
+        this.observeActivity(lines)
+        this.handleStreamText(lines)
+      },
+      onScreenText: (lines) => {
+        if (!isCurrent()) return
+        this.observeActivity(lines)
+        this.observeScreen(lines)
+      }
     })
   }
 
@@ -490,6 +505,10 @@ export class AntigravityPtySession {
       return
     }
     if (this.state === 'idle' || !this.transport?.isRunning) return
+    // Stop is acknowledged in the activity feed straight away: the row the
+    // user was watching stops counting the moment they ask it to, rather
+    // than when the transport eventually settles.
+    this.completeCurrentActivity()
     this.cancelRequested = true
     if (this.pending) {
       const resolvedId = this.pending.interactionId
@@ -537,6 +556,7 @@ export class AntigravityPtySession {
     if (runId === null || this.cancelledDeferredRuns.has(runId)) return
     this.cancelledDeferredRuns.add(runId)
     this.clearTurnStartTimer()
+    this.completeCurrentActivity()
     this.state = 'idle'
     this.emit({ type: 'run.cancelled' })
   }
@@ -754,6 +774,38 @@ export class AntigravityPtySession {
     return true
   }
 
+  /** Turns what agy is visibly doing into ordinary Orbit `tool.activity`
+   *  events, so an interactive turn reports its real progress instead of
+   *  sitting on one unchanging "working" line for minutes.
+   *
+   *  The PTY transport has no structured tool stream — the screen is the
+   *  only source — so this reports exactly the rows agy draws for its own
+   *  users and nothing else (see TerminalActivityReader). A screen with no
+   *  status row on it produces no event at all rather than a manufactured
+   *  one.
+   *
+   *  One activity is live at a time, which is what the screen itself
+   *  shows: when the status changes, the previous one is completed and the
+   *  new one started, so a finished step can never keep counting. */
+  private observeActivity(lines: string[]): void {
+    if (this.state !== 'running' || this.deliveringImages || this.cancelRequested) return
+    const activity = readScreenActivity(lines)
+    if (!activity || activity.label === this.currentActivity?.label) return
+    this.completeCurrentActivity()
+    this.currentActivity = { label: activity.label, id: ++this.activityCounter }
+    this.emit({ type: 'tool.activity', label: activity.label, status: 'running', kind: activity.kind, providerStepId: `screen:${this.currentActivity.id}` })
+  }
+
+  /** Closes whatever activity is live, if any. Every path that ends a turn
+   *  goes through here, so no row is left running once the turn is over —
+   *  a completed, cancelled or crashed turn all settle their activity. */
+  private completeCurrentActivity(): void {
+    const current = this.currentActivity
+    if (!current) return
+    this.currentActivity = null
+    this.emit({ type: 'tool.activity', label: current.label, status: 'completed', kind: 'status', providerStepId: `screen:${current.id}` })
+  }
+
   /** Turns the live terminal screen into ordinary Orbit `text.delta`
    *  events, so a PTY turn's answer appears while agy is still writing it
    *  instead of arriving whole at completion.
@@ -850,6 +902,8 @@ export class AntigravityPtySession {
 
   private settleTurn(): void {
     this.clearTurnStartTimer()
+    // Before either outcome below: a turn that is over has nothing running.
+    this.completeCurrentActivity()
     if (this.cancelRequested) {
       this.cancelRequested = false
       this.state = 'ready'
@@ -867,6 +921,7 @@ export class AntigravityPtySession {
 
   private handleExit(code: number, signal?: number): void {
     this.clearTurnStartTimer()
+    this.completeCurrentActivity()
     const wasCancelled = this.cancelRequested
     this.cancelRequested = false
     this.transport = null

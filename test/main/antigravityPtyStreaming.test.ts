@@ -139,6 +139,93 @@ function harness() {
 const deltas = (events: RuntimeEvent[]): string[] =>
   events.filter((event): event is Extract<RuntimeEvent, { type: 'text.delta' }> => event.type === 'text.delta').map((event) => event.delta)
 
+const activity = (events: RuntimeEvent[]) =>
+  events.filter((event): event is Extract<RuntimeEvent, { type: 'tool.activity' }> => event.type === 'tool.activity')
+
+describe('AntigravityPtySession live activity', () => {
+  it('reports what agy is visibly doing, instead of one unchanging working line', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame([P1, '⣽  Working...']))
+    expect(activity(events).map((event) => [event.label, event.status])).toEqual([['Working', 'running']])
+
+    transport.stream(frame([P1, P2, '⣽  Verifying Requirements Thoroughly...']))
+    // The previous activity is closed and the new one opened, so exactly
+    // one row is ever live and the finished one stops counting.
+    expect(activity(events).map((event) => [event.label, event.status])).toEqual([
+      ['Working', 'running'],
+      ['Working', 'completed'],
+      ['Verifying Requirements Thoroughly', 'running']
+    ])
+  })
+
+  it('does not re-report the same activity on every redraw', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    // agy redraws its screen many times a second; the status text is what
+    // identifies the activity, not the frame it arrived on.
+    for (const body of [[P1], [P1, P2], [P1, P2, P3]]) transport.stream(frame([...body, '⣽  Working...']))
+    expect(activity(events)).toHaveLength(1)
+  })
+
+  it('never reports agy’s thought marker as live work', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    // Every frame carries "▸ Thought for 11s"; none of them is activity.
+    transport.stream(frame([P1]))
+    expect(activity(events)).toHaveLength(0)
+  })
+
+  it('closes the live row when the turn settles', () => {
+    const { events, start } = harness()
+    const transport = start()
+
+    transport.stream(frame([P1, '⣽  Working...']))
+    transport.snapshot(frame([P1, P2, P3], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+
+    const rows = activity(events)
+    expect(rows.at(-1)).toMatchObject({ label: 'Working', status: 'completed' })
+    // Nothing is left running once the run is over.
+    expect(rows.filter((row) => row.status === 'running')).toHaveLength(1)
+    expect(events.at(-1)).toMatchObject({ type: 'run.completed' })
+  })
+
+  it('closes the live row the moment the user stops the run', () => {
+    const { session, events, start } = harness()
+    const transport = start()
+    transport.stream(frame([P1, '⣽  Working...']))
+
+    session.cancel()
+
+    // Acknowledged at the Stop, not whenever the transport gets round to
+    // settling — the row the user was watching stops counting immediately.
+    expect(activity(events).at(-1)).toMatchObject({ label: 'Working', status: 'completed' })
+    expect(transport.cancelCalls).toBe(1)
+
+    transport.snapshot(frame([P1], SETTLED_COMPOSE))
+    transport.handlers!.onReadyForInput()
+    expect(events.at(-1)).toMatchObject({ type: 'run.cancelled' })
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    // And no row is reopened by frames arriving after the stop.
+    expect(activity(events).filter((row) => row.status === 'running')).toHaveLength(1)
+  })
+
+  it('closes the live row when the process dies under it', () => {
+    const { events, start } = harness()
+    const transport = start()
+    transport.stream(frame([P1, '⣽  Working...']))
+
+    transport.exit(1)
+
+    expect(activity(events).at(-1)).toMatchObject({ label: 'Working', status: 'completed' })
+    expect(events.at(-1)).toMatchObject({ type: 'run.failed' })
+  })
+})
+
 describe('AntigravityPtySession progressive response streaming', () => {
   it('emits the answer as text.delta while agy is still drawing it, in order and without repetition', () => {
     const { events, start } = harness()

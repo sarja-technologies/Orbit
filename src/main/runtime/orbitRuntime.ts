@@ -313,6 +313,20 @@ export class OrbitRuntime extends EventEmitter {
     const run = safeRequireRun(this.store, event.runId)
     if (!run || run.projectId !== event.projectId || run.conversationId !== event.conversationId) return
 
+    // CRITICAL (real bug): a run ends exactly once. A transport can report
+    // a second ending after the first — most often the stream or the PTY
+    // closing moments after the user's Stop was already acknowledged — and
+    // handling it appended a *second* assistant message and rewrote the
+    // run's outcome. A cancellation the user asked for would turn into
+    // `provider.exited` / `provider.failed` a beat later, so Stop looked
+    // like a crash. Whichever ending arrived first is the real one; the
+    // raw event is still persisted for diagnostics, but it changes no
+    // state and reaches no renderer.
+    if (isTerminalEvent(event) && TERMINAL_RUN_STATES.has(run.state)) {
+      this.store.addRunEvent(event)
+      return
+    }
+
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
     if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
@@ -400,6 +414,15 @@ export class OrbitRuntime extends EventEmitter {
     this.store.addRunEvent(event)
     this.emit('event', event)
   }
+}
+
+/** Run states from which there is no further outcome. 'cancelling' is
+ *  deliberately absent: a run that has been asked to stop has not stopped
+ *  yet, and its real ending is still to come. */
+const TERMINAL_RUN_STATES: ReadonlySet<Run['state']> = new Set<Run['state']>(['completed', 'failed', 'cancelled'])
+
+function isTerminalEvent(event: RuntimeEvent): boolean {
+  return event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
 }
 
 function isDirectory(candidate: string): boolean {
