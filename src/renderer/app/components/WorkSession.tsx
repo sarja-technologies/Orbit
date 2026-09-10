@@ -1,7 +1,8 @@
 import { memo, useMemo } from 'react'
 import type { Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
-import type { ActivityState } from '../lib/activity'
+import { hasRunningStep, type ActivityState } from '../lib/activity'
+import type { AgentIdentity } from '../lib/agentIdentity'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
@@ -25,6 +26,13 @@ interface WorkSessionProps {
   activeRunId: ID | null
   streamText: string
   activityByRun: Record<string, ActivityState>
+  /** Who is answering in this session — resolved once by App from the real
+   *  model selection, so every row that represents the working AI uses the
+   *  same identity. */
+  identity: AgentIdentity
+  /** The user pressed Stop and the run has not finished tearing down yet.
+   *  A deliberate lifecycle state, shown as such rather than as a stall. */
+  stopping: boolean
   pendingInteraction: InteractionRequiredEvent | null
   unavailableInteraction: InteractionRequiredEvent | null
   staleInteraction: boolean
@@ -43,6 +51,8 @@ export function WorkSession({
   activeRunId,
   streamText,
   activityByRun,
+  identity,
+  stopping,
   pendingInteraction,
   unavailableInteraction,
   staleInteraction,
@@ -98,6 +108,7 @@ export function WorkSession({
     streamText.length,
     activeRunId ?? '',
     activeRunId ? (activityByRun[activeRunId]?.items.length ?? 0) : 0,
+    stopping ? '1' : '0',
     pendingInteraction?.interactionId ?? '',
     unavailableInteraction?.interactionId ?? '',
     staleInteraction ? '1' : '0'
@@ -137,6 +148,7 @@ export function WorkSession({
                 error={message.runId ? (runsById.get(message.runId)?.error ?? null) : null}
                 activity={activity}
                 resolved={resolved}
+                identity={identity}
               />
             )
           })}
@@ -155,7 +167,13 @@ export function WorkSession({
                   surface, plus a live badge and a moving edge so a reply
                   mid-flight never reads as a finished one. */}
               {streamText ? (
-                <ChatRow role="assistant" showIdentity status={<ReplyingBadge />} bubbleClassName="is-streaming">
+                <ChatRow
+                  role="assistant"
+                  showIdentity
+                  identity={identity}
+                  status={<ReplyingBadge label={stopping ? 'Stopping' : 'Replying'} />}
+                  bubbleClassName="is-streaming"
+                >
                   <Markdown source={streamText} />
                   <span className="stream-cursor" aria-hidden="true" />
                 </ChatRow>
@@ -164,16 +182,23 @@ export function WorkSession({
               {/* Nothing to read yet: a real assistant bubble holding animated
                   dots, so the wait happens where the answer will appear.
                   A run opens with an empty activity state, which is not yet
-                  evidence of tool work — only real steps earn "working". */}
+                  evidence of tool work — only real steps earn "working".
+                  The activity rail below carries the specifics; this line
+                  only says which of the two phases the turn is in. */}
               {!pendingInteraction && !streamText ? (
-                <PendingReply label={hasSteps(activityByRun[activeRunId]) ? 'Antigravity is working' : 'Antigravity is replying'} />
+                <PendingReply
+                  identity={identity}
+                  {...(stopping ? { badge: 'Stopping' } : {})}
+                  label={pendingLabel(identity.name, activityByRun[activeRunId], stopping)}
+                />
               ) : null}
 
               {/* Tool work is subordinate to the reply: indented onto the
-                  assistant rail, never competing with the message itself. */}
+                  assistant rail, never competing with the message itself.
+                  This is where the real command, path or status lives. */}
               {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
                 <div className="chat-aside">
-                  <LiveActivity activity={activityByRun[activeRunId]!} />
+                  <LiveActivity activity={activityByRun[activeRunId]!} identity={identity} />
                 </div>
               ) : null}
 
@@ -235,6 +260,15 @@ function hasSteps(activity: ActivityState | undefined): boolean {
   return Boolean(activity && activity.items.length > 0)
 }
 
+/** The one-line phase, named after whoever is actually answering. Says
+ *  "working" only when a step is genuinely running — a turn whose steps
+ *  have all finished is waiting on text again, not still working. */
+function pendingLabel(name: string, activity: ActivityState | undefined, stopping: boolean): string {
+  if (stopping) return 'Stopping…'
+  if (activity && hasRunningStep(activity)) return `${name} is working`
+  return `${name} is replying`
+}
+
 const MessageTurn = memo(function MessageTurn({
   message,
   showRole,
@@ -242,7 +276,8 @@ const MessageTurn = memo(function MessageTurn({
   thumbnails,
   error,
   activity,
-  resolved
+  resolved,
+  identity
 }: {
   message: Message
   showRole: boolean
@@ -251,6 +286,7 @@ const MessageTurn = memo(function MessageTurn({
   error: Run['error'] | null
   activity: ActivityState | undefined
   resolved: ResolvedRecord[]
+  identity: AgentIdentity
 }): JSX.Element {
   return (
     <div className="turn">
@@ -265,7 +301,14 @@ const MessageTurn = memo(function MessageTurn({
           ))}
         </div>
       ) : null}
-      <MessageBlock message={message} showRole={showRole} attachments={attachments} thumbnails={thumbnails} error={error} />
+      <MessageBlock
+        message={message}
+        showRole={showRole}
+        attachments={attachments}
+        thumbnails={thumbnails}
+        error={error}
+        identity={identity}
+      />
     </div>
   )
 })

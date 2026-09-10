@@ -1120,10 +1120,21 @@ textarea {
   display: grid;
   place-items: center;
   border-radius: var(--radius-round);
-  background: radial-gradient(circle at 34% 28%, rgba(107, 160, 255, 0.34), rgba(76, 141, 255, 0.1) 72%);
-  border: 1px solid rgba(76, 141, 255, 0.32);
-  color: var(--accent);
+  /* Neutral by default: the mark inside it is the provider's own, and a
+     blue-tinted well would tint every vendor's logo the same colour. */
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
   flex: none;
+  overflow: hidden;
+}
+
+/* Only the "Orbit doesn't know which model this is" glyph keeps the old
+   accent treatment — it is Orbit's own statement, not a vendor's mark. */
+.chat-mark[data-provider='unknown'] {
+  background: radial-gradient(circle at 34% 28%, rgba(107, 160, 255, 0.34), rgba(76, 141, 255, 0.1) 72%);
+  border-color: rgba(76, 141, 255, 0.32);
+  color: var(--accent);
 }
 
 .chat-meta {
@@ -1492,6 +1503,44 @@ textarea {
 
 .activity-elapsed {
   color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+/* The working model's own mark, at the head of the live row. */
+.activity-agent {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+/* The real command, path or status. One line: it updates in place many
+   times a turn, and a row that reflows on every update is unreadable. */
+.activity-live .activity-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-item {
+  align-items: baseline;
+}
+
+/* A command is the most specific thing a row can say, so it reads as one. */
+.activity-item[data-kind='command'] .activity-item-label,
+.activity-live .activity-label {
+  font-variant-numeric: tabular-nums;
 }
 
 .activity-toggle {
@@ -1660,6 +1709,14 @@ textarea {
 
 .transcript-note-denied .transcript-note-mark {
   color: var(--danger);
+}
+
+/* Stopping a run is a lifecycle state the user asked for. It gets the same
+   quiet register as any other note — never the error treatment. */
+.transcript-note-stopped .transcript-note-mark {
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
 }
 
 /* ---------- errors ---------- */
@@ -2117,6 +2174,12 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The separator between description parts is quieter than the words it
+   divides, so the line reads as one phrase rather than two labels. */
+.model-row-hint-sep {
+  opacity: 0.55;
 }
 
 .model-tick {

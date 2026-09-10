@@ -34,12 +34,10 @@ export function isReasoningAdjustable(model: ModelOption | null): boolean {
   return descendingEfforts(model).length > 1
 }
 
-/** The one-line reasoning capability shown under a model's name. States what
- *  the catalogue actually publishes — it never promises a tier the model
- *  does not have, and never pads a row that has nothing to say. */
-export function reasoningSummary(model: ModelOption): string {
-  const tiers = descendingEfforts(model)
-  if (tiers.length > 1) return `${tiers.map((tier) => EFFORT_LABEL[tier]).join(' · ')} reasoning`
-  if (tiers.length === 1) return `${EFFORT_LABEL[tiers[0]!]} reasoning only`
-  return 'No reasoning setting'
-}
+// A model's reasoning tiers deliberately have NO summary line here any more.
+// "High · Medium · Low reasoning" used to be the text under every model's
+// name, which spent the one line available for saying what a model is on
+// restating a setting that has its own control right next to it — and said
+// the same thing about most of the catalogue. What a model is for now comes
+// from modelDescriptions.ts; the tiers stay a live, selectable setting in
+// ReasoningControl.

@@ -2,6 +2,7 @@ import anthropicMark from '../../assets/providers/anthropic.svg?raw'
 import geminiMark from '../../assets/providers/gemini.svg?raw'
 import openaiMark from '../../assets/providers/openai.svg?raw'
 import { PROVIDERS, type ProviderKey } from '../lib/providers'
+import type { AgentIdentity } from '../lib/agentIdentity'
 
 /** The committed provider marks, keyed the same way the catalogue is
  *  bucketed. A provider absent from here has no sourced asset and falls back
@@ -54,8 +55,38 @@ export function ProviderLogo({ provider, size = 18 }: { provider: ProviderKey; s
     )
   }
   return (
-    <svg className={`provider-logo provider-logo-${provider}`} width={size} height={size} aria-hidden="true" focusable="false">
+    <svg
+      className={`provider-logo provider-logo-${provider}`}
+      width={size}
+      height={size}
+      role="img"
+      aria-label={`${identity.label} logo`}
+      focusable="false"
+      data-provider={provider}
+    >
       <use href={`#${SYMBOL_ID[provider]}`} />
     </svg>
   )
+}
+
+/** Marks a choice no single vendor owns: Antigravity's own default model,
+ *  and a working turn whose model Orbit genuinely cannot identify.
+ *  Deliberately not a provider mark, and deliberately not Orbit's Saturn —
+ *  Orbit is the app, not the AI. */
+export function AutoGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false" data-provider="unknown">
+      <circle cx="8" cy="8" r="5.4" stroke="currentColor" strokeWidth="1.4" fill="none" strokeDasharray="2.6 2.4" />
+      <circle cx="8" cy="8" r="1.7" fill="currentColor" />
+    </svg>
+  )
+}
+
+/** The mark for whichever AI is currently working — the single place the
+ *  "logo or neutral glyph?" decision is made, so every surface that shows
+ *  the active agent (chat rows, the pending reply, activity rows) agrees by
+ *  construction rather than by repeating the same conditional. */
+export function AgentMark({ identity, size = 15 }: { identity: AgentIdentity; size?: number }): JSX.Element {
+  if (!identity.provider) return <AutoGlyph />
+  return <ProviderLogo provider={identity.provider} size={size} />
 }

@@ -217,6 +217,8 @@ function props(overrides: Partial<Props> = {}): Props {
     activeRunId: null,
     streamText: '',
     activityByRun: {},
+    identity: { provider: 'gemini' as const, name: '3.8 Flash' },
+    stopping: false,
     pendingInteraction: null,
     unavailableInteraction: null,
     staleInteraction: false,
