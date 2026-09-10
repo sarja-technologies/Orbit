@@ -6,6 +6,7 @@
 // straight from Antigravity's own catalogue (see modelCatalog.ts), and the
 // remembered preferences are the user's own explicit past choices.
 import type { ModelOption, OrbitPreferences, ReasoningEffort } from './domain'
+import { ORBIT_DEFAULT_MODEL_ID, resolveModelId } from './defaultModel'
 
 /** Ascending intensity. Used for distance when a remembered tier has to be
  *  mapped onto a model that does not publish it. */
@@ -18,32 +19,29 @@ export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium'
 
 export const EMPTY_PREFERENCES: OrbitPreferences = { lastReasoningEffort: null, modelReasoningEfforts: {} }
 
-/** Stands in for "Antigravity's own default model" wherever a model option is
- *  needed. Its tier set is a documented CLI fact rather than a guess about
- *  which model agy defaults to: `agy --effort <tier>` with no `--model` is a
- *  verified-valid invocation (see modelCatalog.ts's header), so all three
- *  tiers really are selectable there. The id is a namespaced sentinel that
- *  cannot collide with a catalogue id. */
-export const DEFAULT_MODEL_OPTION: ModelOption = {
-  id: 'antigravity:default',
-  label: 'Default model',
-  supportedReasoningEfforts: ['low', 'medium', 'high']
-}
-
-/** The model option a selection refers to. `null` means the user is on
- *  Antigravity's own default. An id the catalogue does not contain resolves
- *  to null rather than to the default's tier set — a stale selection must
- *  not inherit tiers it was never shown to have. */
+/** The model option a selection refers to.
+ *
+ *  There is no sentinel here any more. A `null` selection is legacy storage
+ *  meaning Orbit's own default, so it resolves to that model's REAL
+ *  catalogue entry and inherits the tiers agy genuinely publishes for it.
+ *  The sentinel this replaced claimed low/medium/high for a model nobody
+ *  could name, which is exactly the fabricated tier set this module exists
+ *  to prevent.
+ *
+ *  An id the catalogue does not contain resolves to null rather than to the
+ *  default's tier set — a stale selection must not inherit tiers it was
+ *  never shown to have, and neither must a default the catalogue failed to
+ *  load. */
 export function modelForSelection(models: readonly ModelOption[], selectedModelId: string | null): ModelOption | null {
-  if (selectedModelId === null) return DEFAULT_MODEL_OPTION
-  return models.find((model) => model.id === selectedModelId) ?? null
+  const id = resolveModelId(selectedModelId)
+  return models.find((model) => model.id === id) ?? null
 }
 
-/** The preference key an explicit choice is remembered under. The default
- *  model gets its own slot, so leaving it and coming back is as stable as
- *  any named model. */
+/** The preference key an explicit choice is remembered under. A legacy null
+ *  and an explicit pick of the default model are the same session state, so
+ *  they share one slot rather than remembering two different tiers. */
 export function preferenceKeyFor(selectedModelId: string | null): string {
-  return selectedModelId ?? DEFAULT_MODEL_OPTION.id
+  return resolveModelId(selectedModelId)
 }
 
 /** Tiers a model genuinely publishes, ascending. Empty when the model has no
@@ -100,16 +98,24 @@ export function effortForModel(model: ModelOption | null, preferences: OrbitPref
   return nearestSupportedEffort(model, desired)
 }
 
-/** The tier a brand-new session starts on before any model is chosen.
- *  Antigravity accepts `--effort` with no `--model` (it applies the tier to
- *  its own default model — see modelCatalog.ts), so carrying the user's
- *  remembered level here is real, not decorative. */
-export function effortForNewSession(preferences: OrbitPreferences): ReasoningEffort {
-  return effortForModel(DEFAULT_MODEL_OPTION, preferences) ?? DEFAULT_REASONING_EFFORT
+/** The tier a brand-new session starts on: Orbit's default model, resolved
+ *  against the real catalogue by exactly the same policy an explicitly
+ *  chosen model goes through.
+ *
+ *  Returns null when the catalogue does not list the default model — most
+ *  often because it has not loaded yet. That is deliberately NOT the same
+ *  as `medium`: guessing a tier for a model whose tiers are unknown is the
+ *  fabrication this module forbids, and a session left on null is settled
+ *  from the same policy the moment the catalogue arrives. */
+export function effortForNewSession(
+  preferences: OrbitPreferences,
+  models: readonly ModelOption[]
+): ReasoningEffort | null {
+  return effortForModel(modelForSelection(models, ORBIT_DEFAULT_MODEL_ID), preferences)
 }
 
 /** Folds an explicit user choice into the stored preferences. Clearing a
- *  tier (back to Antigravity's own default) deliberately does NOT erase
+ *  tier deliberately does NOT erase
  *  `lastReasoningEffort` — "I want auto on this model" is not evidence that
  *  the user's general preference changed. */
 export function rememberEffort(

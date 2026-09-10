@@ -18,6 +18,7 @@ import type {
 } from '@shared/domain'
 import type { InteractionRequiredEvent, RuntimeEvent } from '@shared/runtime-events'
 import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor, rememberEffort } from '@shared/reasoningPolicy'
+import { resolveModelId } from '@shared/defaultModel'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi } from './orbitApi'
 import { ChromeBar, ProviderBanner } from './components/ChromeBar'
@@ -475,16 +476,23 @@ export function App(): JSX.Element {
   }
 
   /** Persisted per conversation, so a session keeps the model it was
-   *  started with instead of silently drifting to whatever was picked last. */
+   *  started with instead of silently drifting to whatever was picked last.
+   *
+   *  `model` is normalized here as well as in the store, so the optimistic
+   *  local update and the persisted row agree on one concrete id rather than
+   *  the UI briefly showing a session with no model. */
   async function persistModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Promise<void> {
+    const resolved = resolveModelId(model)
     setTree((current) =>
       current.map((group) => ({
         ...group,
-        conversations: group.conversations.map((item) => (item.id === conversationId ? { ...item, model, reasoningEffort } : item))
+        conversations: group.conversations.map((item) =>
+          item.id === conversationId ? { ...item, model: resolved, reasoningEffort } : item
+        )
       }))
     )
     try {
-      await requireOrbitApi().conversations.setModel({ conversationId, model, reasoningEffort })
+      await requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort })
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That model could not be selected.')
       await refreshProject()

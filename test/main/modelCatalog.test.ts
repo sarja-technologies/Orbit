@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { normalizeModels, parseModelList, resolveInvocation } from '../../src/main/runtime/providers/antigravity/modelCatalog'
 
 /** Fixture copied verbatim from a real `agy models` run (agy 1.1.27). The
@@ -67,8 +68,19 @@ describe('normalizeModels', () => {
 describe('resolveInvocation', () => {
   const raw = parseModelList(REAL_OUTPUT)
 
-  it('sends nothing when nothing was chosen', () => {
-    expect(resolveInvocation(null, null, raw)).toEqual({})
+  it('sends Orbit’s own default model when the conversation carries a legacy null', () => {
+    // The old contract returned {} here, which meant "spawn agy with no
+    // --model and let it choose". Orbit owns the default now, so a null
+    // resolves to a real id and a real tier from the real catalogue.
+    expect(resolveInvocation(null, null, raw)).toEqual({ model: ORBIT_DEFAULT_MODEL_ID, effort: 'medium' })
+  })
+
+  it('never returns an invocation without a model, whatever it is given', () => {
+    for (const model of [null, undefined, '', '   ']) {
+      for (const effort of [null, undefined, 'medium', 'nonsense']) {
+        expect(resolveInvocation(model, effort, raw).model).toBeTruthy()
+      }
+    }
   })
 
   it('passes a raw catalogue id through without inventing an effort flag', () => {
@@ -83,19 +95,29 @@ describe('resolveInvocation', () => {
     expect(resolveInvocation('gemini-3.8-flash', 'medium', raw)).toEqual({ model: 'gemini-3.8-flash', effort: 'medium' })
   })
 
-  it('omits the model entirely rather than guessing a tier', () => {
-    // gemini-3.1-pro has no plain variant in the catalogue, so sending it
-    // alone would be rejected — and picking a tier for the user would be a
-    // silent behaviour change they never asked for.
-    expect(resolveInvocation('gemini-3.1-pro', null, raw)).toEqual({})
+  it('keeps a multi-tier model and resolves a tier it genuinely publishes', () => {
+    // gemini-3.1-pro has no plain variant, so agy REQUIRES --effort with it.
+    // Dropping the model (the old behaviour) is no longer an option, so the
+    // tier is taken from the catalogue: low/high only, and a missing choice
+    // resolves to the nearest real one rather than an invented medium.
+    expect(resolveInvocation('gemini-3.1-pro', null, raw)).toEqual({ model: 'gemini-3.1-pro', effort: 'low' })
   })
 
-  it('omits the model when the requested tier is not one the model offers', () => {
-    expect(resolveInvocation('gemini-3.1-pro', 'medium', raw)).toEqual({})
+  it('resolves an unsupported tier DOWN to a real one rather than escalating', () => {
+    // medium is not published for gemini-3.1-pro; low and high are equally
+    // distant, and Orbit never escalates a session to a model's peak tier.
+    expect(resolveInvocation('gemini-3.1-pro', 'medium', raw)).toEqual({ model: 'gemini-3.1-pro', effort: 'low' })
   })
 
-  it('keeps a bare effort when no model was chosen', () => {
-    expect(resolveInvocation(null, 'high', raw)).toEqual({ effort: 'high' })
+  it('applies a bare effort to Orbit’s default model instead of agy’s', () => {
+    expect(resolveInvocation(null, 'high', raw)).toEqual({ model: ORBIT_DEFAULT_MODEL_ID, effort: 'high' })
+  })
+
+  it('sends the default model explicitly even when the catalogue could not be read', () => {
+    // An empty catalogue is a failed `agy models`. It must not silently
+    // restore "let agy pick": the real id still goes on the command line.
+    expect(resolveInvocation(null, null, [])).toEqual({ model: ORBIT_DEFAULT_MODEL_ID })
+    expect(resolveInvocation(null, 'high', [])).toEqual({ model: ORBIT_DEFAULT_MODEL_ID, effort: 'high' })
   })
 
   it('passes an unrecognized model through untouched', () => {

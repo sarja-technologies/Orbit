@@ -3,7 +3,8 @@ import type { ModelOption } from '@shared/domain'
 import { groupByProvider, matchesQuery } from '../lib/providers'
 import { describeModel } from '../lib/modelDescriptions'
 import { Modal, ModalHeader } from './Modal'
-import { AutoGlyph, ProviderLogo } from './ProviderLogo'
+import { ProviderLogo } from './ProviderLogo'
+import { isOrbitDefaultModel, resolveModelId } from '@shared/defaultModel'
 
 interface ModelBrowserProps {
   models: ModelOption[]
@@ -44,23 +45,6 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
       </ModalHeader>
 
       <div className="modal-body model-browser">
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={selectedModel === null}
-          className={selectedModel === null ? 'model-row selected' : 'model-row'}
-          onClick={() => onSelect(null)}
-        >
-          <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-            <AutoGlyph />
-          </span>
-          <span className="model-row-text">
-            <span className="model-row-name">Default model</span>
-            <span className="model-row-hint">Antigravity’s own choice</span>
-          </span>
-          <Tick checked={selectedModel === null} />
-        </button>
-
         {groups.map((group) => (
           <section key={group.provider.key} className="model-group">
             <h3 className="model-group-title">
@@ -68,7 +52,13 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
               {group.provider.label}
             </h3>
             {group.models.map((model) => (
-              <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelect(model.id)} />
+              <ModelRow
+                key={model.id}
+                model={model}
+                selected={model.id === resolveModelId(selectedModel)}
+                isDefault={isOrbitDefaultModel(model.id)}
+                onSelect={() => onSelect(model.id)}
+              />
             ))}
           </section>
         ))}
@@ -84,10 +74,14 @@ export function ModelBrowser({ models, selectedModel, onSelect, onClose }: Model
 export function ModelRow({
   model,
   selected,
+  isDefault = false,
   onSelect
 }: {
   model: ModelOption
   selected: boolean
+  /** Marks the row as Orbit's default. Purely a label: the row still
+   *  selects this model's own real id, never a sentinel. */
+  isDefault?: boolean
   onSelect: () => void
 }): JSX.Element {
   const provider = groupByProvider([model])[0]!.provider
@@ -103,7 +97,10 @@ export function ModelRow({
         <ProviderLogo provider={provider.key} size={17} />
       </span>
       <span className="model-row-text">
-        <span className="model-row-name">{model.label}</span>
+        <span className="model-row-name">
+          {model.label}
+          {isDefault ? <span className="model-row-default">Default</span> : null}
+        </span>
         {/* What this model is for — never its reasoning tiers, which are a
             separate, adjustable setting with their own control. */}
         <ModelHint parts={describeModel(model).parts} />

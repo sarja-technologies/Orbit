@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_MODEL_OPTION,
   DEFAULT_REASONING_EFFORT,
   EMPTY_PREFERENCES,
   effortForModel,
@@ -12,6 +11,7 @@ import {
   rememberEffort,
   supportedEfforts
 } from '../../src/shared/reasoningPolicy'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import type { ModelOption, OrbitPreferences } from '../../src/shared/domain'
 
 /** Exactly the shapes agy 1.1.27 publishes: three-tier, two-tier with no
@@ -92,28 +92,46 @@ describe('choosing a tier for a newly selected model', () => {
   })
 })
 
-describe('Antigravity’s own default model', () => {
-  it('has all three tiers, because `agy --effort <tier>` with no --model is valid', () => {
-    expect(supportedEfforts(DEFAULT_MODEL_OPTION)).toEqual(['low', 'medium', 'high'])
+describe('Orbit’s own default model', () => {
+  it('is a real catalogue entry, so a null selection carries that model’s real tiers', () => {
+    // FLASH *is* the default model, so this is the live catalogue entry —
+    // not a sentinel that claims tiers on behalf of a model nobody names.
+    expect(FLASH.id).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(modelForSelection([FLASH], null)).toBe(FLASH)
+    expect(modelForSelection([FLASH], FLASH.id)).toBe(FLASH)
   })
 
-  it('is what a null selection resolves to', () => {
-    expect(modelForSelection([FLASH], null)).toBe(DEFAULT_MODEL_OPTION)
-    expect(modelForSelection([FLASH], FLASH.id)).toBe(FLASH)
+  it('resolves a null selection to nothing when the catalogue lacks the default', () => {
+    // A catalogue that failed to load must not hand back invented tiers.
+    expect(modelForSelection([], null)).toBeNull()
+    expect(supportedEfforts(modelForSelection([], null))).toEqual([])
   })
 
   it('does not lend its tiers to a selection the catalogue has dropped', () => {
     expect(modelForSelection([FLASH], 'gemini-9-imaginary')).toBeNull()
   })
 
-  it('gets its own preference slot, so leaving it and returning is stable', () => {
-    expect(preferenceKeyFor(null)).toBe(DEFAULT_MODEL_OPTION.id)
+  it('shares one preference slot between a legacy null and an explicit pick', () => {
+    expect(preferenceKeyFor(null)).toBe(ORBIT_DEFAULT_MODEL_ID)
     expect(preferenceKeyFor(FLASH.id)).toBe(FLASH.id)
+    expect(preferenceKeyFor(null)).toBe(preferenceKeyFor(ORBIT_DEFAULT_MODEL_ID))
   })
 
-  it('starts a new session on the remembered level, medium until there is one', () => {
-    expect(effortForNewSession(prefs())).toBe('medium')
-    expect(effortForNewSession(prefs({ lastReasoningEffort: 'low' }))).toBe('low')
+  it('starts a new session on a tier the default model genuinely publishes', () => {
+    expect(effortForNewSession(prefs(), [FLASH])).toBe('medium')
+    expect(effortForNewSession(prefs({ lastReasoningEffort: 'low' }), [FLASH])).toBe('low')
+  })
+
+  it('starts a new session on no tier at all when the catalogue is unavailable', () => {
+    // Deliberately NOT 'medium': a tier for a model whose tiers are unknown
+    // would be fabricated. It is settled once a catalogue arrives.
+    expect(effortForNewSession(prefs(), [])).toBeNull()
+  })
+
+  it('never escalates a new session to a peak tier the default cannot honour', () => {
+    // A default with only low/high and a remembered 'medium' resolves DOWN.
+    const twoTier: ModelOption = { ...PRO, id: ORBIT_DEFAULT_MODEL_ID }
+    expect(effortForNewSession(prefs({ lastReasoningEffort: 'medium' }), [twoTier])).toBe('low')
   })
 })
 

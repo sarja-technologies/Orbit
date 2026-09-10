@@ -4,8 +4,9 @@ import { EFFORT_LABEL, compactModelLabel } from '../lib/modelDisplay'
 import { reasoningTheme } from '../lib/reasoningVisual'
 import { isGeminiModel, providerForModel } from '../lib/providers'
 import { modelForSelection } from '@shared/reasoningPolicy'
+import { isOrbitDefaultModel, resolveModelId } from '@shared/defaultModel'
 import { ReasoningControl } from './ReasoningControl'
-import { ModelBrowser, ModelRow, Tick } from './ModelBrowser'
+import { ModelBrowser, ModelRow } from './ModelBrowser'
 import { AutoGlyph, ProviderLogo } from './ProviderLogo'
 
 interface ModelControlsProps {
@@ -39,9 +40,12 @@ export function ModelControls({
   const [open, setOpen] = useState(false)
   const [browsing, setBrowsing] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
-  const selected = models.find((model) => model.id === selectedModel) ?? null
-  // Reasoning is asked of the selection, not the catalogue row: "Default
-  // model" has real, selectable tiers even though it has no catalogue entry.
+  // A legacy null selection IS Orbit's default model, so the row that
+  // lights up and the name on the trigger are that model's real ones.
+  const resolvedId = resolveModelId(selectedModel)
+  const selected = models.find((model) => model.id === resolvedId) ?? null
+  // Reasoning is asked of the selection resolved against the real catalogue
+  // — there is no sentinel with invented tiers behind this any more.
   const reasoningModel = modelForSelection(models, selectedModel)
   const theme = reasoningTheme(reasoningModel, selectedEffort)
 
@@ -78,7 +82,10 @@ export function ModelControls({
         onClick={() => setOpen((value) => !value)}
       >
         {selected ? <ProviderLogo provider={providerForModel(selected)} size={15} /> : <AutoGlyph />}
-        <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : 'Default model'}</span>
+        {/* The real model's own name. Never a generic "Default model": the
+            session has a concrete model from the moment it is created, and
+            saying otherwise was the whole problem this replaced. */}
+        <span className="model-trigger-name">{selected ? compactModelLabel(selected.label) : resolvedId}</span>
         {/* The closed control carries the live tier in the same treatment the
             open control uses, so changing it is visible without reopening. */}
         {selectedEffort ? (
@@ -94,25 +101,17 @@ export function ModelControls({
           <section className="popover-pane pane-models">
             <h3 className="pane-title">AI Model</h3>
             <div className="model-list">
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={selectedModel === null}
-                className={selectedModel === null ? 'model-row selected' : 'model-row'}
-                onClick={() => onSelectModel(null)}
-              >
-                <span className="model-row-mark model-row-mark-default" aria-hidden="true">
-                  <AutoGlyph />
-                </span>
-                <span className="model-row-text">
-                  <span className="model-row-name">Default model</span>
-                  <span className="model-row-hint">Antigravity’s own choice</span>
-                </span>
-                <Tick checked={selectedModel === null} />
-              </button>
-
+              {/* No synthetic "Default model" row any more. Orbit's default
+                  is one of these real rows, badged as the default — so
+                  choosing it selects the genuine `gemini-3.8-flash` id. */}
               {geminiModels.map((model) => (
-                <ModelRow key={model.id} model={model} selected={model.id === selectedModel} onSelect={() => onSelectModel(model.id)} />
+                <ModelRow
+                  key={model.id}
+                  model={model}
+                  selected={model.id === resolvedId}
+                  isDefault={isOrbitDefaultModel(model.id)}
+                  onSelect={() => onSelectModel(model.id)}
+                />
               ))}
             </div>
 

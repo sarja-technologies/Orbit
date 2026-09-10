@@ -23,6 +23,7 @@ import type {
 import type { RuntimeEvent } from '@shared/runtime-events'
 import { createId, nowIso } from '@main/util/ids'
 import { normalizePreferences } from '@shared/reasoningPolicy'
+import { resolveModelId } from '@shared/defaultModel'
 import { DEFAULT_SESSION_TITLE, hasDefaultSessionTitle } from '@shared/sessionTitle'
 import { jsonParseObject, jsonStringify, nullableText, numberValue, OrbitDatabase, text } from './database'
 
@@ -99,7 +100,12 @@ export class OrbitStore {
   createConversation(
     projectId: ID,
     title: string,
-    options: { providerId?: ProviderId; workingDirectory?: string | null; reasoningEffort?: ReasoningEffort | null } = {}
+    options: {
+      providerId?: ProviderId
+      workingDirectory?: string | null
+      reasoningEffort?: ReasoningEffort | null
+      model?: string | null
+    } = {}
   ): Conversation {
     this.assertProject(projectId)
     const now = nowIso()
@@ -111,7 +117,7 @@ export class OrbitStore {
       nativeConversationId: null,
       status: 'idle',
       transport: 'structured',
-      model: null,
+      model: resolveModelId(options.model ?? null),
       reasoningEffort: options.reasoningEffort ?? null,
       workingDirectory: normalizePath(options.workingDirectory ?? null),
       createdAt: now,
@@ -162,10 +168,13 @@ export class OrbitStore {
 
   /** Persists the model/effort choice for one conversation. Either may be
    *  null, meaning "use Antigravity's own default" — never a guessed value. */
+  /** `model` is nullable only so a legacy caller cannot crash: null is
+   *  normalized to Orbit's default on the way in, so a row can never be
+   *  written back to the old "agy picks" state once it has left it. */
   setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
     const conversation = this.requireConversation(conversationId)
     this.db.run('UPDATE conversations SET model = ?, reasoning_effort = ?, updated_at = ? WHERE id = ?', [
-      model,
+      resolveModelId(model),
       reasoningEffort,
       nowIso(),
       conversationId
@@ -607,7 +616,12 @@ function mapConversation(row: Record<string, unknown>): Conversation {
     nativeConversationId: nullableText(row, 'native_conversation_id'),
     status: text(row, 'status') as Conversation['status'],
     transport: (nullableText(row, 'transport') ?? 'structured') as ConversationTransport,
-    model: nullableText(row, 'model'),
+    // The one place legacy storage stops being legacy. Rows written before
+    // Orbit owned a default hold `model = NULL`, which used to mean "let agy
+    // pick something". Every read resolves that to Orbit's concrete default,
+    // so the renderer, the runtime and the provider all see one real model
+    // without the user reopening or re-selecting anything.
+    model: resolveModelId(nullableText(row, 'model')),
     reasoningEffort: nullableText(row, 'reasoning_effort') as Conversation['reasoningEffort'],
     workingDirectory: nullableText(row, 'working_directory'),
     createdAt: text(row, 'created_at'),

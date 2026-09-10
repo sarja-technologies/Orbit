@@ -13,6 +13,7 @@ import { applyActivity, emptyActivity, finalizeActivity } from '../../src/render
 import type { DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import type { Conversation, Message, Project } from '../../src/shared/domain'
 import type { InteractionRequiredEvent, ToolActivityEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 function interaction(overrides: Partial<InteractionRequiredEvent> = {}): InteractionRequiredEvent {
   return {
@@ -366,7 +367,7 @@ describe('reply-in-progress state', () => {
     nativeConversationId: null,
     status: 'running',
     transport: 'pty',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     workingDirectory: null,
     createdAt: '2026-09-08T10:00:00.000Z',

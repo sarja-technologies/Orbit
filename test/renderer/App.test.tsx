@@ -7,6 +7,7 @@ import type { OrbitApi } from '../../src/shared/contracts'
 import type { Conversation, ModelOption, OrbitPreferences, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { deriveSessionTitle, hasDefaultSessionTitle } from '../../src/shared/sessionTitle'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 const WEBSITE: Project = { id: 'project_1', name: 'AgentDock Website', rootPath: '/home/dev/agentdock', createdAt: 'now', updatedAt: 'now' }
 const RENDERER: Project = { id: 'project_2', name: 'Renderer Check', rootPath: null, createdAt: 'now', updatedAt: 'now' }
@@ -17,7 +18,7 @@ function conversation(overrides: Partial<Conversation> & { id: string; projectId
     nativeConversationId: null,
     status: 'idle',
     transport: 'structured',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     workingDirectory: null,
     createdAt: 'now',
@@ -583,11 +584,11 @@ describe('App', () => {
 
     expect(api.preferences.set).toHaveBeenCalledWith({
       lastReasoningEffort: 'high',
-      modelReasoningEfforts: { 'antigravity:default': 'high' }
+      modelReasoningEfforts: { [ORBIT_DEFAULT_MODEL_ID]: 'high' }
     })
     expect(api.conversations.setModel).toHaveBeenCalledWith({
       conversationId: 'conversation_1',
-      model: null,
+      model: ORBIT_DEFAULT_MODEL_ID,
       reasoningEffort: 'high'
     })
   })

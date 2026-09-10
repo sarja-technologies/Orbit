@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OrbitDatabase } from '../../src/main/persistence/database'
 import { OrbitStore } from '../../src/main/persistence/store'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 let dir = ''
 let db: OrbitDatabase
@@ -27,15 +28,19 @@ describe('OrbitStore', () => {
     const project = store.createProject('Launch')
     const conversation = store.createConversation(project.id, 'Website')
 
-    // A brand-new conversation carries no selection at all — Orbit must not
-    // start one on a model the user never picked.
-    expect(conversation.model).toBeNull()
+    // A brand-new conversation starts on Orbit's own concrete default —
+    // there is no longer a "no model" state that leaves agy to choose.
+    expect(conversation.model).toBe(ORBIT_DEFAULT_MODEL_ID)
     expect(conversation.reasoningEffort).toBeNull()
 
     store.setConversationModel(conversation.id, 'gemini-3.8-flash', 'medium')
     const saved = store.getConversation(conversation.id)
     expect(saved?.model).toBe('gemini-3.8-flash')
     expect(saved?.reasoningEffort).toBe('medium')
+
+    // And a selection can never be written back to the old "agy picks" state.
+    store.setConversationModel(conversation.id, null, 'low')
+    expect(store.getConversation(conversation.id)?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
 
     // Selecting a model with no reasoning tiers must clear a stale effort
     // rather than leaving one behind that the model cannot honour.
@@ -44,10 +49,11 @@ describe('OrbitStore', () => {
     expect(cleared?.model).toBe('claude-sonnet-4-6')
     expect(cleared?.reasoningEffort).toBeNull()
 
-    // And returning to the default is a real, persisted state.
+    // And returning to the default lands on the real default model id,
+    // never back on null.
     store.setConversationModel(conversation.id, null, null)
     const reset = store.getConversation(conversation.id)
-    expect(reset?.model).toBeNull()
+    expect(reset?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
   })
 
   it('round trips projects, conversations, messages, runs, and artifacts', () => {
@@ -264,6 +270,56 @@ describe('OrbitStore', () => {
     expect(store.autoTitleConversation('c1', 'Something Derived')).toBeNull()
     expect(store.renameConversation('c1', 'Renamed session').title).toBe('Renamed session')
     expect(store.getConversation('c1')?.title).toBe('Renamed session')
+  })
+
+  it('resolves a legacy session stored with no model at all to Orbit’s default', async () => {
+    // The exact shape Orbit wrote before it owned a default: `model` NULL,
+    // which used to mean "spawn agy with no --model and let it choose".
+    // Such a session must keep working, keep its history and its native agy
+    // conversation id, and simply report a concrete model — with no user
+    // action, and no rewriting of the row required.
+    db.close()
+    fs.rmSync(path.join(dir, 'orbit.sqlite'), { force: true })
+    const legacy = new OrbitDatabase({ dataDir: dir })
+    await legacy.init()
+    legacy.run('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', ['p1', 'Legacy', 'now', 'now'])
+    legacy.run(
+      `INSERT INTO conversations (id, project_id, title, provider_id, native_conversation_id, status, transport, model, reasoning_effort, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['c1', 'p1', 'Old session', 'antigravity', 'agy-native-123', 'idle', 'pty', null, null, 'now', 'now']
+    )
+    legacy.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    const conversation = store.getConversation('c1')
+    expect(conversation?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    // Everything else about the session is untouched — nothing was lost to
+    // make the model concrete.
+    expect(conversation?.nativeConversationId).toBe('agy-native-123')
+    expect(conversation?.transport).toBe('pty')
+    expect(conversation?.title).toBe('Old session')
+
+    // Every read path agrees, not just the single-row one.
+    expect(store.listProjectTree()[0]?.conversations[0]?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(store.requireConversation('c1').model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(store.openProjectSnapshot('p1').conversations[0]?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+  })
+
+  it('keeps a resolved default across a restart once it has been written', async () => {
+    const project = store.createProject('Durable')
+    const conversation = store.createConversation(project.id, 'Session')
+    store.setConversationModel(conversation.id, ORBIT_DEFAULT_MODEL_ID, 'medium')
+    db.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+    const reopened = store.getConversation(conversation.id)
+    expect(reopened?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(reopened?.reasoningEffort).toBe('medium')
   })
 
   it('auto-titles a stored session that predates the title_is_custom column', async () => {

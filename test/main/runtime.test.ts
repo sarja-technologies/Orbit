@@ -3,6 +3,8 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
+import type { ModelOption } from '../../src/shared/domain'
 import { OrbitDatabase } from '../../src/main/persistence/database'
 import { OrbitStore } from '../../src/main/persistence/store'
 import { FileStorage } from '../../src/main/files/fileStorage'
@@ -13,9 +15,16 @@ import type { ProviderStatus } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
 
+/** The default model exactly as the normalized catalogue publishes it, so
+ *  a new session's reasoning tier is resolved from real tiers rather than
+ *  from a sentinel. */
+const CATALOGUE: ModelOption[] = [
+  { id: ORBIT_DEFAULT_MODEL_ID, label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] }
+]
+
 class FakeProvider implements AgentProvider {
   lastInput: ProviderSendInput | null = null
-  listModels = vi.fn(async () => [])
+  listModels = vi.fn(async () => CATALOGUE)
   cancelRun = vi.fn(async () => undefined)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
@@ -134,7 +143,7 @@ class LateSecondEndingProvider extends FakeProvider {
  *  while OrbitRuntime is still inside its own cancelRun. */
 class DeferredCancelProvider implements AgentProvider {
   private pending: { input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void } | null = null
-  listModels = vi.fn(async () => [])
+  listModels = vi.fn(async () => CATALOGUE)
   respondToInteraction = vi.fn(async () => undefined)
   releaseConversation = vi.fn(async () => undefined)
   shutdown = vi.fn(async () => undefined)
@@ -371,16 +380,34 @@ describe('OrbitRuntime', () => {
     expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Landing page v2')
   })
 
-  it('starts a session on the reasoning tier the user last chose', () => {
+  it('starts a session on the reasoning tier the user last chose', async () => {
+    await runtime.listModels()
     store.writePreferences({ lastReasoningEffort: 'high', modelReasoningEfforts: {} })
     const project = runtime.createProject('Seeded')
     expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('high')
     expect(runtime.createConversation(project.id, 'Another').reasoningEffort).toBe('high')
   })
 
-  it('starts a session on medium before the user has ever chosen a tier', () => {
+  it('starts a session on medium before the user has ever chosen a tier', async () => {
+    await runtime.listModels()
     const project = runtime.createProject('Fresh')
     expect(runtime.openProject(project.id).conversations[0]?.reasoningEffort).toBe('medium')
+  })
+
+  it('starts every new session on Orbit’s own concrete default model', async () => {
+    await runtime.listModels()
+    const project = runtime.createProject('Concrete')
+    expect(runtime.openProject(project.id).conversations[0]?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(runtime.createConversation(project.id, 'Another').model).toBe(ORBIT_DEFAULT_MODEL_ID)
+  })
+
+  it('leaves a new session’s tier unset rather than guessing one with no catalogue', () => {
+    // No listModels() call, so the catalogue cache is empty. The model is
+    // still concrete; only the tier waits for real data.
+    const project = runtime.createProject('Coldstart')
+    const conversation = runtime.openProject(project.id).conversations[0]
+    expect(conversation?.model).toBe(ORBIT_DEFAULT_MODEL_ID)
+    expect(conversation?.reasoningEffort).toBeNull()
   })
 
   it('round trips preferences through the runtime', () => {

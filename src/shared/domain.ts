@@ -43,10 +43,14 @@ export interface Conversation {
   nativeConversationId: string | null
   status: 'idle' | 'running' | 'failed'
   transport: ConversationTransport
-  /** null means "whatever Antigravity's own default is" — never a guess. */
-  model: string | null
-  /** null means no explicit tier chosen; a multi-tier model without one
-   *  falls back to Antigravity's default rather than a manufactured tier. */
+  /** Always a concrete model id. Orbit owns the default (see
+   *  defaultModel.ts), so there is no longer a state meaning "let
+   *  Antigravity pick something"; legacy `null` rows resolve to Orbit's
+   *  default as the store reads them. */
+  model: string
+  /** null means no explicit tier chosen yet — a session created before the
+   *  catalogue was readable. It is settled from the real catalogue as soon
+   *  as one arrives, rather than being filled with a manufactured tier. */
   reasoningEffort: ReasoningEffort | null
   /** Per-session override of the project's root folder. null means "use the
    *  project's folder", which is what almost every session wants. */

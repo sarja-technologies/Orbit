@@ -32,6 +32,9 @@ async function bootstrap(): Promise<void> {
   const artifactService = new ArtifactService(store, storage)
   const provider = new AntigravityProvider()
   runtime = new OrbitRuntime(store, artifactService, provider, dataDir, app.getVersion())
+  // Start reading the model catalogue immediately, so the first session a
+  // user creates already knows the default model's real reasoning tiers.
+  runtime.warmModelCatalogue()
   registerIpc(runtime)
   const mainWindow = createMainWindow()
   mainWindow.webContents.once('did-finish-load', () => {

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { InteractionRequiredEvent, RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 // Explicitly opt-in: this calls the user's signed-in Antigravity account.
 // It proves the actual Orbit provider path, while keeping normal unit tests
@@ -508,7 +509,7 @@ function input(workspacePath: string, prompt: string): ProviderSendInput {
     attachments: [],
     referencedArtifacts: [],
     transport: 'structured',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null
   }
 }

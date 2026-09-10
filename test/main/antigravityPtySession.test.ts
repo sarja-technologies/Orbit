@@ -4,6 +4,7 @@ import type { AntigravityPtyHandlers, IAntigravityPtyTransport, PtyInteraction }
 import type { ClipboardCapability } from '../../src/main/runtime/providers/antigravity/clipboardCapability'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 class FakeTransport implements IAntigravityPtyTransport {
   isRunning = true
@@ -75,7 +76,7 @@ function baseInput(overrides: Partial<ProviderSendInput> = {}): ProviderSendInpu
     attachments: [],
     referencedArtifacts: [],
     transport: 'pty',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     ...overrides
   }

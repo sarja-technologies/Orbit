@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { WorkSession } from '../../src/renderer/app/components/WorkSession'
 import type { Conversation, Message, Project } from '../../src/shared/domain'
+import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 
 /** jsdom performs no layout: every element reports a scrollHeight of 0 and
  *  silently swallows scrollTop. These tests are therefore about the policy —
@@ -181,7 +182,7 @@ function conversation(id: string): Conversation {
     nativeConversationId: null,
     status: 'idle',
     transport: 'pty',
-    model: null,
+    model: ORBIT_DEFAULT_MODEL_ID,
     reasoningEffort: null,
     workingDirectory: null,
     createdAt: '2026-09-08T10:00:00.000Z',
