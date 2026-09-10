@@ -608,6 +608,121 @@ describe('App', () => {
     )
   })
 
+  /** Sends a message from the session that is open, leaving the run live. */
+  const startRun = async (): Promise<void> => {
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'Build it')
+    await userEvent.click(screen.getByLabelText('Send message'))
+    await screen.findByLabelText('Stop generating')
+  }
+
+  const emit = async (event: RuntimeEvent): Promise<void> => {
+    await act(async () => {
+      runListener?.(event)
+    })
+  }
+
+  const base = { projectId: 'project_1', conversationId: 'conversation_1', runId: 'run_1', providerId: 'antigravity' as const, createdAt: 'now' }
+
+  describe('stopping a run', () => {
+    it('says it is stopping while the transport tears the turn down', async () => {
+      await boot()
+      await startRun()
+
+      await userEvent.click(screen.getByLabelText('Stop generating'))
+
+      expect(api.runs.cancel).toHaveBeenCalledWith({ runId: 'run_1' })
+      // A deliberate, stated lifecycle state — not a stall the user has to
+      // interpret, and not an error.
+      expect(await screen.findByText('Stopping…')).toBeInTheDocument()
+      expect(document.body.textContent).not.toMatch(/couldn’t be read|went wrong/i)
+    })
+
+    it('settles into a calm stopped state, never a retry prompt', async () => {
+      await boot()
+      await startRun()
+      await userEvent.click(screen.getByLabelText('Stop generating'))
+      await emit({ ...base, type: 'run.cancelled' })
+
+      await waitFor(() => expect(screen.getByLabelText('Send message')).toBeInTheDocument())
+      expect(screen.queryByLabelText('Stop generating')).not.toBeInTheDocument()
+      expect(screen.queryByText('Stopping…')).not.toBeInTheDocument()
+      // The composer is live again for the next message.
+      expect(screen.getByLabelText('Message Antigravity')).not.toBeDisabled()
+      expect(document.body.textContent).not.toMatch(/couldn’t be read|Something went wrong|try again/i)
+    })
+
+    it('closes every activity row a stopped run left open, so nothing keeps counting', async () => {
+      await boot()
+      await startRun()
+      await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
+      expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
+
+      await userEvent.click(screen.getByLabelText('Stop generating'))
+      await emit({ ...base, type: 'run.cancelled' })
+
+      // The live rail is gone with the run, and no timer survives it.
+      await waitFor(() => expect(document.querySelector('.activity-live')).toBeNull())
+    })
+
+    it('still shows a real error state for a genuine backend failure', async () => {
+      await boot()
+      await startRun()
+      await emit({
+        ...base,
+        type: 'run.failed',
+        error: { code: 'provider.exited', message: 'exit 139 SIGSEGV', retryable: false }
+      })
+
+      // Nothing about the cancellation work may soften a real failure.
+      await waitFor(() => expect(screen.getByLabelText('Send message')).toBeInTheDocument())
+      expect(screen.queryByText('You stopped this response')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('live activity', () => {
+    it('shows the real command the run is on, not a generic working line', async () => {
+      await boot()
+      await startRun()
+      await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
+
+      expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
+      expect(screen.queryByText(/is replying/)).not.toBeInTheDocument()
+    })
+
+    it('does not carry one session’s activity or timer into another', async () => {
+      await boot()
+      await startRun()
+      await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
+      expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
+
+      // Switch to the other session in this project. Its own run has no
+      // activity, so nothing from the first may be visible or ticking.
+      await userEvent.click(screen.getByRole('button', { name: /^Explore hybrid mode/ }))
+      await waitFor(() => expect(screen.queryByText('Running npm run build')).not.toBeInTheDocument())
+      expect(document.querySelector('.activity-live')).toBeNull()
+
+      // And back: the run is still live, so its activity is still its own.
+      await userEvent.click(screen.getByRole('button', { name: /^Improve Orbit UI/ }))
+      expect(await screen.findByText('Running npm run build')).toBeInTheDocument()
+    })
+
+    it('keeps another project’s live activity and timer off screen', async () => {
+      await boot()
+      await startRun()
+      await emit({ ...base, type: 'tool.activity', label: 'Running npm run build', status: 'running', kind: 'command', providerStepId: '1' })
+      await screen.findByText('Running npm run build')
+
+      await userEvent.click(screen.getByRole('button', { name: 'Renderer Check' }))
+      await userEvent.click(await screen.findByRole('button', { name: /^Main/ }))
+      await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
+
+      expect(screen.queryByText('Running npm run build')).not.toBeInTheDocument()
+      expect(document.querySelector('.activity-live')).toBeNull()
+      // Whether the entry is also dropped from memory is pruneActivity's
+      // own contract, covered directly in rendererLib.test.ts.
+    })
+  })
+
   it('does not expose a manual transport control', async () => {
     await boot()
     await screen.findByLabelText('Message Antigravity')

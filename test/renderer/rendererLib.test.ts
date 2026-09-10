@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { applyActivity, currentActivityLine, elapsedLabel, emptyActivity, hasFailure, summarizeActivity } from '../../src/renderer/app/lib/activity'
+import {
+  applyActivity,
+  currentActivityLine,
+  elapsedLabel,
+  emptyActivity,
+  finalizeActivity,
+  hasFailure,
+  hasRunningStep,
+  itemElapsedLabel,
+  pruneActivity,
+  summarizeActivity
+} from '../../src/renderer/app/lib/activity'
 import { describeProviderProblem, describeRuntimeError } from '../../src/renderer/app/lib/errorCopy'
 import { imageItemsFromClipboard, isNativeImage, projectedState, stateLabel, type DraftAttachment } from '../../src/renderer/app/lib/attachments'
 import { parseInline, parseMarkdown } from '../../src/renderer/app/lib/markdown'
@@ -8,9 +19,15 @@ import type { ToolActivityEvent } from '../../src/shared/runtime-events'
 import { relativeTime } from '../../src/renderer/app/lib/relativeTime'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
-function activityEvent(label: string, status: ToolActivityEvent['status'], providerStepId?: string): ToolActivityEvent {
+function activityEvent(
+  label: string,
+  status: ToolActivityEvent['status'],
+  providerStepId?: string,
+  kind?: ToolActivityEvent['kind']
+): ToolActivityEvent {
   return {
     type: 'tool.activity',
+    ...(kind ? { kind } : {}),
     projectId: 'p',
     conversationId: 'c',
     runId: 'r',
@@ -39,12 +56,19 @@ describe('activity', () => {
     expect(currentActivityLine(state)?.label).toBe('write_file')
   })
 
-  it('summarizes a finished turn in plain language', () => {
+  it('summarizes a finished turn from the runtime\u2019s own classification, not from label words', () => {
     let state = emptyActivity()
-    state = applyActivity(state, activityEvent('Bash', 'completed', '1'))
-    state = applyActivity(state, activityEvent('Bash', 'completed', '2'))
-    state = applyActivity(state, activityEvent('write_file', 'completed', '3'))
+    state = applyActivity(state, activityEvent('Running npm test', 'completed', '1', 'command'))
+    state = applyActivity(state, activityEvent('Running npm run build', 'completed', '2', 'command'))
+    // A label with no tool word in it at all is still counted correctly,
+    // because the provider said what kind of step it was.
+    state = applyActivity(state, activityEvent('Editing styles.css', 'completed', '3', 'edit'))
     expect(summarizeActivity(state)).toBe('Ran 2 commands, edited 1 file')
+  })
+
+  it('counts a step Orbit has no category for as a plain step', () => {
+    const state = applyActivity(emptyActivity(), activityEvent('Some novel tool', 'completed', '1', 'tool'))
+    expect(summarizeActivity(state)).toBe('1 step')
   })
 
   it('has no summary when nothing happened, so a plain answer stays clean', () => {
@@ -56,10 +80,42 @@ describe('activity', () => {
     expect(hasFailure(state)).toBe(true)
   })
 
-  it('only shows elapsed time once silence would look like a hang', () => {
-    expect(elapsedLabel(1000, 3000)).toBeNull()
+  it('shows elapsed time from the first whole second, so a long step never looks frozen', () => {
+    expect(elapsedLabel(1000, 1400)).toBeNull()
+    expect(elapsedLabel(1000, 2000)).toBe('1s')
     expect(elapsedLabel(1000, 9000)).toBe('8s')
     expect(elapsedLabel(1000, 100000)).toBe('1m 39s')
+  })
+
+  it('freezes a finished step\u2019s time at its own duration', () => {
+    let state = applyActivity(emptyActivity(), activityEvent('Running npm run build', 'running', '1', 'command'), 1000)
+    state = applyActivity(state, activityEvent('Running npm run build', 'completed', '1', 'command'), 13000)
+    const item = state.items[0]!
+
+    expect(item.endedAt).toBe(13000)
+    // However long the row stays on screen, it still reports 12s.
+    expect(itemElapsedLabel(item, 13000)).toBe('12s')
+    expect(itemElapsedLabel(item, 99000)).toBe('12s')
+  })
+
+  it('closes every open step when a run ends, so nothing keeps counting', () => {
+    let state = applyActivity(emptyActivity(), activityEvent('Running npm run build', 'running', '1', 'command'), 1000)
+    state = applyActivity(state, activityEvent('Reading App.tsx', 'running', '2', 'read'), 2000)
+    expect(hasRunningStep(state)).toBe(true)
+
+    // Exactly what a cancelled turn leaves behind: steps mid-flight.
+    const settled = finalizeActivity(state, 5000)
+    expect(hasRunningStep(settled)).toBe(false)
+    expect(settled.items.map((item) => item.endedAt)).toEqual([5000, 5000])
+    expect(itemElapsedLabel(settled.items[0]!, 60000)).toBe('4s')
+  })
+
+  it('drops per-run activity that no longer belongs to what is on screen', () => {
+    const byRun = { r1: emptyActivity(), r2: emptyActivity() }
+    expect(Object.keys(pruneActivity(byRun, ['r1']))).toEqual(['r1'])
+    // Nothing to drop returns the very same object, so pruning cannot
+    // cause a re-render on its own.
+    expect(pruneActivity(byRun, ['r1', 'r2'])).toBe(byRun)
   })
 })
 

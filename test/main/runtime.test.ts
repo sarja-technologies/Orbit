@@ -90,6 +90,44 @@ class HeadlessDenialProvider extends FakeProvider {
   }
 }
 
+/** Mirrors the real race a Stop creates: the run is acknowledged as
+ *  cancelled, and then the transport closing reports its own ending a beat
+ *  later. Both are genuine transport events; only the first is the run's
+ *  real outcome. */
+class LateSecondEndingProvider extends FakeProvider {
+  private pending: { input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void } | null = null
+  /** The ending that arrives after the run is already over. */
+  late: RuntimeEvent['type'] = 'run.failed'
+
+  override async sendMessage(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): Promise<void> {
+    this.pending = { input, onEvent }
+  }
+
+  override cancelRun = vi.fn(async (runId: string) => {
+    const pending = this.pending
+    if (!pending || pending.input.runId !== runId) return
+    const base = {
+      projectId: pending.input.projectId,
+      conversationId: pending.input.conversationId,
+      runId: pending.input.runId,
+      providerId: 'antigravity' as const,
+      createdAt: new Date().toISOString()
+    }
+    pending.onEvent({ ...base, type: 'run.cancelled' })
+    // …and now the stream/PTY closes, as it always does after a kill.
+    if (this.late === 'run.failed') {
+      pending.onEvent({
+        ...base,
+        type: 'run.failed',
+        error: { code: 'provider.exited', message: 'Antigravity exited before returning a result (SIGTERM).', retryable: false }
+      })
+    } else {
+      pending.onEvent({ ...base, type: 'run.completed', finalText: 'A late answer', nativeConversationId: null })
+    }
+    return undefined
+  })
+}
+
 /** Mirrors the PTY session's deferred cancellation: the run is stopped while
  *  it is waiting on a model-change retirement, so there is no live process to
  *  interrupt and `run.cancelled` is emitted synchronously from cancelRun,
@@ -387,6 +425,47 @@ describe('OrbitRuntime', () => {
     runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new FakeProvider(), dir, '0.1.0')
     const next = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'A later message' })
     await vi.waitFor(() => expect(store.requireRun(next.id).state).toBe('completed'))
+  })
+
+  it('keeps a stopped run stopped when the transport reports its own ending afterwards', async () => {
+    // THE REAL RACE. Stop kills the process; the stream then closes and the
+    // transport reports `provider.exited`. Handling that second ending
+    // appended a failed assistant message and rewrote the run as failed —
+    // so a cancellation the user asked for became "Antigravity's session
+    // ended unexpectedly" a beat later.
+    const provider = new LateSecondEndingProvider()
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), provider, dir, '0.1.0')
+    const project = runtime.createProject('Late ending')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Do something long' })
+    await runtime.cancelRun(run.id)
+
+    expect(store.requireRun(run.id).state).toBe('cancelled')
+    expect(store.requireRun(run.id).error).toBeNull()
+
+    const messages = store.listMessages(project.id).filter((message) => message.runId === run.id)
+    expect(messages, JSON.stringify(messages)).toHaveLength(1)
+    expect(messages[0]!.status).toBe('cancelled')
+    expect(messages.some((message) => message.status === 'failed')).toBe(false)
+  })
+
+  it('keeps a stopped run stopped even when a late completion arrives', async () => {
+    const provider = new LateSecondEndingProvider()
+    provider.late = 'run.completed'
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), provider, dir, '0.1.0')
+    const project = runtime.createProject('Late completion')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Do something long' })
+    await runtime.cancelRun(run.id)
+
+    // The user's decision stands: a turn they stopped does not quietly
+    // finish and present an answer they chose not to wait for.
+    expect(store.requireRun(run.id).state).toBe('cancelled')
+    const messages = store.listMessages(project.id).filter((message) => message.runId === run.id)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.status).toBe('cancelled')
   })
 
   it('persists intelligible provider failures as failed assistant messages', async () => {

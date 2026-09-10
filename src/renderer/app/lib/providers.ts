@@ -7,17 +7,20 @@ export type ProviderKey = 'gemini' | 'anthropic' | 'openai' | 'other'
 
 export interface ProviderIdentity {
   key: ProviderKey
-  /** Section heading in the full model browser. */
+  /** Section heading in the full model browser — the product family. */
   label: string
+  /** The company behind it, used where a description names the maker
+   *  ("Google's fastest Gemini model"). Never guessed for 'other'. */
+  vendor: string | null
   /** Drawn when no official asset could be sourced for this provider. */
   monogram: string
 }
 
 export const PROVIDERS: Record<ProviderKey, ProviderIdentity> = {
-  gemini: { key: 'gemini', label: 'Gemini', monogram: 'G' },
-  anthropic: { key: 'anthropic', label: 'Claude', monogram: 'A' },
-  openai: { key: 'openai', label: 'OpenAI', monogram: 'O' },
-  other: { key: 'other', label: 'Other models', monogram: '·' }
+  gemini: { key: 'gemini', label: 'Gemini', vendor: 'Google', monogram: 'G' },
+  anthropic: { key: 'anthropic', label: 'Claude', vendor: 'Anthropic', monogram: 'A' },
+  openai: { key: 'openai', label: 'OpenAI', vendor: 'OpenAI', monogram: 'O' },
+  other: { key: 'other', label: 'Other models', vendor: null, monogram: '·' }
 }
 
 /** Order the browser groups providers in: Antigravity is a Gemini workflow
@@ -28,10 +31,18 @@ export const PROVIDER_ORDER: readonly ProviderKey[] = ['gemini', 'anthropic', 'o
  *  entry — labels are display text and change wording between releases. */
 export function providerForModel(model: ModelOption | null): ProviderKey {
   if (!model) return 'other'
-  const id = model.id.toLowerCase()
+  return providerForModelId(model.id)
+}
+
+/** The provider a catalogue id belongs to. Kept separate from
+ *  `providerForModel` so anything holding only an id — a stored
+ *  conversation's `model`, say — can ask the same question. */
+export function providerForModelId(modelId: string | null): ProviderKey {
+  if (!modelId) return 'other'
+  const id = modelId.toLowerCase()
   if (id.startsWith('gemini')) return 'gemini'
   if (id.startsWith('claude')) return 'anthropic'
-  if (id.startsWith('gpt') || id.startsWith('openai') || /^o\d/.test(id)) return 'openai'
+  if (id.startsWith('gpt') || id.startsWith('openai') || id.startsWith('codex') || /^o\d/.test(id)) return 'openai'
   return 'other'
 }
 

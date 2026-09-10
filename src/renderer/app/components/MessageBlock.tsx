@@ -4,6 +4,7 @@ import { Markdown } from './Markdown'
 import { ChatRow } from './ChatRow'
 import { describeRuntimeError } from '../lib/errorCopy'
 import { isImage } from '../lib/attachments'
+import type { AgentIdentity } from '../lib/agentIdentity'
 
 interface MessageBlockProps {
   message: Message
@@ -16,27 +17,38 @@ interface MessageBlockProps {
    *  gets — a denied permission and an unreadable response are not the
    *  same problem and must not share copy. */
   error?: RuntimeErrorInfo | null
+  /** Who answered — the session's model, so a turn is marked with the AI
+   *  that produced it rather than with Orbit's own logo. */
+  identity?: AgentIdentity
 }
 
 /** One message in the work-session transcript. Side carries the speaker:
  *  the reader's own turns sit right in a sent bubble, Antigravity's sit
  *  left in its own surface. The label and timestamp confirm that read
  *  rather than being the only thing that provides it. */
-function MessageBlockView({ message, showRole, attachments, thumbnails, error }: MessageBlockProps): JSX.Element {
+function MessageBlockView({ message, showRole, attachments, thumbnails, error, identity }: MessageBlockProps): JSX.Element {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
-  if (message.status === 'cancelled') return <div className="transcript-note">Cancelled</div>
-  // A turn can finish with nothing to show — Antigravity did the work in
+  // Stopping a run is a normal thing to do, not a fault. It gets a quiet
+  // note that names what happened and nothing else: no warning colour, no
+  // "something went wrong", no retry prompt.
+  if (message.status === 'cancelled') return <StoppedNote />
+  // A turn can finish with nothing to show — the model did the work in
   // tools and said nothing, or its final text could not be read off the
   // live session. Either way, say so rather than leaving a blank gap the
   // reader has to interpret.
   if (message.role === 'assistant' && message.content.trim().length === 0) {
-    return <div className="transcript-note">Antigravity finished this turn without any text to show.</div>
+    return <div className="transcript-note">This turn finished without any text to show.</div>
   }
 
   const isUser = message.role === 'user'
   return (
     // Real send time from the stored message — never a placeholder.
-    <ChatRow role={isUser ? 'user' : 'assistant'} showIdentity={showRole} timestamp={message.createdAt}>
+    <ChatRow
+      role={isUser ? 'user' : 'assistant'}
+      showIdentity={showRole}
+      timestamp={message.createdAt}
+      {...(identity ? { identity } : {})}
+    >
       {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
     </ChatRow>
@@ -44,6 +56,28 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error }:
 }
 
 export const MessageBlock = memo(MessageBlockView)
+
+/** A run the user stopped. Deliberately in the same quiet register as any
+ *  other transcript note — the conversation is intact, the composer is
+ *  ready, and there is nothing to recover from. */
+export function StoppedNote(): JSX.Element {
+  return (
+    <div className="transcript-note transcript-note-stopped" role="status">
+      <span className="transcript-note-mark" aria-hidden="true">
+        <StopGlyph />
+      </span>
+      <span>You stopped this response</span>
+    </div>
+  )
+}
+
+function StopGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" focusable="false">
+      <rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="currentColor" />
+    </svg>
+  )
+}
 
 function SentAttachments({ attachments, thumbnails }: { attachments: ProjectFile[]; thumbnails: Record<string, string> }): JSX.Element {
   return (
