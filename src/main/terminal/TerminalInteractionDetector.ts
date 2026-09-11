@@ -224,6 +224,42 @@ const SPINNER_LINE = /^\s*[⠀-⣿](\s|$)/
  *  through different tips while a turn runs, which is exactly the kind of
  *  churn that must never reach the transcript. */
 const STATUS_HINT_LINE = /^\s*└/
+/** The column agy indents response content to.
+ *
+ *  Captured live from agy 1.2.0: inside the response region agy indents
+ *  everything it treats as content — prose, wrapped continuation rows,
+ *  markdown headings, bullets and fenced code (which indents further
+ *  still) — by at least two columns, and paints its own transient chrome
+ *  flush left. A representative settled screen:
+ *
+ *      "  Bicycles stand as one of humanity's most elegant…"   <- content
+ *      "  ### Key Benefits of Cycling"                          <- content
+ *      "  • Environmental Sustainability: …"                    <- content
+ *      "    def calculate_speed(distance_km: float) -> float:"  <- content
+ *      "⢿  Generating..."                                       <- chrome
+ *      "────────────────────────────────────────────────────"   <- chrome
+ *
+ *  This is what keeps agy's transient work title out of the answer. That
+ *  line is the model's own thought-summary heading — "Prioritizing Tool
+ *  Usage", "Verifying Requirements Thoroughly" — which agy substitutes for
+ *  "Generating..." in the status slot while a turn runs. The phrase is
+ *  model-generated prose (it does not appear anywhere in the agy binary),
+ *  so no word list could recognise it; what identifies it is *where agy
+ *  paints it*. Matching only the spinner form missed it, because agy paints
+ *  that same slot with and without its Braille glyph between redraws
+ *  (captured live: "Generating..." on one frame, "⣷  Generating..." on the
+ *  next) — and a frame sampled in the glyph-less state left the bare title
+ *  sitting directly above the answer, which is how it reached the
+ *  transcript. */
+const RESPONSE_CONTENT_INDENT = 2
+
+/** True for a line agy painted flush left inside the response region: its
+ *  own chrome, never the answer. Blank lines are not chrome — they are the
+ *  paragraph breaks the response is made of. */
+function isFlushLeftChrome(line: string): boolean {
+  if (line.trim().length === 0) return false
+  return line.length - line.trimStart().length < RESPONSE_CONTENT_INDENT
+}
 
 export interface ExtractResponseOptions {
   /** The prompt actually written into the PTY for this turn. When given,
@@ -353,12 +389,37 @@ export function extractResponseText(lines: string[], options: ExtractResponseOpt
     if (TOOL_ACTIVITY_LINE.test(line)) return false
     if (SPINNER_LINE.test(line)) return false
     if (STATUS_HINT_LINE.test(line)) return false
+    // Structural, and deliberately last: the checks above name specific
+    // shapes agy draws, this one catches the whole status slot whatever it
+    // currently says.
+    if (isFlushLeftChrome(line)) return false
     return true
   })
   // Trailing cells keep their padding across a redraw, and that padding
   // shifts from frame to frame — trimming it is what makes successive
   // reads of a growing answer comparable.
-  return kept.map((line) => line.replace(/\s+$/, '')).join('\n').trim()
+  const trimmed = kept.map((line) => line.replace(/\s+$/, ''))
+  // agy's own two-column content indent is presentation, not part of the
+  // answer. Removing the indent the whole block shares keeps markdown
+  // meaningful — a fenced block's inner indentation survives relative to
+  // its fence, rather than every line arriving two columns deeper than the
+  // model wrote it.
+  return dedent(trimmed).join('\n').trim()
+}
+
+/** Strips the indentation every non-blank line shares. Nothing is removed
+ *  when the lines disagree, so a block that is already flush left, or one
+ *  whose first line is deliberately outdented, is returned untouched. */
+function dedent(lines: string[]): string[] {
+  let common: number | null = null
+  for (const line of lines) {
+    if (line.trim().length === 0) continue
+    const indent = line.length - line.trimStart().length
+    common = common === null ? indent : Math.min(common, indent)
+    if (common === 0) return lines
+  }
+  if (common === null || common === 0) return lines
+  return lines.map((line) => (line.trim().length === 0 ? line : line.slice(common!)))
 }
 
 /** How much of the already-streamed tail must reappear in a new frame for

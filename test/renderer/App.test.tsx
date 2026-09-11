@@ -165,6 +165,8 @@ describe('App', () => {
         setModel: vi.fn(),
         setWorkingDirectory: vi.fn()
       },
+      data: { clearAll: vi.fn() },
+      defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => MODELS) },
       messages: {
@@ -191,7 +193,7 @@ describe('App', () => {
       },
       interactions: { respond: vi.fn() },
       files: {
-        attach: vi.fn(),
+        attach: vi.fn(async () => []),
         attachPaths: vi.fn(),
         attachImage: vi.fn(),
         thumbnail: vi.fn(async () => null),
@@ -868,6 +870,73 @@ describe('App', () => {
       // Whether the entry is also dropped from memory is pruneActivity's
       // own contract, covered directly in rendererLib.test.ts.
     })
+  })
+
+  it('offers Settings from the sidebar, and opens and closes it', async () => {
+    await boot()
+
+    // Orbit's own settings, in the sidebar's footer rather than beside any
+    // project.
+    const gear = screen.getByRole('button', { name: 'Settings' })
+    expect(gear).toBeInTheDocument()
+
+    await userEvent.click(gear)
+    const dialog = await screen.findByRole('dialog', { name: 'Settings' })
+    expect(within(dialog).getByLabelText(/Default model/)).toBeInTheDocument()
+    expect(within(dialog).getByLabelText(/Default permissions/)).toBeInTheDocument()
+
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument())
+  })
+
+  it('saves a default model without touching the open session', async () => {
+    await boot()
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    await screen.findByRole('dialog', { name: 'Settings' })
+
+    // Anything already written belongs to the boot-time tier seeding, not
+    // to this: what matters is that changing the default adds nothing.
+    const before = vi.mocked(api.conversations.setModel).mock.calls.length
+    await userEvent.selectOptions(screen.getByLabelText(/Default model/), 'gemini-3.1-pro')
+
+    await waitFor(() => expect(api.preferences.set).toHaveBeenCalledWith(expect.objectContaining({ defaultModelId: 'gemini-3.1-pro' })))
+    // The default is about the next session; this one keeps its own model.
+    expect(vi.mocked(api.conversations.setModel).mock.calls).toHaveLength(before)
+  })
+
+  it('saves a default permission mode without touching the open session', async () => {
+    await boot()
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    await screen.findByRole('dialog', { name: 'Settings' })
+
+    await userEvent.selectOptions(screen.getByLabelText(/Default permissions/), 'skip')
+
+    await waitFor(() => expect(api.preferences.set).toHaveBeenCalledWith(expect.objectContaining({ defaultPermissionMode: 'skip' })))
+    expect(api.conversations.setPermissionMode).not.toHaveBeenCalled()
+  })
+
+  it('asks which kind of attachment before opening any native picker', async () => {
+    await boot()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add files' }))
+    expect(api.files.attach).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Image' }))
+    await waitFor(() =>
+      expect(api.files.attach).toHaveBeenCalledWith(expect.objectContaining({ category: 'image', projectId: 'project_1' }))
+    )
+  })
+
+  it('passes the video and files categories through too', async () => {
+    await boot()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add files' }))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Video' }))
+    await waitFor(() => expect(api.files.attach).toHaveBeenLastCalledWith(expect.objectContaining({ category: 'video' })))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add files' }))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Files' }))
+    await waitFor(() => expect(api.files.attach).toHaveBeenLastCalledWith(expect.objectContaining({ category: 'files' })))
   })
 
   it('does not expose a manual transport control', async () => {

@@ -341,16 +341,24 @@ describe('OrbitRuntime', () => {
     expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Ship checklist')
   })
 
-  it('keeps the default name when the first prompt says nothing worth naming, and lets the next one name it', async () => {
+  it('names a session provisionally from a prompt with no subject, then lets a real one take over', async () => {
     const project = runtime.createProject('Naming')
     const session = runtime.createConversation(project.id)
     const send = (content: string): Promise<unknown> =>
       runtime.sendMessage({ projectId: project.id, conversationId: session.id, content })
 
+    // A used session never sits at `New Session`: "hi" has no subject, but
+    // it is still what the user said, so it names the session provisionally.
     await send('hi')
-    expect(runtime.openProject(project.id).conversations[0]?.title).toBe(DEFAULT_SESSION_TITLE)
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Hi')
+    expect(runtime.openProject(project.id).conversations[0]?.title).not.toBe(DEFAULT_SESSION_TITLE)
 
+    // The first prompt with a subject in it upgrades that provisional name.
     await send('refactor the payment service')
+    expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Refactor the Payment Service')
+
+    // ...and having a real name, it stops changing.
+    await send('now add retries to the webhook worker')
     expect(runtime.openProject(project.id).conversations[0]?.title).toBe('Refactor the Payment Service')
   })
 

@@ -102,6 +102,69 @@ const LEADING_FILLER = new Set([
  *  Never applied to the first word. */
 const MINOR_WORDS = new Set(['a', 'an', 'and', 'at', 'by', 'for', 'from', 'in', 'of', 'on', 'or', 'the', 'to', 'with'])
 
+/** How a session came by its current name.
+ *
+ *  Persisted rather than inferred from the text, because the same words can
+ *  arrive three different ways and only the history tells them apart: a
+ *  title Orbit guessed from "hi" must be replaceable, the identical title
+ *  typed by the user must not be.
+ *
+ *    default     — still `New Session`; never used.
+ *    provisional — Orbit named it from a prompt with no subject in it
+ *                  ("hi"), so a later real prompt may still take over.
+ *    substantive — Orbit named it from a prompt that had a subject. Settled:
+ *                  later prompts leave it alone.
+ *    manual      — the user named it. Never overwritten, by anything. */
+export type SessionTitleState = 'default' | 'provisional' | 'substantive' | 'manual'
+
+/** A title Orbit derived, and how much it is worth. */
+export interface DerivedSessionTitle {
+  title: string
+  kind: 'provisional' | 'substantive'
+}
+
+/** The title a prompt earns, and whether it is good enough to settle on.
+ *
+ *  A prompt with a subject in it gives a substantive title. One that is all
+ *  opener and no subject ("hi", "help me") still gives a title — the words
+ *  the user actually typed, title-cased — but only a provisional one, so
+ *  the first real prompt afterwards can replace it. Leaving the session as
+ *  `New Session` forever was the alternative, and it named nothing. */
+export function deriveTitleForPrompt(prompt: string): DerivedSessionTitle | null {
+  const substantive = deriveSessionTitle(prompt)
+  if (substantive) return { title: substantive, kind: 'substantive' }
+  const provisional = provisionalSessionTitle(prompt)
+  return provisional ? { title: provisional, kind: 'provisional' } : null
+}
+
+/** A title for a prompt that carries no subject. Deterministic and local:
+ *  it is the user's own words, cleaned and title-cased, never an invented
+ *  summary of them — "hi" becomes "Hi", not "Greeting". */
+export function provisionalSessionTitle(prompt: string): string | null {
+  const source = firstMeaningfulLine(prompt)
+  if (!source) return null
+  const words = source
+    .split(/(?<=[.!?])\s/)[0]!
+    .split(/\s+/)
+    .map(cleanWord)
+    .filter((word) => word.length > 0)
+    .slice(0, MAX_WORDS)
+  if (words.length === 0) return null
+  const title = words.map((word, index) => titleCase(word, index === 0)).join(' ')
+  const trimmed = title.length > MAX_CHARS ? title.slice(0, MAX_CHARS).trimEnd() : title
+  if (!trimmed) return null
+  return hasDefaultSessionTitle(trimmed) ? null : trimmed
+}
+
+/** Whether a session whose title is in this state may be renamed by Orbit,
+ *  given a newly derived title. Manual and substantive titles are settled;
+ *  a provisional one yields only to something substantive. */
+export function shouldApplyAutoTitle(state: SessionTitleState, next: DerivedSessionTitle): boolean {
+  if (state === 'manual' || state === 'substantive') return false
+  if (state === 'provisional') return next.kind === 'substantive'
+  return true
+}
+
 /** True when a session still carries the name Orbit gave it, and so is
  *  still Orbit's to name. */
 export function hasDefaultSessionTitle(title: string): boolean {

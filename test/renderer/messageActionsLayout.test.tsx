@@ -200,3 +200,30 @@ describe('message alignment is unchanged', () => {
     expect(container.querySelector('.chat-mark')).toHaveAttribute('data-provider', 'gemini')
   })
 })
+
+describe('bubbles are sized by their content', () => {
+  it('shrink-wraps rather than filling its grid track', () => {
+    // The bug: a grid item stretches by default, so a three-word reply drew
+    // a bubble the full width of the conversation column.
+    const rule = ruleFor('.chat-bubble')
+
+    expect(rule).toMatch(/width:\s*fit-content/)
+    expect(rule).toMatch(/justify-self:\s*start/)
+    // Still bounded, so long prose wraps at a readable measure.
+    expect(rule).toMatch(/max-width:\s*min\(100%,\s*var\(--chat-measure\)\)/)
+    // Nothing props a short bubble open: no min-height at all, and the
+    // only min-width is the 0 that lets a grid item shrink.
+    expect(rule).not.toMatch(/min-height/)
+    expect(rule).toMatch(/min-width:\s*0/)
+  })
+
+  it('keeps the reader’s bubble on its own edge while sizing the same way', () => {
+    expect(ruleFor('.chat-row-user .chat-bubble')).toMatch(/justify-self:\s*end/)
+  })
+
+  it('does not let wide content stretch the transcript sideways', () => {
+    const rule = ruleFor('.chat-bubble pre,\n.chat-bubble table')
+    expect(rule).toMatch(/max-width:\s*100%/)
+    expect(rule).toMatch(/overflow-x:\s*auto/)
+  })
+})

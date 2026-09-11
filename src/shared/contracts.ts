@@ -1,3 +1,5 @@
+import type { AttachmentPickerCategory } from './attachmentPicker'
+import type { ResolvedDefaultModel } from './newSessionDefaults'
 import type { PermissionMode } from './permissionMode'
 import type {
   Artifact,
@@ -37,6 +39,8 @@ export const IPC_CHANNELS = {
   conversationsSetWorkingDirectory: 'orbit:conversations:set-working-directory',
   dialogPickFolder: 'orbit:dialog:pick-folder',
   startupSession: 'orbit:startup:session',
+  dataClear: 'orbit:data:clear',
+  defaultModelStatus: 'orbit:defaults:model-status',
   preferencesGet: 'orbit:preferences:get',
   preferencesSet: 'orbit:preferences:set',
   modelsList: 'orbit:models:list',
@@ -99,6 +103,19 @@ export interface PickFolderInput {
    *  point. Omitted means the OS decides. */
   defaultPath?: string | null
   title?: string
+}
+
+export interface AttachFilesInput {
+  projectId: ID
+  /** Which native picker to open. Omitted means the ordinary unrestricted
+   *  one, which is what every caller before the + menu wanted. */
+  category?: AttachmentPickerCategory
+}
+
+export interface ClearAllDataInput {
+  /** The word the user typed. Checked in the main process too — see
+   *  CLEAR_DATA_CONFIRMATION. */
+  confirmation: string
 }
 
 export interface RenameConversationInput {
@@ -235,6 +252,16 @@ export interface OrbitApi {
    *  reports failure rather than silently doing nothing. */
   clipboard: {
     writeText(text: string): Promise<boolean>
+  }
+  data: {
+    /** Erases everything Orbit owns and relaunches. Never touches a
+     *  project's own folder — see main/data/clearAllData.ts. */
+    clearAll(input: ClearAllDataInput): Promise<void>
+  }
+  defaults: {
+    /** How a new session's model resolves right now, including whether a
+     *  saved default has gone missing from the catalogue. */
+    modelStatus(): Promise<ResolvedDefaultModel>
   }
   models: {
     /** The real, normalized Antigravity catalogue. Empty when it could not

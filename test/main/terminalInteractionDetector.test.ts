@@ -163,7 +163,7 @@ describe('extractResponseText', () => {
   })
 
   it('strips tool-activity lines from a response that ran a command', () => {
-    const lines = ['> Run touch test.txt', '', '● Bash(touch test.txt) (ctrl+o to expand)', '', 'Done, created test.txt.', '', '? for shortcuts']
+    const lines = ['> Run touch test.txt', '', '● Bash(touch test.txt) (ctrl+o to expand)', '', '  Done, created test.txt.', '', '? for shortcuts']
     expect(extractResponseText(lines)).toBe('Done, created test.txt.')
   })
 
@@ -200,13 +200,13 @@ describe('extractResponseText', () => {
     const lines = [
       '> show me a hello world function',
       '',
-      'Here you go:',
+      '  Here you go:',
       '',
-      '```js',
-      'function hello() {',
-      '  console.log("hi")',
-      '}',
-      '```',
+      '  ```js',
+      '  function hello() {',
+      '    console.log("hi")',
+      '  }',
+      '  ```',
       '',
       '? for shortcuts'
     ]
@@ -214,12 +214,12 @@ describe('extractResponseText', () => {
   })
 
   it('preserves unicode and emoji content', () => {
-    const lines = ['> 你好', '', 'こんにちは 👋 — café résumé', '', '? for shortcuts']
+    const lines = ['> 你好', '', '  こんにちは 👋 — café résumé', '', '? for shortcuts']
     expect(extractResponseText(lines)).toBe('こんにちは 👋 — café résumé')
   })
 
   it('preserves multiple paragraph breaks', () => {
-    const lines = ['> explain in two paragraphs', '', 'First paragraph.', '', 'Second paragraph.', '', '? for shortcuts']
+    const lines = ['> explain in two paragraphs', '', '  First paragraph.', '', '  Second paragraph.', '', '? for shortcuts']
     expect(extractResponseText(lines)).toBe('First paragraph.\n\nSecond paragraph.')
   })
 
@@ -243,7 +243,7 @@ describe('extractResponseText', () => {
       '',
       '● Bash(npm run build) (ctrl+o to expand)',
       '',
-      'Build succeeded with no errors.',
+      '  Build succeeded with no errors.',
       '',
       '? for shortcuts'
     ]
@@ -265,7 +265,11 @@ describe('extractResponseText prompt anchoring (progressive reading)', () => {
     // skips real response lines looking for one. With the prompt to match
     // against, the answer starts exactly where it should.
     const scrolled = [`> ${PROMPT}`, '▸ Thought for 11s', '  Verifying Requirements Thoroughly', ANSWER, WIDE, '>', WIDE, '? for shortcuts   Gemini 3.6 Flash · medium']
-    expect(extractResponseText(scrolled, { prompt: PROMPT })).toBe(`Verifying Requirements Thoroughly\n${ANSWER}`)
+    // Legacy shape: agy 1.1.x drew a settled `▸ Thought for` block. agy
+    // 1.2.0 does not (checked across 698 captured frames of a thinking,
+    // tool-using, high-effort run), so this stays as a record of the older
+    // screen. The content indent agy adds is removed either way.
+    expect(extractResponseText(scrolled, { prompt: PROMPT })).toBe(`Verifying Requirements Thoroughly\n${ANSWER.trim()}`)
   })
 
   it('consumes a prompt that word-wrapped across several rows', () => {
@@ -355,5 +359,108 @@ describe('readMediaAttachedCount', () => {
 
   it('returns 0 when nothing matches', () => {
     expect(readMediaAttachedCount(['no attachments here'])).toBe(0)
+  })
+})
+
+/** Screens copied verbatim from agy 1.2.0 on this machine (120 columns),
+ *  captured while investigating the "Prioritizing Tool Usage" leak. Every
+ *  content row agy paints inside the response region is indented by two
+ *  columns; its own transient chrome is painted flush left. */
+describe('extractResponseText against real captured agy 1.2.0 screens', () => {
+  const WIDE = '─'.repeat(120)
+  const NARROW = '─'.repeat(60)
+
+  it('keeps the status slot out of the answer when agy paints it with its spinner', () => {
+    const screen = ['> hi', '', '  Hello! How can I help you today?', '⣾  Generating...', WIDE, '>', WIDE, 'esc to cancel                    Gemini 3.8 Flash · low']
+    expect(extractResponseText(screen, { prompt: 'hi' })).toBe('Hello! How can I help you today?')
+  })
+
+  it('keeps it out when agy paints that same slot without its spinner', () => {
+    // Captured live: between redraws agy paints the status row bare. The
+    // spinner-only filter missed exactly this frame, which is how the work
+    // title reached the transcript.
+    const screen = ['> hi', '', '  Hello! How can I help you today?', 'Generating...', WIDE, '>', WIDE, 'esc to cancel']
+    expect(extractResponseText(screen, { prompt: 'hi' })).toBe('Hello! How can I help you today?')
+  })
+
+  it('keeps a model-authored work title out, exactly as it does "Generating..."', () => {
+    // "Prioritizing Tool Usage" is the model's own thought-summary heading,
+    // which agy substitutes into the status slot. It is not in the agy
+    // binary at all, so only its position identifies it.
+    const withGlyph = ['> hi', '', '  Hello! How can I help you today?', '⣷  Prioritizing Tool Usage', WIDE, '>', WIDE, 'esc to cancel']
+    const bare = ['> hi', '', '  Hello! How can I help you today?', 'Prioritizing Tool Specificity', WIDE, '>', WIDE, 'esc to cancel']
+
+    expect(extractResponseText(withGlyph, { prompt: 'hi' })).toBe('Hello! How can I help you today?')
+    expect(extractResponseText(bare, { prompt: 'hi' })).toBe('Hello! How can I help you today?')
+  })
+
+  it('keeps a tool row and its own detail out, but not the prose after it', () => {
+    // Verbatim from a live run in this repo.
+    const screen = [
+      NARROW,
+      '> hi',
+      '',
+      '● ListDir(~/Documents/Orbit-AGDC/Orbit) (ctrl+o to expand)',
+      '',
+      '  Hello! How can I help you with the Orbit project today?',
+      '⣻  Generating...',
+      '└ Tip: In /diff, press c to add inline comments and send them as feedback.',
+      WIDE,
+      '>',
+      WIDE,
+      'esc to cancel                                    Gemini 3.6 Flash · high'
+    ]
+    expect(extractResponseText(screen, { prompt: 'hi' })).toBe('Hello! How can I help you with the Orbit project today?')
+  })
+
+  it('keeps a long wrapped answer whole, with its markdown and code intact', () => {
+    // Verbatim shape from a live long-answer run: wrapped rows, a heading,
+    // bullets and a fenced block all carry agy's two-column content indent,
+    // and the code's own deeper indentation survives relative to it.
+    const screen = [
+      '> Write one long paragraph about bicycles.',
+      '',
+      '  Bicycles stand as one of humanity’s most elegant machines,',
+      '  combining human biomechanics with mechanical ingenuity.',
+      '',
+      '  ### Key Benefits of Cycling',
+      '',
+      '  • Environmental Sustainability: Produces zero emissions.',
+      '  • Physical Health: Low-impact cardiovascular exercise.',
+      '',
+      '    def calculate_speed(distance_km: float, time_hours: float) -> float:',
+      '        return distance_km / time_hours',
+      '⢿  Generating...',
+      WIDE,
+      '>',
+      WIDE,
+      'esc to cancel'
+    ]
+    const result = extractResponseText(screen, { prompt: 'Write one long paragraph about bicycles.' })
+
+    expect(result).toContain('Bicycles stand as one of humanity’s most elegant machines,')
+    expect(result).toContain('combining human biomechanics with mechanical ingenuity.')
+    expect(result).toContain('### Key Benefits of Cycling')
+    expect(result).toContain('• Environmental Sustainability: Produces zero emissions.')
+    // Dedented by the two columns agy adds, so the code keeps its own shape.
+    expect(result).toContain('  def calculate_speed(distance_km: float, time_hours: float) -> float:')
+    expect(result).toContain('      return distance_km / time_hours')
+    expect(result).not.toMatch(/Generating/)
+  })
+
+  it('never returns the status slot alone, before any answer has been painted', () => {
+    // The frame between sending and the first token: nothing to stream yet.
+    const generating = ['> hi', '', '⣷  Generating...', WIDE, '>', WIDE, 'esc to cancel']
+    const titled = ['> hi', '', 'Prioritizing Tool Usage', WIDE, '>', WIDE, 'esc to cancel']
+
+    expect(extractResponseText(generating, { prompt: 'hi' })).toBe('')
+    expect(extractResponseText(titled, { prompt: 'hi' })).toBe('')
+  })
+
+  it('preserves a legitimate first line that merely looks like a heading', () => {
+    // Title Case is not evidence of anything: this is the answer, indented
+    // by agy exactly as prose is, with no marker above it.
+    const screen = ['> name three habits', '', '  Prioritizing Deep Work Matters', '', '  Here are three habits that help.', WIDE, '>', WIDE, '? for shortcuts']
+    expect(extractResponseText(screen, { prompt: 'name three habits' })).toBe('Prioritizing Deep Work Matters\n\nHere are three habits that help.')
   })
 })

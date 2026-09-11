@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   reasoning_effort TEXT,
   working_directory TEXT,
   title_is_custom INTEGER NOT NULL DEFAULT 0,
+  title_state TEXT NOT NULL DEFAULT 'default',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

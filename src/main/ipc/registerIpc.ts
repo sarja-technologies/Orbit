@@ -1,8 +1,10 @@
-import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import { IPC_CHANNELS } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { OrbitRuntime } from '@main/runtime/orbitRuntime'
 import { isAbsolute } from 'node:path'
+import { pickerFilters, pickerTitle } from '@shared/attachmentPicker'
+import { clearAllData, CLEAR_DATA_CONFIRMATION } from '@main/data/clearAllData'
 import {
   attachFilesSchema,
   attachImageSchema,
@@ -15,6 +17,7 @@ import {
   createReferenceSchema,
   deleteConversationSchema,
   idSchema,
+  clearAllDataSchema,
   importArtifactSchema,
   pickFolderSchema,
   preferencesSchema,
@@ -61,6 +64,17 @@ export function registerIpc(runtime: OrbitRuntime): void {
     return runtime.setConversationWorkingDirectory(parsed.conversationId, parsed.workingDirectory)
   })
   ipcMain.handle(IPC_CHANNELS.startupSession, () => runtime.ensureStartupSession())
+  ipcMain.handle(IPC_CHANNELS.defaultModelStatus, () => runtime.defaultModelStatus())
+  ipcMain.handle(IPC_CHANNELS.dataClear, async (_event, input: unknown) => {
+    const parsed = clearAllDataSchema.parse(input)
+    if (parsed.confirmation !== CLEAR_DATA_CONFIRMATION) throw new Error('That confirmation did not match, so nothing was cleared.')
+    await clearAllData({ dataDir: runtime.dataDirectory, shutdown: () => runtime.shutdown() })
+    // Reinitialize by starting over: a fresh process rebuilds the database
+    // and every service around it, which is the one way to be certain no
+    // stale handle or renderer state survives the clear.
+    app.relaunch()
+    app.exit(0)
+  })
   ipcMain.handle(IPC_CHANNELS.preferencesGet, () => runtime.getPreferences())
   ipcMain.handle(IPC_CHANNELS.preferencesSet, (_event, input: unknown) => runtime.setPreferences(preferencesSchema.parse(input)))
   // The one place Orbit asks the OS where work should happen. Directory-only
@@ -105,7 +119,14 @@ export function registerIpc(runtime: OrbitRuntime): void {
   ipcMain.handle(IPC_CHANNELS.interactionsRespond, (_event, input: unknown) => runtime.respondToInteraction(respondToInteractionSchema.parse(input)))
   ipcMain.handle(IPC_CHANNELS.filesAttach, async (_event, input: unknown) => {
     const parsed = attachFilesSchema.parse(input)
-    const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] })
+    // The renderer names one of three intents; the filters, the title and
+    // the dialog itself belong to the main process.
+    const filters = pickerFilters(parsed.category)
+    const result = await dialog.showOpenDialog({
+      title: pickerTitle(parsed.category),
+      properties: ['openFile', 'multiSelections'],
+      ...(filters.length > 0 ? { filters } : {})
+    })
     if (result.canceled || result.filePaths.length === 0) return []
     return runtime.attachFiles(parsed.projectId, result.filePaths)
   })

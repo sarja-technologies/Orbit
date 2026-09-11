@@ -22,7 +22,9 @@ export const EMPTY_PREFERENCES: OrbitPreferences = {
   modelReasoningEfforts: {},
   sidebarWidth: null,
   lastActiveProjectId: null,
-  lastActiveConversationId: null
+  lastActiveConversationId: null,
+  defaultModelId: null,
+  defaultPermissionMode: null
 }
 
 /** The sidebar's width bounds, in pixels. The default is deliberately wider
@@ -130,9 +132,14 @@ export function effortForModel(model: ModelOption | null, preferences: OrbitPref
  *  from the same policy the moment the catalogue arrives. */
 export function effortForNewSession(
   preferences: OrbitPreferences,
-  models: readonly ModelOption[]
+  models: readonly ModelOption[],
+  /** The model the session is actually being created on. Defaults to
+   *  Orbit's own, which is what it was before the default became the
+   *  user's to choose — the tier has to be mapped onto the tiers *that*
+   *  model publishes, not onto another model's. */
+  modelId: string = ORBIT_DEFAULT_MODEL_ID
 ): ReasoningEffort | null {
-  return effortForModel(modelForSelection(models, ORBIT_DEFAULT_MODEL_ID), preferences)
+  return effortForModel(modelForSelection(models, modelId), preferences)
 }
 
 /** Folds an explicit user choice into the stored preferences. Clearing a
@@ -177,7 +184,13 @@ export function normalizePreferences(value: unknown): OrbitPreferences {
     // future Orbit with different bounds is not destroyed on read.
     sidebarWidth: typeof raw.sidebarWidth === 'number' && Number.isFinite(raw.sidebarWidth) ? raw.sidebarWidth : null,
     lastActiveProjectId: nonEmptyString(raw.lastActiveProjectId),
-    lastActiveConversationId: nonEmptyString(raw.lastActiveConversationId)
+    lastActiveConversationId: nonEmptyString(raw.lastActiveConversationId),
+    // Kept as stored. Whether the model still exists is a question for the
+    // live catalogue, answered where the catalogue is known — never by
+    // quietly dropping the user's choice on read.
+    defaultModelId: nonEmptyString(raw.defaultModelId),
+    defaultPermissionMode:
+      raw.defaultPermissionMode === 'ask' || raw.defaultPermissionMode === 'skip' ? raw.defaultPermissionMode : null
   }
 }
 

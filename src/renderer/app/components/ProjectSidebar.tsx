@@ -6,6 +6,9 @@ export type SessionIndicator = 'running' | 'attention' | null
 
 interface ProjectSidebarProps {
   groups: ProjectGroup[]
+  /** Opens Orbit's settings. Lives in the sidebar's own footer, not beside
+   *  any project. */
+  onOpenSettings: () => void
   activeProjectId: ID | null
   activeConversationId: ID | null
   expandedProjectIds: readonly ID[]
@@ -35,6 +38,7 @@ interface ProjectSidebarProps {
  *  one. Rows are separated by rhythm and a soft selected fill, never boxes. */
 export function ProjectSidebar({
   groups,
+  onOpenSettings,
   activeProjectId,
   activeConversationId,
   expandedProjectIds,
@@ -162,7 +166,31 @@ export function ProjectSidebar({
         })}
         {groups.length === 0 ? <p className="sidebar-empty">No projects yet.</p> : null}
       </div>
+
+      {/* Orbit's own settings, kept away from the projects above it: these
+          belong to the app, not to any one project or session. */}
+      <div className="sidebar-footer">
+        <button type="button" className="sidebar-settings" onClick={onOpenSettings} aria-label="Settings">
+          <GearGlyph />
+          <span className="sidebar-settings-label">Settings</span>
+        </button>
+      </div>
     </nav>
+  )
+}
+
+function GearGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path
+        d="M8 1.6v1.5M8 12.9v1.5M14.4 8h-1.5M3.1 8H1.6M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6L3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
   )
 }
 

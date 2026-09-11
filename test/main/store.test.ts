@@ -172,17 +172,17 @@ describe('OrbitStore', () => {
     const project = store.createProject('Naming')
     const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
 
-    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')?.title).toBe('Robotics Landing Page')
+    expect(store.autoTitleConversation(session.id, { title: 'Robotics Landing Page', kind: 'substantive' })?.title).toBe('Robotics Landing Page')
     expect(store.getConversation(session.id)?.title).toBe('Robotics Landing Page')
   })
 
   it('auto-titles at most once, because the default name is gone afterwards', () => {
     const project = store.createProject('Naming')
     const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
-    store.autoTitleConversation(session.id, 'Robotics Landing Page')
+    store.autoTitleConversation(session.id, { title: 'Robotics Landing Page', kind: 'substantive' })
 
     // Whatever a later message would have derived, the session is named.
-    expect(store.autoTitleConversation(session.id, 'Something Else')).toBeNull()
+    expect(store.autoTitleConversation(session.id, { title: 'Something Else', kind: 'substantive' })).toBeNull()
     expect(store.getConversation(session.id)?.title).toBe('Robotics Landing Page')
   })
 
@@ -191,7 +191,7 @@ describe('OrbitStore', () => {
     const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
     store.renameConversation(session.id, 'Ship checklist')
 
-    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.autoTitleConversation(session.id, { title: 'Robotics Landing Page', kind: 'substantive' })).toBeNull()
     expect(store.getConversation(session.id)?.title).toBe('Ship checklist')
   })
 
@@ -203,7 +203,7 @@ describe('OrbitStore', () => {
     store.renameConversation(session.id, 'Draft')
     store.renameConversation(session.id, DEFAULT_SESSION_TITLE)
 
-    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.autoTitleConversation(session.id, { title: 'Robotics Landing Page', kind: 'substantive' })).toBeNull()
     expect(store.getConversation(session.id)?.title).toBe(DEFAULT_SESSION_TITLE)
   })
 
@@ -211,7 +211,7 @@ describe('OrbitStore', () => {
     const project = store.createProject('Naming')
     const session = store.createConversation(project.id, DEFAULT_SESSION_TITLE)
 
-    expect(store.autoTitleConversation(session.id, '   ')).toBeNull()
+    expect(store.autoTitleConversation(session.id, { title: '   ', kind: 'substantive' })).toBeNull()
     expect(store.getConversation(session.id)?.title).toBe(DEFAULT_SESSION_TITLE)
   })
 
@@ -226,7 +226,7 @@ describe('OrbitStore', () => {
     store = new OrbitStore(db)
 
     // The flag is persisted, not merely in-memory for this launch.
-    expect(store.autoTitleConversation(session.id, 'Robotics Landing Page')).toBeNull()
+    expect(store.autoTitleConversation(session.id, { title: 'Robotics Landing Page', kind: 'substantive' })).toBeNull()
     expect(store.getConversation(session.id)?.title).toBe('Ship checklist')
   })
 
@@ -268,7 +268,7 @@ describe('OrbitStore', () => {
     // The title column added for auto-titling migrated in too, and a stored
     // session keeps working: it is named, so it is never a titling
     // candidate, and it can still be renamed and sent to.
-    expect(store.autoTitleConversation('c1', 'Something Derived')).toBeNull()
+    expect(store.autoTitleConversation('c1', { title: 'Something Derived', kind: 'substantive' })).toBeNull()
     expect(store.renameConversation('c1', 'Renamed session').title).toBe('Renamed session')
     expect(store.getConversation('c1')?.title).toBe('Renamed session')
   })
@@ -354,9 +354,94 @@ describe('OrbitStore', () => {
     store = new OrbitStore(db)
 
     // The migration backfills 0, so the session is still Orbit's to name.
-    expect(store.autoTitleConversation('c1', 'Robotics Landing Page')?.title).toBe('Robotics Landing Page')
+    expect(store.autoTitleConversation('c1', { title: 'Robotics Landing Page', kind: 'substantive' })?.title).toBe('Robotics Landing Page')
     expect(store.getConversation('c1')?.title).toBe('Robotics Landing Page')
     // ...and having been named, it is done: no second rename.
-    expect(store.autoTitleConversation('c1', 'Something Else')).toBeNull()
+    expect(store.autoTitleConversation('c1', { title: 'Something Else', kind: 'substantive' })).toBeNull()
+  })
+})
+
+describe('OrbitStore session title states', () => {
+  let dir: string
+  let db: OrbitDatabase
+  let store: OrbitStore
+
+  beforeEach(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-titles-'))
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+  })
+
+  afterEach(() => {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  const session = (): string => {
+    const project = store.createProject('Titles')
+    return store.createConversation(project.id, DEFAULT_SESSION_TITLE).id
+  }
+
+  it('starts a session at the default state', () => {
+    expect(store.titleState(session())).toBe('default')
+  })
+
+  it('records how a session came by an automatic name', () => {
+    const provisional = session()
+    store.autoTitleConversation(provisional, { title: 'Hi', kind: 'provisional' })
+    expect(store.titleState(provisional)).toBe('provisional')
+
+    const substantive = session()
+    store.autoTitleConversation(substantive, { title: 'Fix the Login Form', kind: 'substantive' })
+    expect(store.titleState(substantive)).toBe('substantive')
+  })
+
+  it('upgrades a provisional name, then leaves the real one alone', () => {
+    const id = session()
+    store.autoTitleConversation(id, { title: 'Hi', kind: 'provisional' })
+
+    expect(store.autoTitleConversation(id, { title: 'Fix the Login Form', kind: 'substantive' })?.title).toBe('Fix the Login Form')
+    expect(store.autoTitleConversation(id, { title: 'Something Else', kind: 'substantive' })).toBeNull()
+    expect(store.getConversation(id)?.title).toBe('Fix the Login Form')
+  })
+
+  it('never overwrites a name the user typed', () => {
+    const id = session()
+    store.renameConversation(id, 'Ship checklist')
+
+    expect(store.titleState(id)).toBe('manual')
+    expect(store.autoTitleConversation(id, { title: 'Fix the Login Form', kind: 'substantive' })).toBeNull()
+    expect(store.getConversation(id)?.title).toBe('Ship checklist')
+  })
+
+  it('lets a manual rename override an automatic name, for good', () => {
+    const id = session()
+    store.autoTitleConversation(id, { title: 'Fix the Login Form', kind: 'substantive' })
+    store.renameConversation(id, 'Ship checklist')
+
+    expect(store.getConversation(id)?.title).toBe('Ship checklist')
+    expect(store.autoTitleConversation(id, { title: 'Anything', kind: 'substantive' })).toBeNull()
+  })
+
+  it('settles sessions that predate the title_state column without renaming them', async () => {
+    const named = session()
+    const untouched = session()
+    store.renameConversation(named, 'Chosen by hand')
+    store.autoTitleConversation(untouched, { title: 'Named by Orbit', kind: 'substantive' })
+    // Simulate rows written before the column existed.
+    db.run('UPDATE conversations SET title_state = ?', ['default'])
+    db.close()
+
+    db = new OrbitDatabase({ dataDir: dir })
+    await db.init()
+    store = new OrbitStore(db)
+
+    // A hand-named session stays the user's; one Orbit already named is
+    // settled. Neither becomes a candidate for renaming again.
+    expect(store.titleState(named)).toBe('manual')
+    expect(store.titleState(untouched)).toBe('substantive')
+    expect(store.autoTitleConversation(named, { title: 'New', kind: 'substantive' })).toBeNull()
+    expect(store.autoTitleConversation(untouched, { title: 'New', kind: 'substantive' })).toBeNull()
   })
 })
