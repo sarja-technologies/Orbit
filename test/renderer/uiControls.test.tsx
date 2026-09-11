@@ -45,7 +45,7 @@ describe('project and working-folder control', () => {
         conversation={conversation()}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={vi.fn()}
+        onUseProjectFolder={vi.fn()} projects={[]} onAssignProject={vi.fn()}
       />
     )
     const trigger = screen.getByLabelText('Project and working folder')
@@ -63,7 +63,7 @@ describe('project and working-folder control', () => {
         conversation={conversation({ workingDirectory: null })}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={vi.fn()}
+        onUseProjectFolder={vi.fn()} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByLabelText('Project and working folder'))
@@ -80,7 +80,7 @@ describe('project and working-folder control', () => {
         conversation={conversation({ workingDirectory: '/Users/dev/Projects/other' })}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={vi.fn()}
+        onUseProjectFolder={vi.fn()} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByLabelText('Project and working folder'))
@@ -98,7 +98,7 @@ describe('project and working-folder control', () => {
         conversation={conversation()}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={vi.fn()}
+        onUseProjectFolder={vi.fn()} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByLabelText('Project and working folder'))
@@ -114,7 +114,7 @@ describe('project and working-folder control', () => {
         conversation={conversation()}
         disabled={false}
         onChooseProjectFolder={onChooseProjectFolder}
-        onUseProjectFolder={vi.fn()}
+        onUseProjectFolder={vi.fn()} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByLabelText('Project and working folder'))
@@ -131,7 +131,7 @@ describe('project and working-folder control', () => {
         conversation={conversation({ workingDirectory: null })}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={onUseProjectFolder}
+        onUseProjectFolder={onUseProjectFolder} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByLabelText('Project and working folder'))
@@ -143,7 +143,7 @@ describe('project and working-folder control', () => {
         conversation={conversation({ workingDirectory: '/Users/dev/elsewhere' })}
         disabled={false}
         onChooseProjectFolder={vi.fn()}
-        onUseProjectFolder={onUseProjectFolder}
+        onUseProjectFolder={onUseProjectFolder} projects={[]} onAssignProject={vi.fn()}
       />
     )
     await user.click(screen.getByRole('button', { name: /Use the project’s folder/ }))

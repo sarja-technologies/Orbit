@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   detectGenericInteraction,
   extractResponseText,
+  findPromptEcho,
   progressiveAppendIndex,
   isBusy,
   isReadyForInput,
@@ -462,5 +463,108 @@ describe('extractResponseText against real captured agy 1.2.0 screens', () => {
     // by agy exactly as prose is, with no marker above it.
     const screen = ['> name three habits', '', '  Prioritizing Deep Work Matters', '', '  Here are three habits that help.', WIDE, '>', WIDE, '? for shortcuts']
     expect(extractResponseText(screen, { prompt: 'name three habits' })).toBe('Prioritizing Deep Work Matters\n\nHere are three habits that help.')
+  })
+})
+
+/** The user's own prompt, echoed by agy, must never be read back as the
+ *  answer. Screens copied from agy 1.2.x on this machine. */
+describe('a multiline prompt echo is consumed whole', () => {
+  const WIDE = '─'.repeat(120)
+  const NARROW = '─'.repeat(60)
+  const PROMPT = 'Create a file called hello.txt containing exactly:\n\nHello from Orbit.\n\nThen verify the file exists and read its contents back to me.'
+
+  /** Verbatim shape of how agy echoes that prompt: the first row carries
+   *  the `>` marker, the rest is indented two columns exactly like assistant
+   *  prose, and the prompt's own blank lines appear as blank rows inside
+   *  the echo block. */
+  const screen = [
+    NARROW,
+    '> Create a file called hello.txt containing exactly:',
+    '  ',
+    '  Hello from Orbit.',
+    '  ',
+    '  Then verify the file exists and read its contents back to me.',
+    '',
+    '● Edit(/tmp/ws/hello.txt)',
+    '● Read(/tmp/ws/hello.txt) (ctrl+o to expand)',
+    '',
+    '  The file hello.txt has been created and verified.',
+    '⣯  Generating...',
+    WIDE,
+    '>',
+    WIDE,
+    'esc to cancel'
+  ]
+
+  it('returns only the answer, never any part of the prompt', () => {
+    const result = extractResponseText(screen, { prompt: PROMPT })
+
+    expect(result).toBe('The file hello.txt has been created and verified.')
+    // The exact regression: these are the user's own words.
+    expect(result).not.toContain('Hello from Orbit.')
+    expect(result).not.toContain('Then verify the file exists')
+    expect(result).not.toContain('Create a file called hello.txt')
+  })
+
+  it('is not fooled by the blank lines inside the prompt', () => {
+    // Stopping at the first blank row was the bug: everything after it was
+    // handed to the extractor as if agy had said it.
+    const echo = findPromptEcho(screen, PROMPT)
+    expect(echo).not.toBeNull()
+    expect(screen[echo!.bodyStart - 1]).toBe('  Then verify the file exists and read its contents back to me.')
+  })
+
+  it('consumes a prompt that both wraps and contains blank lines', () => {
+    const long =
+      'Refactor the payment service so retries are idempotent and the webhook worker stops double charging customers.\n\nThen add a regression test for it.'
+    const wrapped = [
+      '> Refactor the payment service so retries are idempotent and the webhook worker stops double charging',
+      '  customers.',
+      '  ',
+      '  Then add a regression test for it.',
+      '',
+      '  Done — retries are keyed on the event id now.',
+      WIDE,
+      '>',
+      WIDE,
+      '? for shortcuts'
+    ]
+
+    expect(extractResponseText(wrapped, { prompt: long })).toBe('Done — retries are keyed on the event id now.')
+  })
+
+  it('keeps a prompt that contains a fenced code block out of the answer', () => {
+    const withCode = 'Explain this:\n\n```js\nconst x = 1\n```\n\nWhat does it do?'
+    const lines = [
+      '> Explain this:',
+      '  ',
+      '  ```js',
+      '  const x = 1',
+      '  ```',
+      '  ',
+      '  What does it do?',
+      '',
+      '  It declares a constant.',
+      WIDE,
+      '>',
+      WIDE,
+      '? for shortcuts'
+    ]
+
+    expect(extractResponseText(lines, { prompt: withCode })).toBe('It declares a constant.')
+  })
+
+  it('still keeps a legitimate first line of the answer', () => {
+    const lines = [
+      '> hi',
+      '',
+      '  Hello from Orbit is a phrase I can explain.',
+      WIDE,
+      '>',
+      WIDE,
+      '? for shortcuts'
+    ]
+    // Same words as the prompt above, but this time agy really said them.
+    expect(extractResponseText(lines, { prompt: 'hi' })).toBe('Hello from Orbit is a phrase I can explain.')
   })
 })

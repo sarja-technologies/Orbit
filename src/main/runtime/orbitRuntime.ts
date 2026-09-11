@@ -115,6 +115,37 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.openProjectSnapshot(projectId)
   }
 
+  /** The Unsorted workspace — sessions that belong to no project. */
+  openUnsorted(): ProjectSnapshot {
+    return this.store.openUnsortedSnapshot()
+  }
+
+  listUnsortedConversations(): Conversation[] {
+    return this.store.listUnsortedConversations()
+  }
+
+  /** Files an Unsorted session into a project without recreating it.
+   *
+   *  A session with no folder of its own would otherwise *inherit* the
+   *  project's the moment it joined — so the next turn would run in the
+   *  user's real work, with a scratch history behind it and files it had
+   *  already written left somewhere else entirely. Before the move, a
+   *  session that has genuinely used its Orbit workspace has that path
+   *  pinned as its own working directory, so it keeps running exactly where
+   *  its files are. Nothing is copied, moved or deleted, and the project's
+   *  folder is not touched.
+   *
+   *  Pointing the session at the project's folder stays available, and
+   *  deliberately separate: it is the user's decision, made explicitly. */
+  assignConversationToProject(conversationId: ID, projectId: ID): Conversation {
+    const conversation = this.store.requireConversation(conversationId)
+    if (!conversation.workingDirectory) {
+      const workspace = this.sessionWorkspaceRoot(conversation.id)
+      if (isDirectory(workspace)) this.store.setConversationWorkingDirectory(conversation.id, workspace)
+    }
+    return this.store.assignConversationToProject(conversationId, projectId)
+  }
+
   /** New sessions open on Orbit's own default model, concretely — never on
    *  a placeholder that leaves agy to choose. The reasoning level is the one
    *  the user last chose (medium until they ever choose one), mapped onto
@@ -125,7 +156,7 @@ export class OrbitRuntime extends EventEmitter {
    *  `New Session` and names itself from the first prompt — see
    *  sessionTitle.ts) and no folder of its own (null means it inherits the
    *  project's, which is what resolveWorkspacePath already does). */
-  createConversation(projectId: ID, title = DEFAULT_SESSION_TITLE, workingDirectory: string | null = null): Conversation {
+  createConversation(projectId: ID | null, title = DEFAULT_SESSION_TITLE, workingDirectory: string | null = null): Conversation {
     const preferences = this.store.readPreferences()
     // The user's chosen defaults, resolved against the real catalogue —
     // never a stale saved id, and never "let agy decide". Applied at
@@ -174,14 +205,19 @@ export class OrbitRuntime extends EventEmitter {
   }
 
   async sendMessage(input: SendMessageInput): Promise<Run> {
-    const project = this.store.getProject(input.projectId)
-    if (!project) throw new Error('Project not found.')
+    // The conversation owns the turn. A caller may still name the project it
+    // believes the session is in, and disagreeing with the session's own
+    // record is a real error — but an Unsorted session simply has none.
     const conversation = this.store.requireConversation(input.conversationId)
-    if (conversation.projectId !== project.id) throw new Error('Conversation does not belong to this project.')
+    const project = conversation.projectId ? this.store.getProject(conversation.projectId) : null
+    if (conversation.projectId && !project) throw new Error('Project not found.')
+    if (input.projectId && input.projectId !== conversation.projectId) {
+      throw new Error('Conversation does not belong to this project.')
+    }
     if (!input.content.trim()) throw new Error('Message cannot be empty.')
 
     this.store.createMessage({
-      projectId: project.id,
+      projectId: conversation.projectId,
       conversationId: conversation.id,
       runId: null,
       role: 'user',
@@ -190,7 +226,7 @@ export class OrbitRuntime extends EventEmitter {
     })
     this.nameSessionFromPrompt(conversation.id, input.content)
     const run = this.store.createRun({
-      projectId: project.id,
+      projectId: conversation.projectId,
       conversationId: conversation.id,
       metadata: {
         attachmentFileIds: input.attachmentFileIds ?? [],
@@ -200,13 +236,20 @@ export class OrbitRuntime extends EventEmitter {
     this.activeRuns.set(run.id, { text: '' })
 
     const workspacePath = this.resolveWorkspacePath(project, conversation)
-    const saveDir = path.join(this.dataDir, 'projects', project.id, 'agy-save')
+    // An Unsorted session keeps its own save directory beside its workspace,
+    // so nothing it produces lands in a project it does not belong to.
+    const saveDir = project
+      ? path.join(this.dataDir, 'projects', project.id, 'agy-save')
+      : path.join(this.sessionWorkspaceRoot(conversation.id), '.agy-save')
+    // Both are project-scoped by definition, so an Unsorted session has
+    // none: the filters below simply come out empty rather than being
+    // special-cased.
     const attachments = (input.attachmentFileIds ?? [])
       .map((fileId) => this.store.getProjectFile(fileId))
-      .filter((file): file is ProjectFile => file !== null && file.projectId === project.id)
+      .filter((file): file is ProjectFile => file !== null && file.projectId === conversation.projectId)
     const referencedArtifacts = (input.referencedArtifactIds ?? [])
       .map((artifactId) => this.store.getArtifact(artifactId))
-      .filter((artifact): artifact is Artifact => artifact !== null && artifact.projectId === project.id)
+      .filter((artifact): artifact is Artifact => artifact !== null && artifact.projectId === conversation.projectId)
       .map((artifact) => ({ id: artifact.id, name: artifact.name, location: artifact.location, mimeType: artifact.mimeType }))
 
     // Capability escalation, decided BEFORE delivery rather than discovered
@@ -225,7 +268,7 @@ export class OrbitRuntime extends EventEmitter {
     void this.provider
       .sendMessage(
         {
-          projectId: project.id,
+          projectId: conversation.projectId,
           conversationId: conversation.id,
           runId: run.id,
           prompt: buildPrompt(input.content, referencedArtifacts, attachments, transport),
@@ -245,7 +288,7 @@ export class OrbitRuntime extends EventEmitter {
         const runtimeError = normalizeError(error)
         const failed: RuntimeEvent = {
           type: 'run.failed',
-          projectId: project.id,
+          projectId: conversation.projectId,
           conversationId: conversation.id,
           runId: run.id,
           providerId: 'antigravity',
@@ -378,11 +421,29 @@ export class OrbitRuntime extends EventEmitter {
    *  project's, else the Orbit-managed workspace that pre-folder projects
    *  have always used. A folder that no longer exists falls back rather
    *  than failing the turn — the user has been told where it is running. */
-  private resolveWorkspacePath(project: Project, conversation: Conversation): string {
-    const managed = path.join(this.dataDir, 'projects', project.id, 'workspace')
-    for (const candidate of [conversation.workingDirectory, project.rootPath]) {
+  /** Where an Unsorted session runs: a real directory of its own under
+   *  Orbit's data, named after the session.
+   *
+   *  Not a temp directory — a session's files have to still be there when
+   *  the user comes back to it, and /tmp is cleared out from under them.
+   *  It lives for as long as the session's history does. */
+  private sessionWorkspaceRoot(conversationId: ID): string {
+    return path.join(this.dataDir, 'workspaces', conversationId)
+  }
+
+  private resolveWorkspacePath(project: Project | null, conversation: Conversation): string {
+    // The session's own folder wins, then the project's; both must really
+    // exist before agy is pointed at them.
+    for (const candidate of [conversation.workingDirectory, project?.rootPath ?? null]) {
       if (candidate && path.isAbsolute(candidate) && isDirectory(candidate)) return candidate
     }
+    // Nothing was chosen. A session in a project falls back to the workspace
+    // Orbit manages for that project; one with no project gets its own, so
+    // it can be used immediately without choosing a folder first.
+    const managed = project
+      ? path.join(this.dataDir, 'projects', project.id, 'workspace')
+      : this.sessionWorkspaceRoot(conversation.id)
+    fs.mkdirSync(managed, { recursive: true })
     return managed
   }
 
@@ -422,7 +483,7 @@ export class OrbitRuntime extends EventEmitter {
     if (event.type === 'interaction.resolved' && event.outcome !== 'cancelled' && run.state === 'waiting_for_interaction') {
       this.store.updateRunState(event.runId, 'running')
     }
-    if (event.type === 'artifact.discovered') {
+    if (event.type === 'artifact.discovered' && event.projectId) {
       try {
         const artifact = this.artifactService.registerProviderArtifact({
           projectId: event.projectId,

@@ -19,6 +19,7 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { ProviderSendInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { extractResponseText, progressiveAppendIndex, promptHasBeenSubmitted } from '@main/terminal/TerminalInteractionDetector'
+import type { PermissionMode } from '@shared/permissionMode'
 import { readScreenActivity } from '@main/terminal/TerminalActivityReader'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
@@ -214,6 +215,11 @@ export class AntigravityPtySession {
   /** The `--model`/`--effort` flags the live transport was launched with, so
    *  a later selection change is detectable. */
   private spawnedInvocation = ''
+  /** The permission mode the live process was actually launched with.
+   *  Tracked separately from the whole invocation string so a deferred
+   *  mismatch can say which of the two changed — and so Orbit never
+   *  displays one permission mode while agy is running under another. */
+  private spawnedPermissionMode: PermissionMode | null = null
 
   send(input: ProviderSendInput, onEvent: (event: RuntimeEvent) => void): void {
     // Checked before everything else: a closed conversation should say so
@@ -267,12 +273,27 @@ export class AntigravityPtySession {
         // is re-evaluated — and acted on — on the next turn.
         this.state = 'running'
         this.emit({ type: 'run.started', nativeConversationId: this.nativeConversationId })
-        this.emit({
-          type: 'run.notice',
-          code: 'model.deferred',
-          message:
-            'Antigravity is still using the model this session started with. A new model can only be applied once this conversation can be resumed, which takes one more turn — it will apply automatically from the next message.'
-        })
+        // Say which setting is actually being deferred. A permission mode
+        // that cannot be applied yet matters more than a model that cannot:
+        // the user picked "Skip approvals" and this turn is still going to
+        // run under the mode the process was launched with, so the notice
+        // has to state that rather than letting the composer's label stand
+        // unchallenged.
+        const permissionDeferred = this.spawnedPermissionMode !== null && this.spawnedPermissionMode !== input.permissionMode
+        this.emit(
+          permissionDeferred
+            ? {
+                type: 'run.notice',
+                code: 'permission.deferred',
+                message: `This turn still runs under the permission mode this session started with (${this.spawnedPermissionMode === 'skip' ? 'Skip approvals' : 'Ask first'}). Antigravity applies a permission change only when the conversation can be resumed, which takes one more turn — it will apply automatically from the next message.`
+              }
+            : {
+                type: 'run.notice',
+                code: 'model.deferred',
+                message:
+                  'Antigravity is still using the model this session started with. A new model can only be applied once this conversation can be resumed, which takes one more turn — it will apply automatically from the next message.'
+              }
+        )
         void this.deliverPrompt(input.prompt, images)
         return
       }
@@ -439,6 +460,7 @@ export class AntigravityPtySession {
     // process reaches its first ready-for-input transition (bootstrap).
     const args = ['--add-dir', input.workspacePath, ...(this.deps.invocationArgs?.(input) ?? [])]
     this.spawnedInvocation = invocation
+    this.spawnedPermissionMode = input.permissionMode
     if (this.nativeConversationId) args.push('--conversation', this.nativeConversationId)
     for (const dir of unique(input.attachments.map((file) => dirname(file.storedPath)))) args.push('--add-dir', dir)
 

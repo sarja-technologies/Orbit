@@ -108,6 +108,7 @@ export function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [modelStatus, setModelStatus] = useState<ResolvedDefaultModel | null>(null)
   const [clearing, setClearing] = useState(false)
+  const [unsorted, setUnsorted] = useState<Conversation[]>([])
   const [startupError, setStartupError] = useState<{ message: string; detail?: string | undefined } | null>(null)
   const dragDepth = useRef(0)
   const composerFocusRef = useRef<(() => void) | null>(null)
@@ -133,7 +134,9 @@ export function App(): JSX.Element {
   const projects = useMemo(() => tree.map((group) => group.project), [tree])
   const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
   const activeGroup = tree.find((group) => group.project.id === workspace.activeProjectId) ?? null
-  const conversations = activeGroup?.conversations ?? []
+  // No active project is the Unsorted workspace, whose sessions live in
+  // their own list rather than under any project group.
+  const conversations = workspace.activeProjectId === null ? unsorted : (activeGroup?.conversations ?? [])
   const activeConversation = conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
   // Who is actually working: the session's own model, resolved against the
@@ -243,6 +246,12 @@ export function App(): JSX.Element {
   // where its fresh session goes; the conversation id is kept as a record of
   // position and deliberately does not reopen anything. Written only when it
   // actually changes, and only once a real session is open.
+  /** Session settings are launch flags: the turn agy runs is decided by
+   *  what is persisted, not by what the composer is showing. Every write
+   *  chains onto this, and Send waits on it, so the selected state and the
+   *  state the runtime launches with can never disagree. */
+  const sessionSettingsRef = useRef<Promise<unknown>>(Promise.resolve())
+
   const lastActiveRef = useRef<string>('')
   useEffect(() => {
     const projectId = workspace.activeProjectId
@@ -274,26 +283,27 @@ export function App(): JSX.Element {
       .list()
       .then(setModels)
       .catch(() => setModels([]))
-    // Every launch opens on one brand-new session, never on whatever
-    // conversation happened to be open last time. The main process decides
-    // and creates it — see startupSession.ts — because it is the only place
+    // Every launch opens on one brand-new Unsorted session, never on
+    // whatever conversation happened to be open last time and never inside
+    // whichever project happened to be last. The main process decides and
+    // creates it — see startupSession.ts — because it is the only place
     // that knows an *application launch* from a renderer remount, an HMR
     // reload or a bridge reconnect. Asking again here is therefore safe:
     // it returns the same session rather than making a second one.
-    // `lastActiveProjectId` still matters, but only to choose which project
-    // the fresh session belongs to. Old conversations stay in the sidebar,
-    // untouched and selectable.
+    // Projects and their sessions stay in the sidebar, untouched.
     const startup = await orbit.startup.session().catch(() => null)
     if (startup) {
-      setExpandedProjectIds((current) => (current.includes(startup.projectId) ? current : [...current, startup.projectId]))
-      await openProject(startup.projectId, startup.conversationId)
+      if (startup.projectId) {
+        const projectId = startup.projectId
+        setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]))
+      }
+      await openWorkspace(startup.projectId, startup.conversationId)
       setFocusPendingId(startup.conversationId)
       return
     }
-    // No session to open on. Either this is first run and there is no
-    // project to hold one (the create-project state below is correct), or
-    // creating it failed — in which case the project still opens, on its
-    // own most recent session, but never on a restored `lastActive` one.
+    // The launch session could not be created. Fall back to opening a
+    // project, on its own most recent session — never on a restored
+    // `lastActive` one.
     const remembered = groups.find((group) => group.project.id === storedPreferences.lastActiveProjectId)?.project
     const target = remembered ?? groups[0]?.project
     if (!target) return
@@ -301,11 +311,24 @@ export function App(): JSX.Element {
     await openProject(target.id)
   }
 
-  async function openProject(projectId: ID, preferredConversationId?: ID | null): Promise<void> {
+  /** Opens a workspace: a project, or — with null — the Unsorted one.
+   *  Both come back as the same snapshot shape, so everything downstream
+   *  treats "no project" as an ordinary state rather than a missing one. */
+  async function openWorkspace(projectId: ID | null, preferredConversationId?: ID | null): Promise<void> {
     const orbit = requireOrbitApi()
-    const [snapshot, groups] = await Promise.all([orbit.projects.open(projectId), orbit.projects.tree()])
+    const [snapshot, groups, unsortedSessions] = await Promise.all([
+      projectId ? orbit.projects.open(projectId) : orbit.projects.openUnsorted(),
+      orbit.projects.tree(),
+      orbit.conversations.listUnsorted()
+    ])
     setTree(groups)
-    setWorkspace(fromSnapshot(snapshot, preferredConversationId ?? workspaceConversationFor(groups, projectId, preferredConversationId)))
+    setUnsorted(unsortedSessions)
+    setWorkspace(
+      fromSnapshot(
+        snapshot,
+        preferredConversationId ?? (projectId ? workspaceConversationFor(groups, projectId, preferredConversationId) : null)
+      )
+    )
     setSelectedArtifactId((current) => current ?? snapshot.artifacts[0]?.id ?? null)
     // Live per-run state belongs to the project that is open. Anything for
     // a run this project does not contain is another project's — dropping
@@ -316,9 +339,11 @@ export function App(): JSX.Element {
     setActivityByRun((current) => pruneActivity(current, [...snapshot.runs.map((run) => run.id), ...Object.values(runningRunByConversationRef.current)]))
   }
 
+  const openProject = openWorkspace
+
   async function refreshProject(preferred?: ID | null): Promise<void> {
-    if (!workspace.activeProjectId) return
-    await openProject(workspace.activeProjectId, preferred ?? workspace.activeConversationId)
+    // No project id is the Unsorted workspace, which still refreshes.
+    await openWorkspace(workspace.activeProjectId, preferred ?? workspace.activeConversationId)
   }
 
   function flushRuntimeEventBatch(batch: RuntimeEventBatch): void {
@@ -349,7 +374,7 @@ export function App(): JSX.Element {
   /** Reloads the project, then — and only then — retires the run's live
    *  state, so the streamed reply stays on screen until the stored
    *  assistant message has taken over from it. */
-  async function refreshAfterRun(projectId: ID, conversationId: ID, runId: ID): Promise<void> {
+  async function refreshAfterRun(projectId: ID | null, conversationId: ID, runId: ID): Promise<void> {
     try {
       await openProject(projectId, conversationId)
     } finally {
@@ -416,7 +441,7 @@ export function App(): JSX.Element {
     }
     if (event.type === 'artifact.produced') {
       setSelectedArtifactId(event.artifact.id)
-      void openProject(event.projectId, event.conversationId)
+      void openWorkspace(event.projectId, event.conversationId)
     }
     if (event.type === 'run.notice') setNotice(event.message)
     if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
@@ -467,12 +492,15 @@ export function App(): JSX.Element {
    *  (no workingDirectory means exactly that), and is called `New Session`
    *  until its first prompt names it. It is then opened and handed the
    *  composer so the user can just start typing. */
-  async function createSession(projectId: ID): Promise<void> {
+  /** One click, one session. Null means Unsorted — a session that belongs
+   *  to no project and can be typed into immediately; a project id puts it
+   *  in that project, which is what a project's own + does. */
+  async function createSession(projectId: ID | null): Promise<void> {
     const orbit = requireOrbitApi()
     try {
       const conversation = await orbit.conversations.create({ projectId })
-      setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]))
-      await openProject(projectId, conversation.id)
+      if (projectId) setExpandedProjectIds((current) => (current.includes(projectId) ? current : [...current, projectId]))
+      await openWorkspace(projectId, conversation.id)
       setFocusPendingId(conversation.id)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That session could not be created.')
@@ -511,6 +539,21 @@ export function App(): JSX.Element {
     }
   }
 
+  /** Files the open Unsorted session into a project. The same session
+   *  moves — its transcript, its native conversation id and every setting
+   *  come with it — and its working directory is deliberately left alone,
+   *  so nothing it has already written is relocated or overwritten. */
+  async function assignSessionToProject(projectId: ID): Promise<void> {
+    if (!activeConversation) return
+    const conversationId = activeConversation.id
+    try {
+      await requireOrbitApi().conversations.assignProject({ conversationId, projectId })
+      await openWorkspace(projectId, conversationId)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'That session could not be added to the project.')
+    }
+  }
+
   async function renameSession(conversationId: ID, title: string): Promise<void> {
     await requireOrbitApi().conversations.rename({ conversationId, title })
     await refreshProject()
@@ -522,17 +565,28 @@ export function App(): JSX.Element {
     await refreshProject(remaining[0]?.id ?? null)
   }
 
-  async function selectSession(projectId: ID, conversationId: ID): Promise<void> {
+  async function selectSession(projectId: ID | null, conversationId: ID): Promise<void> {
     if (projectId === workspace.activeProjectId) {
       setWorkspace((current) => ({ ...current, activeConversationId: conversationId }))
       return
     }
-    await openProject(projectId, conversationId)
+    await openWorkspace(projectId, conversationId)
   }
 
   async function send(): Promise<void> {
-    if (!workspace.activeProjectId || !activeConversation) return
+    // A session is all that is needed. An Unsorted one has no project and
+    // must still send: picking a project is a later decision, not a
+    // precondition for using Orbit.
+    if (!activeConversation) return
     if (!composer.trim() && attachments.length === 0) return
+    // The composer shows a session's settings the moment they are chosen,
+    // but the runtime reads them back from the database when it launches the
+    // turn. Between those two points the displayed mode and the mode agy is
+    // actually started with can disagree — pick "Skip approvals" and press
+    // Send quickly enough and the turn used to go out under Ask first.
+    // Waiting on the writes already in flight closes that window without
+    // adding a delay: when nothing is pending this resolves immediately.
+    await settledSessionSettings()
     const content = composer.trim() || 'See the attached files.'
     const fileIds = attachments.map((attachment) => attachment.fileId)
 
@@ -575,7 +629,7 @@ export function App(): JSX.Element {
       }))
     )
     try {
-      await requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort })
+      await trackSessionSetting(() => requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort }))
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That model could not be selected.')
       await refreshProject()
@@ -608,6 +662,18 @@ export function App(): JSX.Element {
 
   /** Writes preferences through in one place, so every caller updates the
    *  same object rather than racing with a stale copy of it. */
+  function trackSessionSetting<T>(write: () => Promise<T>): Promise<T> {
+    const next = sessionSettingsRef.current.then(write, write)
+    // Swallowed here only so one failed write cannot reject every later
+    // wait; the caller still sees its own rejection.
+    sessionSettingsRef.current = next.catch(() => undefined)
+    return next
+  }
+
+  function settledSessionSettings(): Promise<unknown> {
+    return sessionSettingsRef.current
+  }
+
   function savePreferences(next: OrbitPreferences): void {
     setPreferences(next)
     void requireOrbitApi()
@@ -637,7 +703,9 @@ export function App(): JSX.Element {
       }))
     )
     try {
-      await requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })
+      await trackSessionSetting(() =>
+        requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })
+      )
       await refreshProject()
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That permission mode could not be applied.')
@@ -821,6 +889,7 @@ export function App(): JSX.Element {
       <ProjectSidebar
         onOpenSettings={() => void openSettings()}
         groups={tree}
+        unsorted={unsorted}
         activeProjectId={workspace.activeProjectId}
         activeConversationId={workspace.activeConversationId}
         expandedProjectIds={expandedProjectIds}
@@ -911,6 +980,8 @@ export function App(): JSX.Element {
                 onSelectPermissionMode={(mode) => void selectPermissionMode(mode)}
                 onChooseProjectFolder={() => void chooseProjectFolder()}
                 onUseProjectFolder={() => void useProjectFolder()}
+                projects={tree.map((group) => group.project)}
+                onAssignProject={(projectId) => void assignSessionToProject(projectId)}
                 registerFocus={(focus) => {
                   composerFocusRef.current = focus
                 }}
@@ -1030,7 +1101,8 @@ function workspaceConversationFor(groups: ProjectGroup[], projectId: ID, preferr
 
 function fromSnapshot(snapshot: ProjectSnapshot, activeConversationId: ID | null): WorkspaceState {
   return {
-    activeProjectId: snapshot.project.id,
+    // Null is the Unsorted workspace, not a missing project.
+    activeProjectId: snapshot.project?.id ?? null,
     activeConversationId:
       activeConversationId && snapshot.conversations.some((conversation) => conversation.id === activeConversationId)
         ? activeConversationId

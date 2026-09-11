@@ -868,3 +868,54 @@ describe('listModels', () => {
     expect(models[2]?.supportedReasoningEfforts).toBeUndefined()
   })
 })
+
+describe('a permission change on a live pty session', () => {
+  it('retires the process so the new mode is actually the one agy launches with', async () => {
+    // Sticky PTY ownership must not outlive the flags it was spawned with:
+    // a process started under Ask first is still in request-review, so
+    // reusing it while the composer says Skip approvals would run the turn
+    // under semantics the user did not choose.
+    const { instance, spawns, transports } = ptyHarness(conversationIdFromSecondTurn())
+
+    await instance.sendMessage(input({ transport: 'pty', permissionMode: 'ask' }), () => undefined)
+    await settleTurn(transports[0]!)
+    // A second settled prompt is what gives agy a resumable conversation id.
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', permissionMode: 'ask' }), () => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await settleTurn(transports[0]!)
+    expect(spawns).toHaveLength(1)
+    expect(spawns[0]).not.toContain('--dangerously-skip-permissions')
+
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_3', permissionMode: 'skip' }), () => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    transports[0]!.exit(0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // A replacement process, launched with the real bypass flag, resuming
+    // the same conversation rather than starting it over.
+    expect(spawns).toHaveLength(2)
+    expect(spawns[1]).toContain('--dangerously-skip-permissions')
+    expect(spawns[1]).toContain('--conversation')
+    expect(transports[0]!.killCalls).toBeGreaterThan(0)
+  })
+
+  it('says which setting is deferred when the conversation cannot be resumed yet', async () => {
+    const { instance, spawns, transports } = ptyHarness(() => null)
+    const events: RuntimeEvent[] = []
+
+    await instance.sendMessage(input({ transport: 'pty', permissionMode: 'ask' }), () => undefined)
+    await settleTurn(transports[0]!)
+
+    await instance.sendMessage(input({ transport: 'pty', runId: 'run_2', permissionMode: 'skip' }), (event) => events.push(event))
+    await new Promise((resolve) => setTimeout(resolve, 120))
+
+    // The turn still runs on the process that exists, but the user is told
+    // it is running under the old permission mode — the composer's label
+    // must never be the only thing describing the turn.
+    expect(spawns).toHaveLength(1)
+    const notice = events.find((event) => event.type === 'run.notice')
+    expect(notice).toBeDefined()
+    expect((notice as { code: string }).code).toBe('permission.deferred')
+    expect((notice as { message: string }).message).toMatch(/Ask first/)
+  })
+})

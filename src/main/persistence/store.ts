@@ -104,7 +104,7 @@ export class OrbitStore {
   }
 
   createConversation(
-    projectId: ID,
+    projectId: ID | null,
     title: string,
     options: {
       providerId?: ProviderId
@@ -114,7 +114,7 @@ export class OrbitStore {
       permissionMode?: PermissionMode
     } = {}
   ): Conversation {
-    this.assertProject(projectId)
+    if (projectId) this.assertProject(projectId)
     const now = nowIso()
     const conversation: Conversation = {
       id: createId('conversation'),
@@ -301,6 +301,56 @@ export class OrbitStore {
     return this.db.query('SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC', [projectId], mapConversation)
   }
 
+  /** Sessions that belong to no project. Their own group in the sidebar,
+   *  ordered by recency like a project's are. */
+  listUnsortedConversations(): Conversation[] {
+    return this.db.query('SELECT * FROM conversations WHERE project_id IS NULL ORDER BY updated_at DESC', [], mapConversation)
+  }
+
+  /** The Unsorted workspace: every session with no project, and the
+   *  messages and runs those sessions produced. There is no project behind
+   *  it, and no project-scoped material (files, artifacts, references)
+   *  either — those belong to a project by definition. */
+  openUnsortedSnapshot(): ProjectSnapshot {
+    const conversations = this.listUnsortedConversations()
+    return {
+      project: null,
+      conversations,
+      messages: this.db.query('SELECT * FROM messages WHERE project_id IS NULL ORDER BY sequence ASC', [], mapMessage),
+      runs: this.db.query('SELECT * FROM runs WHERE project_id IS NULL ORDER BY started_at ASC', [], mapRun),
+      artifacts: [],
+      artifactVersions: [],
+      projectFiles: [],
+      references: []
+    }
+  }
+
+  /** Moves a session into a project, in place.
+   *
+   *  The same conversation row, so nothing it carries is lost: its
+   *  transcript, its native conversation id, its model, its reasoning tier,
+   *  its permission mode and its title all stay exactly as they were. Its
+   *  messages and runs move with it so the project's own views find them.
+   *
+   *  `workingDirectory` is deliberately untouched. A session that has been
+   *  running in Orbit's managed workspace keeps running there, because the
+   *  files it already made live there — adopting the project's folder
+   *  silently would point the next turn at the user's real work with a
+   *  half-finished scratch history behind it. Choosing the project's folder
+   *  stays an explicit, separate act. */
+  assignConversationToProject(conversationId: ID, projectId: ID): Conversation {
+    this.assertProject(projectId)
+    const conversation = this.requireConversation(conversationId)
+    if (conversation.projectId === projectId) return conversation
+    const updatedAt = nowIso()
+    this.db.run('UPDATE conversations SET project_id = ?, updated_at = ? WHERE id = ?', [projectId, updatedAt, conversationId])
+    this.db.run('UPDATE messages SET project_id = ? WHERE conversation_id = ?', [projectId, conversationId])
+    this.db.run('UPDATE runs SET project_id = ? WHERE conversation_id = ?', [projectId, conversationId])
+    this.touchProject(projectId)
+    this.touchProject(conversation.projectId)
+    return { ...conversation, projectId, updatedAt }
+  }
+
   getConversation(conversationId: ID): Conversation | null {
     return this.db.get('SELECT * FROM conversations WHERE id = ?', [conversationId], mapConversation)
   }
@@ -312,7 +362,7 @@ export class OrbitStore {
   }
 
   createMessage(input: {
-    projectId: ID
+    projectId: ID | null
     conversationId: ID
     runId: ID | null
     role: MessageRole
@@ -357,7 +407,7 @@ export class OrbitStore {
     return this.db.query('SELECT * FROM messages WHERE project_id = ? ORDER BY conversation_id, sequence ASC', [projectId], mapMessage)
   }
 
-  createRun(input: { projectId: ID; conversationId: ID; providerId?: ProviderId; metadata?: Record<string, unknown> }): Run {
+  createRun(input: { projectId: ID | null; conversationId: ID; providerId?: ProviderId; metadata?: Record<string, unknown> }): Run {
     const now = nowIso()
     const run: Run = {
       id: createId('run'),
@@ -621,7 +671,11 @@ export class OrbitStore {
     if (!this.getProject(projectId)) throw new Error(`Project not found: ${projectId}`)
   }
 
-  private touchProject(projectId: ID): void {
+  /** Bumps a project's recency. Takes null so every caller that works on a
+   *  session can call it unconditionally — an Unsorted session has no
+   *  project to touch, which is not an error. */
+  private touchProject(projectId: ID | null): void {
+    if (!projectId) return
     this.db.run('UPDATE projects SET updated_at = ? WHERE id = ?', [nowIso(), projectId])
   }
 
@@ -655,7 +709,7 @@ function mapProject(row: Record<string, unknown>): Project {
 function mapConversation(row: Record<string, unknown>): Conversation {
   return {
     id: text(row, 'id'),
-    projectId: text(row, 'project_id'),
+    projectId: nullableText(row, 'project_id'),
     title: text(row, 'title'),
     providerId: text(row, 'provider_id') as ProviderId,
     nativeConversationId: nullableText(row, 'native_conversation_id'),
@@ -678,7 +732,7 @@ function mapConversation(row: Record<string, unknown>): Conversation {
 function mapMessage(row: Record<string, unknown>): Message {
   return {
     id: text(row, 'id'),
-    projectId: text(row, 'project_id'),
+    projectId: nullableText(row, 'project_id'),
     conversationId: text(row, 'conversation_id'),
     runId: nullableText(row, 'run_id'),
     role: text(row, 'role') as MessageRole,
@@ -693,7 +747,7 @@ function mapMessage(row: Record<string, unknown>): Message {
 function mapRun(row: Record<string, unknown>): Run {
   return {
     id: text(row, 'id'),
-    projectId: text(row, 'project_id'),
+    projectId: nullableText(row, 'project_id'),
     conversationId: text(row, 'conversation_id'),
     providerId: text(row, 'provider_id') as ProviderId,
     state: text(row, 'state') as RunState,

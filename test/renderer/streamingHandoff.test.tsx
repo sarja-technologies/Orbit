@@ -9,6 +9,21 @@ import type { RunEventListener, RuntimeEvent } from '../../src/shared/runtime-ev
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 
+/** The Unsorted workspace: no project behind it, and only the sessions that
+ *  belong to none. */
+const EMPTY_UNSORTED_SNAPSHOT: ProjectSnapshot = {
+  project: null,
+  conversations: [],
+  messages: [],
+  runs: [],
+  artifacts: [],
+  artifactVersions: [],
+  projectFiles: [],
+  references: []
+}
+const snapshotForUnsorted = (): ProjectSnapshot => ({ ...EMPTY_UNSORTED_SNAPSHOT })
+
+
 const PROJECT: Project = { id: 'project_1', name: 'Orbit', rootPath: '/home/dev/orbit', createdAt: 'now', updatedAt: 'now' }
 const SESSION: Conversation = {
   id: 'conversation_1',
@@ -109,6 +124,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
           if (releaseOpen) await new Promise<void>((resolve) => { releaseOpen = resolve })
           return snapshot()
         }),
+        openUnsorted: vi.fn(async () => snapshotForUnsorted()),
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn() },
@@ -116,7 +132,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
       // so the app opens the project on its existing one.
       startup: { session: vi.fn(async () => null) },
       preferences: { get: vi.fn(async () => ({ ...EMPTY_PREFERENCES })), set: vi.fn(async (next) => next) },
-      conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
+      conversations: { create: vi.fn(), listUnsorted: vi.fn(async () => []), assignProject: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
       data: { clearAll: vi.fn() },
       defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },

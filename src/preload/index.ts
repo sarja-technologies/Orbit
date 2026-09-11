@@ -14,6 +14,7 @@ const orbitApi: OrbitApi = {
     tree: () => ipcRenderer.invoke(IPC_CHANNELS.projectsTree),
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.projectsCreate, input),
     open: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.projectsOpen, projectId),
+    openUnsorted: () => ipcRenderer.invoke(IPC_CHANNELS.workspaceOpenUnsorted),
     setRoot: (input) => ipcRenderer.invoke(IPC_CHANNELS.projectsSetRoot, input)
   },
   dialog: {
@@ -34,6 +35,8 @@ const orbitApi: OrbitApi = {
   },
   conversations: {
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsCreate, input),
+    listUnsorted: () => ipcRenderer.invoke(IPC_CHANNELS.conversationsListUnsorted),
+    assignProject: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsAssignProject, input),
     rename: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsRename, input),
     delete: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsDelete, input),
     setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input),

@@ -7,37 +7,24 @@ import type { StartupSession } from '@shared/contracts'
 export interface StartupSessionHost {
   listProjectTree(): ProjectGroup[]
   readLastActiveProjectId(): ID | null
-  createConversation(projectId: ID): { id: ID }
+  createConversation(projectId: ID | null): { id: ID }
 }
 
 /** Which project the launch session belongs to.
  *
- *  The user's last project if it is still there, otherwise the most
- *  recently touched one — `listProjectTree` is already ordered by recency,
- *  so the fallback is deterministic rather than arbitrary. Null means there
- *  are genuinely no projects yet, which is first run: Orbit must not invent
- *  a project just because it was launched, so the renderer keeps showing
- *  its create-project state and the project's own first session is made by
- *  the normal create-project path. */
-export function startupProjectFor(groups: ProjectGroup[], lastActiveProjectId: ID | null): ID | null {
-  const remembered = groups.find((group) => group.project.id === lastActiveProjectId)?.project
-  return (remembered ?? groups[0]?.project)?.id ?? null
+ *  None. Orbit opens on an Unsorted session — one that belongs to no
+ *  project at all — so launching it and typing costs nothing: no project to
+ *  pick, no folder to choose. Existing projects and their sessions are
+ *  untouched and a click away in the sidebar, and this session can be filed
+ *  into one later without being recreated.
+ *
+ *  Kept as a function rather than inlined because "where does a launch
+ *  start" is exactly the sort of decision that should be visible and
+ *  testable on its own. */
+export function startupProjectFor(_groups: ProjectGroup[], _lastActiveProjectId: ID | null): ID | null {
+  return null
 }
 
-/** Orbit opens on a brand-new session, once per application launch.
- *
- *  The invariant lives here, in the main process, rather than in a renderer
- *  effect: this object is constructed once per launch, and `ensure()`
- *  memoizes the very first call. Every later caller — a React remount, a
- *  dev-server HMR reload, a reconnecting preload bridge, a second window —
- *  gets that same session back instead of creating another one. Quitting
- *  Orbit tears the main process down, so the next launch starts a new
- *  resolver and therefore a genuinely new session.
- *
- *  The session itself is nothing special: it is made by the same
- *  `createConversation` the New Session control uses, so it inherits every
- *  new-session default (title, concrete model, reasoning tier, permission
- *  mode, transport, folder inheritance, empty native id) automatically. */
 export class StartupSessionResolver {
   private pending: Promise<StartupSession | null> | null = null
 
@@ -54,7 +41,8 @@ export class StartupSessionResolver {
 
   private create(): StartupSession | null {
     const projectId = startupProjectFor(this.host.listProjectTree(), this.host.readLastActiveProjectId())
-    if (!projectId) return null
+    // Unsorted needs no project to exist in, so unlike before there is no
+    // first-run case where a launch cannot produce a session.
     return { projectId, conversationId: this.host.createConversation(projectId).id }
   }
 }

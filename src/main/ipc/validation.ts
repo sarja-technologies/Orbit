@@ -24,7 +24,8 @@ export const setProjectRootSchema = z.object({
 })
 
 export const createConversationSchema = z.object({
-  projectId: idSchema,
+  // Null/absent means Unsorted: a session that belongs to no project.
+  projectId: idSchema.nullish().transform((value) => value ?? null),
   title: z.string().trim().min(1).max(120).optional(),
   workingDirectory: folderPathSchema.nullish()
 })
@@ -62,6 +63,11 @@ export const preferencesSchema = z.object({
  *  dialog and its filters — there is no way to ask for an arbitrary
  *  Electron dialog from here. */
 export const attachmentPickerCategorySchema = z.enum(['image', 'video', 'files'])
+
+export const assignConversationProjectSchema = z.object({
+  conversationId: idSchema,
+  projectId: idSchema
+})
 
 export const clearAllDataSchema = z.object({ confirmation: z.string().max(64) })
 

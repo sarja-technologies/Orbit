@@ -28,7 +28,7 @@ export function EmptySession({ projectName, onPick }: { projectName: string | nu
         ) : null}
         <div className="starters">
           {STARTERS.map((starter) => (
-            <button key={starter.id} type="button" className="starter" onClick={() => onPick(starter)}>
+            <button key={starter.id} type="button" className={`starter starter-${starter.id}`} onClick={() => onPick(starter)}>
               <StarterGlyph id={starter.id} />
               <span>{starter.label}</span>
             </button>

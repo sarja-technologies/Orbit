@@ -53,6 +53,18 @@ export function describeRuntimeError(error: RuntimeErrorInfo): ErrorView {
         category: 'retryable',
         details
       }
+    // Distinct from the above on purpose. This session runs with approvals
+    // skipped, so agy was never going to ask and nothing was withheld for
+    // want of a prompt: it declined the action on its own terms. Telling the
+    // user to grant permission would send them looking for a setting that
+    // would not have changed the outcome.
+    case 'provider.action_restricted':
+      return {
+        title: 'Antigravity would not do that',
+        body: 'Approvals are already skipped for this session, so this was not a permission Orbit could ask you for — Antigravity declined the action itself.',
+        category: 'user-action',
+        details
+      }
     case 'provider.session_busy':
       return {
         title: 'This conversation is already working',
