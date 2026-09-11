@@ -243,6 +243,12 @@ export function App(): JSX.Element {
   // where its fresh session goes; the conversation id is kept as a record of
   // position and deliberately does not reopen anything. Written only when it
   // actually changes, and only once a real session is open.
+  /** Session settings are launch flags: the turn agy runs is decided by
+   *  what is persisted, not by what the composer is showing. Every write
+   *  chains onto this, and Send waits on it, so the selected state and the
+   *  state the runtime launches with can never disagree. */
+  const sessionSettingsRef = useRef<Promise<unknown>>(Promise.resolve())
+
   const lastActiveRef = useRef<string>('')
   useEffect(() => {
     const projectId = workspace.activeProjectId
@@ -533,6 +539,14 @@ export function App(): JSX.Element {
   async function send(): Promise<void> {
     if (!workspace.activeProjectId || !activeConversation) return
     if (!composer.trim() && attachments.length === 0) return
+    // The composer shows a session's settings the moment they are chosen,
+    // but the runtime reads them back from the database when it launches the
+    // turn. Between those two points the displayed mode and the mode agy is
+    // actually started with can disagree — pick "Skip approvals" and press
+    // Send quickly enough and the turn used to go out under Ask first.
+    // Waiting on the writes already in flight closes that window without
+    // adding a delay: when nothing is pending this resolves immediately.
+    await settledSessionSettings()
     const content = composer.trim() || 'See the attached files.'
     const fileIds = attachments.map((attachment) => attachment.fileId)
 
@@ -575,7 +589,7 @@ export function App(): JSX.Element {
       }))
     )
     try {
-      await requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort })
+      await trackSessionSetting(() => requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort }))
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That model could not be selected.')
       await refreshProject()
@@ -608,6 +622,18 @@ export function App(): JSX.Element {
 
   /** Writes preferences through in one place, so every caller updates the
    *  same object rather than racing with a stale copy of it. */
+  function trackSessionSetting<T>(write: () => Promise<T>): Promise<T> {
+    const next = sessionSettingsRef.current.then(write, write)
+    // Swallowed here only so one failed write cannot reject every later
+    // wait; the caller still sees its own rejection.
+    sessionSettingsRef.current = next.catch(() => undefined)
+    return next
+  }
+
+  function settledSessionSettings(): Promise<unknown> {
+    return sessionSettingsRef.current
+  }
+
   function savePreferences(next: OrbitPreferences): void {
     setPreferences(next)
     void requireOrbitApi()
@@ -637,7 +663,9 @@ export function App(): JSX.Element {
       }))
     )
     try {
-      await requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })
+      await trackSessionSetting(() =>
+        requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })
+      )
       await refreshProject()
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'That permission mode could not be applied.')

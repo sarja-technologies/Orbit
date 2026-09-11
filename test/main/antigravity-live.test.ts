@@ -633,6 +633,72 @@ describe('Ask First against the real agy', () => {
   )
 })
 
+/** Skip approvals, end to end through the real runtime and the real agy.
+ *
+ *  The reported bug: a session showing "Skip approvals" ran its tools, then
+ *  told the user Antigravity had "needed permission it could not ask for".
+ *  This proves the whole path — the persisted mode, the transport it picks,
+ *  the flag agy is launched with, the state agy reports back, and that an
+ *  ordinary file-writing turn completes with no approval anywhere. */
+describe('Skip approvals against the real agy', () => {
+  it.runIf(live)(
+    'runs a file-writing turn with no approval, and no permission error',
+    async () => {
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-skip-live-'))
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-skip-data-'))
+      dirs.push(workspace, dataDir)
+
+      const db = new OrbitDatabase({ dataDir })
+      await db.init()
+      const store = new OrbitStore(db)
+      const provider = new AntigravityProvider()
+      const runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dataDir)), provider, dataDir, '0.1.0')
+      await runtime.listModels()
+
+      const events: RuntimeEvent[] = []
+      runtime.on('event', (event: RuntimeEvent) => events.push(event))
+
+      const project = runtime.createProject('Skip live', workspace)
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      runtime.setConversationPermissionMode(conversation.id, 'skip')
+
+      const run = await runtime.sendMessage({
+        projectId: project.id,
+        conversationId: conversation.id,
+        content: 'Create a file called skip-ok.txt containing exactly: OK. Then read it back to me.'
+      })
+      await new Promise<void>((resolve) => {
+        const stop = setTimeout(resolve, 150_000)
+        runtime.on('event', (event: RuntimeEvent) => {
+          if (event.runId !== run.id) return
+          if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
+            clearTimeout(stop)
+            setTimeout(resolve, 400)
+          }
+        })
+      })
+
+      const stored = store.requireConversation(conversation.id)
+      // 1-2: what Orbit persisted, and the transport that follows from it.
+      expect(stored.permissionMode).toBe('skip')
+      expect(stored.transport).toBe('structured')
+      // 3-4: the real flag, and agy's own reported state for it.
+      expect(permissionArgs('skip')).toEqual(['--dangerously-skip-permissions'])
+      expect(livePermissionMode(workspace, permissionArgs('skip'))).toBe('always-proceed')
+      // 5-6: the work happened, with nothing asked and nothing refused.
+      expect(fs.existsSync(path.join(workspace, 'skip-ok.txt')), 'the file should have been written without approval').toBe(true)
+      expect(events.filter((event) => event.type === 'interaction.required')).toHaveLength(0)
+      const failure = events.find((event) => event.type === 'run.failed')
+      expect(failure, failure ? `unexpected failure: ${JSON.stringify(failure)}` : '').toBeUndefined()
+      expect(store.requireRun(run.id).state).toBe('completed')
+
+      await provider.shutdown()
+      db.close()
+    },
+    240_000
+  )
+})
+
 function permissionPromptsUnavailableReason(): string | null {
   const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json')
   let allow: unknown

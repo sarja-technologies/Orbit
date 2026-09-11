@@ -205,21 +205,45 @@ export class AntigravityProvider implements AgentProvider {
         this.discoverArtifact(active, step.tool_name ?? '', step.tool_info?.parameters)
       }
       // agy 1.1.27 represents headless ask_question/ask_permission as an
-      // opaque unknown step, then completes after skipping it. Record the
-      // evidence; do not falsely report that terminal SUCCESS as success.
-      if (step.step_type === 'unknown') active.headlessDenials.push('Antigravity requested an interaction that headless mode could not present.')
-      const toolError = (step as { tool_info?: { error?: { message?: unknown } } }).tool_info?.error?.message
-      if (typeof toolError === 'string' && /denied|permission/i.test(toolError)) active.headlessDenials.push(toolError)
+      // opaque unknown step, then completes after skipping it. That is agy's
+      // own structural marker, so it still counts as evidence — but only
+      // when agy could actually have been asking. Under
+      // --dangerously-skip-permissions its own init reports
+      // permission_mode=always-proceed (verified live), so it never asks,
+      // and anything opaque there is something else entirely.
+      //
+      // Deliberately NOT recorded any more: a tool error whose text happens
+      // to contain "permission" or "denied". That matched arbitrary prose —
+      // `ls: cannot open directory '/root': Permission denied`, a git
+      // publickey failure, a linter message — and turned every one of them
+      // into "Antigravity needed permission it could not ask for", on a
+      // turn where nothing had been asked and the tools had run fine. A
+      // failing tool is a failing tool; the model reports it in its own
+      // answer, and the activity rail already shows the step failing.
+      if (step.step_type === 'unknown' && active.input.permissionMode !== 'skip') {
+        active.headlessDenials.push('Antigravity requested an interaction that headless mode could not present.')
+      }
     } else if (raw.event === 'result' && raw.result) {
       const result = raw.result
       active.nativeConversationId = result.conversation_id ?? active.nativeConversationId
       const deniedActions = result.denied_actions?.map((action) => action.display_name ?? action.action ?? 'Antigravity action') ?? []
+      // agy's own report of what it would not do. Structural, so it is
+      // trusted in both modes — but it means two different things.
       if (deniedActions.length) active.headlessDenials.push(`Antigravity denied: ${deniedActions.join(', ')}.`)
       if (active.headlessDenials.length > 0) {
         const prompt = unique(active.headlessDenials).join('\n')
+        // Under always-proceed there is no approval to present and none was
+        // withheld for want of one, so this cannot be "a permission Orbit
+        // could not ask for". Whatever agy refused, it refused on its own
+        // terms — a restriction no approval would have lifted. It gets its
+        // own code so the UI can say that instead of blaming a missing
+        // prompt (see errorCopy.ts).
+        const bypassed = active.input.permissionMode === 'skip'
         const interactionId = `${active.input.runId}:headless-denial`
-        this.emit(active, { type: 'interaction.required', interactionId, kind: 'permission', prompt, options: [], transport: 'structured-followup', canRespond: false, sourceEvidence: 'headless-denial' })
-        this.fail(active, 'provider.interaction_denied', prompt)
+        if (!bypassed) {
+          this.emit(active, { type: 'interaction.required', interactionId, kind: 'permission', prompt, options: [], transport: 'structured-followup', canRespond: false, sourceEvidence: 'headless-denial' })
+        }
+        this.fail(active, bypassed ? 'provider.action_restricted' : 'provider.interaction_denied', prompt)
       } else if (result.status === 'SUCCESS') {
         const finalText = result.response ?? active.text
         // Verified against every captured agy 1.1.27 turn: the concatenated

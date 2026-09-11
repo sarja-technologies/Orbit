@@ -939,6 +939,44 @@ describe('App', () => {
     await waitFor(() => expect(api.files.attach).toHaveBeenLastCalledWith(expect.objectContaining({ category: 'files' })))
   })
 
+  it('never launches a turn under a permission mode the composer has stopped showing', async () => {
+    // The race: the composer reflects a choice immediately, the runtime
+    // reads the persisted value when it launches. Pressing Send in between
+    // used to send the turn out under the old mode.
+    let releaseWrite: (() => void) | null = null
+    vi.mocked(api.conversations.setPermissionMode).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = () => resolve({ ...IMPROVE, permissionMode: 'skip' })
+        })
+    )
+
+    await bootInto(/^Improve Orbit UI/)
+    await userEvent.click(await screen.findByLabelText('Permissions'))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
+    await waitFor(() => expect(api.conversations.setPermissionMode).toHaveBeenCalled())
+
+    // The write is still in flight. Send now.
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'go')
+    await userEvent.click(screen.getByLabelText('Send message'))
+
+    // Nothing may have been sent yet: the turn waits for the mode to land.
+    expect(api.messages.send).not.toHaveBeenCalled()
+
+    releaseWrite!()
+    await waitFor(() => expect(api.messages.send).toHaveBeenCalled())
+  })
+
+  it('sends immediately when no session setting is in flight', async () => {
+    await bootInto(/^Improve Orbit UI/)
+
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'go')
+    await userEvent.click(screen.getByLabelText('Send message'))
+
+    // The gate is a real dependency, not a delay.
+    await waitFor(() => expect(api.messages.send).toHaveBeenCalled())
+  })
+
   it('does not expose a manual transport control', async () => {
     await boot()
     await screen.findByLabelText('Message Antigravity')

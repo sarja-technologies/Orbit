@@ -320,13 +320,38 @@ export function findPromptEcho(lines: string[], prompt: string): { echoIdx: numb
   let seen = squashWhitespace(lines[echoIdx]!.replace(/^>\s*/, ''))
   if (!wanted.startsWith(seen)) return null
   let bodyStart = echoIdx + 1
-  while (seen.length < wanted.length && bodyStart < lines.length) {
-    const next = squashWhitespace(lines[bodyStart]!)
-    if (!next) break
+  // Blank rows are held back rather than treated as the end of the echo.
+  //
+  // A multiline prompt has blank lines *in it*, and agy echoes them as
+  // blank rows in the middle of the echo block — then indents the rest of
+  // the prompt by two columns, exactly like assistant prose. Stopping at
+  // the first blank row therefore handed the remainder of the user's own
+  // prompt to the response extractor, which is how a message like
+  // "Hello from Orbit. Then verify the file exists…" ended up attributed to
+  // Antigravity. Confirmed live against agy 1.2.x with this screen:
+  //
+  //     "> Create a file called hello.txt containing exactly:"
+  //     "  "                                  <- blank line inside the prompt
+  //     "  Hello from Orbit."                 <- still the prompt
+  //     "  "
+  //     "  Then verify the file exists and read its contents back to me."
+  //     ""                                    <- the echo really ends here
+  //
+  // Blanks only count as echo when a later row still continues the prompt,
+  // so a blank row that genuinely separates the echo from the answer stops
+  // consumption exactly where it should.
+  let heldBlanks = 0
+  while (seen.length < wanted.length && bodyStart + heldBlanks < lines.length) {
+    const next = squashWhitespace(lines[bodyStart + heldBlanks]!)
+    if (!next) {
+      heldBlanks++
+      continue
+    }
     const merged = squashWhitespace(`${seen} ${next}`)
     if (!wanted.startsWith(merged)) break
     seen = merged
-    bodyStart++
+    bodyStart += heldBlanks + 1
+    heldBlanks = 0
   }
   return { echoIdx, bodyStart }
 }
