@@ -25,7 +25,12 @@ import { createId, nowIso } from '@main/util/ids'
 import { normalizePreferences } from '@shared/reasoningPolicy'
 import { resolveModelId } from '@shared/defaultModel'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from '@shared/permissionMode'
-import { DEFAULT_SESSION_TITLE, hasDefaultSessionTitle } from '@shared/sessionTitle'
+import {
+  DEFAULT_SESSION_TITLE,
+  shouldApplyAutoTitle,
+  type DerivedSessionTitle,
+  type SessionTitleState
+} from '@shared/sessionTitle'
 import { jsonParseObject, jsonStringify, nullableText, numberValue, OrbitDatabase, text } from './database'
 
 /** Where cross-session preferences live in the `meta` key/value table. */
@@ -106,6 +111,7 @@ export class OrbitStore {
       workingDirectory?: string | null
       reasoningEffort?: ReasoningEffort | null
       model?: string | null
+      permissionMode?: PermissionMode
     } = {}
   ): Conversation {
     this.assertProject(projectId)
@@ -119,7 +125,7 @@ export class OrbitStore {
       status: 'idle',
       transport: 'structured',
       model: resolveModelId(options.model ?? null),
-      permissionMode: DEFAULT_PERMISSION_MODE,
+      permissionMode: options.permissionMode ?? DEFAULT_PERMISSION_MODE,
       reasoningEffort: options.reasoningEffort ?? null,
       workingDirectory: normalizePath(options.workingDirectory ?? null),
       createdAt: now,
@@ -216,7 +222,7 @@ export class OrbitStore {
   renameConversation(conversationId: ID, title: string): Conversation {
     const conversation = this.requireConversation(conversationId)
     const updated = { ...conversation, title: title.trim() || conversation.title, updatedAt: nowIso() }
-    this.db.run('UPDATE conversations SET title = ?, title_is_custom = 1, updated_at = ? WHERE id = ?', [
+    this.db.run("UPDATE conversations SET title = ?, title_is_custom = 1, title_state = 'manual', updated_at = ? WHERE id = ?", [
       updated.title,
       updated.updatedAt,
       conversationId
@@ -225,22 +231,44 @@ export class OrbitStore {
     return updated
   }
 
-  /** Orbit naming a session after the prompt that started it. Deliberately
-   *  narrow: it applies only while the session still carries the default
-   *  title *and* the user has never renamed it, and it does not claim the
-   *  title afterwards — so it can happen at most once, and a later manual
-   *  rename still wins for good. Returns null when it declined, which is a
-   *  normal outcome and never an error. */
-  autoTitleConversation(conversationId: ID, title: string): Conversation | null {
+  /** Orbit naming a session after one of its prompts.
+   *
+   *  What may happen is decided by the session's recorded title state, not
+   *  by its text — see shared/sessionTitle.ts. A session the user renamed
+   *  is never touched. A session Orbit already named from a real prompt is
+   *  settled and stops changing. A session named only provisionally (its
+   *  first prompt was "hi") still yields to the first prompt that has a
+   *  subject in it, which is what stops a used session from sitting at
+   *  `New Session` — or at `Hi` — forever.
+   *
+   *  Returns null when it declined, which is a normal outcome, not an
+   *  error. */
+  autoTitleConversation(conversationId: ID, derived: DerivedSessionTitle): Conversation | null {
     const conversation = this.requireConversation(conversationId)
-    if (!hasDefaultSessionTitle(conversation.title)) return null
     if (this.isTitleCustom(conversationId)) return null
-    const next = title.trim()
+    if (!shouldApplyAutoTitle(this.titleState(conversationId), derived)) return null
+    const next = derived.title.trim()
     if (!next) return null
     const updatedAt = nowIso()
-    this.db.run('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?', [next, updatedAt, conversationId])
+    this.db.run('UPDATE conversations SET title = ?, title_state = ?, updated_at = ? WHERE id = ?', [
+      next,
+      derived.kind,
+      updatedAt,
+      conversationId
+    ])
     this.touchProject(conversation.projectId)
     return { ...conversation, title: next, updatedAt }
+  }
+
+  /** How this session came by its name. Unknown values read as 'default',
+   *  which is the direction that lets Orbit name an unnamed session rather
+   *  than the one that could overwrite a real title. */
+  titleState(conversationId: ID): SessionTitleState {
+    const value = this.db.get<string | null>('SELECT title_state FROM conversations WHERE id = ?', [conversationId], (row) =>
+      nullableText(row, 'title_state')
+    )
+    if (value === 'manual' || value === 'provisional' || value === 'substantive') return value
+    return 'default'
   }
 
   /** Whether this session's name was chosen by the user rather than Orbit.

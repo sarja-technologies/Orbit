@@ -25,9 +25,10 @@ import type { OrbitStore } from '@main/persistence/store'
 import type { ArtifactService } from '@main/artifacts/artifactService'
 import { effortForNewSession } from '@shared/reasoningPolicy'
 import { ORBIT_DEFAULT_MODEL_ID } from '@shared/defaultModel'
+import { resolveDefaultModel, resolveDefaultPermissionMode } from '@shared/newSessionDefaults'
 import type { PermissionMode } from '@shared/permissionMode'
 import { transportForTurn } from '@shared/transportPolicy'
-import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
+import { DEFAULT_SESSION_TITLE, deriveTitleForPrompt } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 import { StartupSessionResolver } from '@main/startup/startupSession'
 
@@ -77,6 +78,12 @@ export class OrbitRuntime extends EventEmitter {
     return this.provider.getStatus()
   }
 
+  /** Orbit's own application data directory — the only place Clear all
+   *  data is ever allowed to delete from. */
+  get dataDirectory(): string {
+    return this.dataDir
+  }
+
   listProjects(): Project[] {
     return this.store.listProjects()
   }
@@ -119,11 +126,26 @@ export class OrbitRuntime extends EventEmitter {
    *  sessionTitle.ts) and no folder of its own (null means it inherits the
    *  project's, which is what resolveWorkspacePath already does). */
   createConversation(projectId: ID, title = DEFAULT_SESSION_TITLE, workingDirectory: string | null = null): Conversation {
+    const preferences = this.store.readPreferences()
+    // The user's chosen defaults, resolved against the real catalogue —
+    // never a stale saved id, and never "let agy decide". Applied at
+    // creation only: changing a default in Settings is about the sessions
+    // that come next, and rewriting existing ones would be changing work
+    // the user did not ask to change.
+    const model = resolveDefaultModel(preferences, this.cachedModels)
     return this.store.createConversation(projectId, title, {
       workingDirectory,
-      model: ORBIT_DEFAULT_MODEL_ID,
-      reasoningEffort: effortForNewSession(this.store.readPreferences(), this.cachedModels)
+      model: model.modelId,
+      permissionMode: resolveDefaultPermissionMode(preferences),
+      reasoningEffort: effortForNewSession(preferences, this.cachedModels, model.modelId)
     })
+  }
+
+  /** How a new session's model resolves right now, including whether a
+   *  saved default has gone missing from the catalogue. The Settings panel
+   *  reads this so it can say so rather than silently substituting. */
+  defaultModelStatus(): ReturnType<typeof resolveDefaultModel> {
+    return resolveDefaultModel(this.store.readPreferences(), this.cachedModels)
   }
 
   setConversationWorkingDirectory(conversationId: ID, workingDirectory: string | null): Conversation {
@@ -248,8 +270,8 @@ export class OrbitRuntime extends EventEmitter {
    *  is never a reason not to send a prompt. */
   private nameSessionFromPrompt(conversationId: ID, prompt: string): void {
     try {
-      const title = deriveSessionTitle(prompt)
-      if (title) this.store.autoTitleConversation(conversationId, title)
+      const derived = deriveTitleForPrompt(prompt)
+      if (derived) this.store.autoTitleConversation(conversationId, derived)
     } catch {
       // The session keeps its default name; the turn proceeds regardless.
     }

@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js'
 import { SCHEMA_SQL } from './schema'
+import { DEFAULT_SESSION_TITLE } from '@shared/sessionTitle'
 
 export interface DatabaseOptions {
   dataDir: string
@@ -28,7 +29,23 @@ export class OrbitDatabase {
     }
     this.exec(SCHEMA_SQL)
     this.runMigrations()
+    this.backfillTitleState()
     this.persist()
+  }
+
+  /** Settles `title_state` for rows that predate the column.
+   *
+   *  Idempotent, and deliberately conservative: a session the user renamed
+   *  is 'manual', one still called `New Session` is 'default', and anything
+   *  else was named by Orbit from a real prompt and counts as 'substantive'
+   *  — so an existing session can never be silently renamed by the new
+   *  auto-title rules. Only rows still at the column default are touched,
+   *  so this is a no-op on every run after the first. */
+  private backfillTitleState(): void {
+    this.run("UPDATE conversations SET title_state = 'manual' WHERE title_state = 'default' AND title_is_custom = 1", [])
+    this.run("UPDATE conversations SET title_state = 'substantive' WHERE title_state = 'default' AND title_is_custom = 0 AND title <> ?", [
+      DEFAULT_SESSION_TITLE
+    ])
   }
 
   /** Orbit has no formal migration framework yet — each entry here is a
@@ -53,7 +70,12 @@ export class OrbitDatabase {
       // Permission handling per session. Defaults to 'ask', which is agy's
       // own behaviour, so every existing session keeps behaving exactly as
       // it did before the control existed.
-      "ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask'"
+      "ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask'",
+      // How a session came by its name — see shared/sessionTitle.ts. New
+      // rows start at 'default'; the backfill below settles existing ones
+      // from what they already carry, so no session Orbit or the user
+      // already named becomes a candidate for renaming.
+      "ALTER TABLE conversations ADD COLUMN title_state TEXT NOT NULL DEFAULT 'default'"
     ]
     for (const migration of migrations) {
       try {

@@ -50,11 +50,21 @@ export const preferencesSchema = z.object({
   // plausible range is ever persisted in the first place.
   sidebarWidth: z.number().finite().min(120).max(900).nullable().default(null),
   lastActiveProjectId: idSchema.nullable().default(null),
-  lastActiveConversationId: idSchema.nullable().default(null)
+  lastActiveConversationId: idSchema.nullable().default(null),
+  defaultModelId: z.string().min(1).max(200).nullable().default(null),
+  defaultPermissionMode: z.enum(['ask', 'skip']).nullable().default(null)
 })
 
 /** Bounded so an enormous renderer string can never be pushed at the OS
  *  clipboard. A megabyte is far beyond any real message. */
+/** The picker category the renderer may ask for. A closed enum: the
+ *  renderer names one of three intents, and the main process owns the
+ *  dialog and its filters — there is no way to ask for an arbitrary
+ *  Electron dialog from here. */
+export const attachmentPickerCategorySchema = z.enum(['image', 'video', 'files'])
+
+export const clearAllDataSchema = z.object({ confirmation: z.string().max(64) })
+
 export const clipboardTextSchema = z.string().max(1_000_000)
 
 export const setPermissionModeSchema = z.object({
@@ -122,7 +132,8 @@ export const cancelRunSchema = z.object({
 })
 
 export const attachFilesSchema = z.object({
-  projectId: idSchema
+  projectId: idSchema,
+  category: attachmentPickerCategorySchema.default('files')
 })
 
 export const importArtifactSchema = z.object({

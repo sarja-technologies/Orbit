@@ -138,6 +138,8 @@ describe('opening Orbit', () => {
         setPermissionMode: vi.fn(),
         setWorkingDirectory: vi.fn()
       },
+      data: { clearAll: vi.fn() },
+      defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => MODELS) },
       messages: { send: vi.fn() },

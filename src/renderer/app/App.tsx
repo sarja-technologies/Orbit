@@ -21,6 +21,9 @@ import { EMPTY_PREFERENCES, effortForModel, modelForSelection, preferenceKeyFor,
 import { resolveModelId } from '@shared/defaultModel'
 import { resolveSidebarWidth } from '@shared/reasoningPolicy'
 import type { PermissionMode } from '@shared/permissionMode'
+import type { ResolvedDefaultModel } from '@shared/newSessionDefaults'
+import type { AttachmentPickerCategory } from '@shared/attachmentPicker'
+import { SettingsPanel } from './components/SettingsPanel'
 import { SidebarResizer } from './components/SidebarResizer'
 import { StartupError } from './ErrorBoundary'
 import { getOrbitApi, requireOrbitApi } from './orbitApi'
@@ -102,6 +105,9 @@ export function App(): JSX.Element {
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [modelStatus, setModelStatus] = useState<ResolvedDefaultModel | null>(null)
+  const [clearing, setClearing] = useState(false)
   const [startupError, setStartupError] = useState<{ message: string; detail?: string | undefined } | null>(null)
   const dragDepth = useRef(0)
   const composerFocusRef = useRef<(() => void) | null>(null)
@@ -473,6 +479,38 @@ export function App(): JSX.Element {
     }
   }
 
+  /** Settings reads the live catalogue status each time it opens, so a
+   *  saved default that has since disappeared is reported the moment the
+   *  user looks, not whenever the app happened to start. */
+  async function openSettings(): Promise<void> {
+    setSettingsOpen(true)
+    try {
+      setModelStatus(await requireOrbitApi().defaults.modelStatus())
+    } catch {
+      setModelStatus(null)
+    }
+  }
+
+  async function saveDefaults(next: OrbitPreferences): Promise<void> {
+    savePreferences(next)
+    try {
+      setModelStatus(await requireOrbitApi().defaults.modelStatus())
+    } catch {
+      // The panel keeps showing what it had; nothing was lost.
+    }
+  }
+
+  async function clearAllData(confirmation: string): Promise<void> {
+    setClearing(true)
+    try {
+      // Succeeds by relaunching, so there is deliberately nothing after it.
+      await requireOrbitApi().data.clearAll({ confirmation })
+    } catch (error) {
+      setClearing(false)
+      setNotice(error instanceof Error ? error.message : 'Orbit data could not be cleared.')
+    }
+  }
+
   async function renameSession(conversationId: ID, title: string): Promise<void> {
     await requireOrbitApi().conversations.rename({ conversationId, title })
     await refreshProject()
@@ -710,9 +748,9 @@ export function App(): JSX.Element {
     }
   }
 
-  async function pickFiles(): Promise<void> {
+  async function pickFiles(category: AttachmentPickerCategory = 'files'): Promise<void> {
     if (!workspace.activeProjectId) return
-    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProjectId })
+    const files = await requireOrbitApi().files.attach({ projectId: workspace.activeProjectId, category })
     if (files.length === 0) return
     addProjectFiles(files)
     await refreshProject()
@@ -781,6 +819,7 @@ export function App(): JSX.Element {
     <div className="app">
       <ProviderLogoSprite />
       <ProjectSidebar
+        onOpenSettings={() => void openSettings()}
         groups={tree}
         activeProjectId={workspace.activeProjectId}
         activeConversationId={workspace.activeConversationId}
@@ -883,7 +922,7 @@ export function App(): JSX.Element {
                 onChange={setComposer}
                 onSend={() => void send()}
                 onCancel={() => void cancel()}
-                onPickFiles={() => void pickFiles()}
+                onPickFiles={(category) => void pickFiles(category)}
                 onPasteImages={(files) => void attachPastedImages(files)}
                 onRemoveAttachment={(fileId) => setAttachments((current) => current.filter((item) => item.fileId !== fileId))}
                 onRetryAttachment={(fileId) =>
@@ -933,6 +972,19 @@ export function App(): JSX.Element {
           onCancel={() => setCreatingProject(false)}
           onCreate={(input) => void createProject(input)}
           pickFolder={() => requireOrbitApi().dialog.pickFolder({ title: 'Choose the project folder' })}
+        />
+      ) : null}
+
+      {settingsOpen ? (
+        <SettingsPanel
+          preferences={preferences}
+          models={models}
+          modelStatus={modelStatus}
+          busy={clearing}
+          onClose={() => setSettingsOpen(false)}
+          onSelectDefaultModel={(modelId) => void saveDefaults({ ...preferences, defaultModelId: modelId })}
+          onSelectDefaultPermissionMode={(mode) => void saveDefaults({ ...preferences, defaultPermissionMode: mode })}
+          onClearAllData={(confirmation) => void clearAllData(confirmation)}
         />
       ) : null}
     </div>

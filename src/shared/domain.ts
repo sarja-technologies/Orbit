@@ -200,6 +200,13 @@ export interface OrbitPreferences {
    *  back to recency, never to creating a session. */
   lastActiveProjectId: string | null
   lastActiveConversationId: string | null
+  /** The model NEW sessions are created on. Null means Orbit's own factory
+   *  default (ORBIT_DEFAULT_MODEL_ID). Changing it never touches a session
+   *  that already exists — a session owns its model once it has one. */
+  defaultModelId: string | null
+  /** The permission mode NEW sessions are created in. Null means the
+   *  factory default ('ask'). Existing sessions keep whatever they have. */
+  defaultPermissionMode: PermissionMode | null
 }
 
 export interface ProjectSnapshot {

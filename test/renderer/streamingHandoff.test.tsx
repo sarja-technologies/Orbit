@@ -117,6 +117,8 @@ describe('streaming hand-off to the persisted assistant message', () => {
       startup: { session: vi.fn(async () => null) },
       preferences: { get: vi.fn(async () => ({ ...EMPTY_PREFERENCES })), set: vi.fn(async (next) => next) },
       conversations: { create: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
+      data: { clearAll: vi.fn() },
+      defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => []) },
       messages: { send: vi.fn(async () => RUN) },

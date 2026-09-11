@@ -22,6 +22,12 @@ const orbitApi: OrbitApi = {
   startup: {
     session: () => ipcRenderer.invoke(IPC_CHANNELS.startupSession)
   },
+  data: {
+    clearAll: (input) => ipcRenderer.invoke(IPC_CHANNELS.dataClear, input)
+  },
+  defaults: {
+    modelStatus: () => ipcRenderer.invoke(IPC_CHANNELS.defaultModelStatus)
+  },
   preferences: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.preferencesGet),
     set: (preferences) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSet, preferences)

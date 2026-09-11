@@ -3,6 +3,8 @@ import type { Conversation, ModelOption, Project, ReasoningEffort } from '@share
 import type { PermissionMode } from '@shared/permissionMode'
 import type { DraftAttachment } from '../lib/attachments'
 import { imageItemsFromClipboard } from '../lib/attachments'
+import { AttachMenu } from './AttachMenu'
+import type { AttachmentPickerCategory } from '@shared/attachmentPicker'
 import { AttachmentChip } from './AttachmentChip'
 import { ModelControls } from './ModelControls'
 import { ProjectControl } from './ProjectControl'
@@ -34,7 +36,7 @@ interface ComposerProps {
   onChange: (value: string) => void
   onSend: () => void
   onCancel: () => void
-  onPickFiles: () => void
+  onPickFiles: (category: AttachmentPickerCategory) => void
   onPasteImages: (files: File[]) => void
   onRemoveAttachment: (fileId: string) => void
   onRetryAttachment: (fileId: string) => void
@@ -147,9 +149,7 @@ export function Composer({
             action that starts it. Deliberately not a toolbar: these are
             facts about the session that happen to be adjustable. */}
         <div className="composer-controls">
-          <button type="button" className="composer-attach" onClick={onPickFiles} disabled={disabled} aria-label="Add files">
-            <PlusGlyph />
-          </button>
+          <AttachMenu disabled={disabled} onPick={onPickFiles} />
 
           <ProjectControl
             project={project}
@@ -184,14 +184,6 @@ export function Composer({
         </div>
       </div>
     </div>
-  )
-}
-
-function PlusGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
-      <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
-    </svg>
   )
 }
 

@@ -31,6 +31,11 @@ const frame = (body: string[], compose = COMPOSE): string[] => [...BANNER, `> ${
  *  the answer mid-stream. */
 const scrolledFrame = (body: string[], compose = COMPOSE): string[] => [...BANNER.slice(1), `> ${PROMPT}`, '▸ Thought for 11s', ...body, ...compose]
 
+/** The answer as Orbit persists it. agy indents every content row by two
+ *  columns as presentation; extraction removes the indent the block shares,
+ *  so what reaches the transcript is the prose itself. */
+const answer = (...parts: string[]): string => parts.map((part) => part.replace(/^ {2}/, '')).join('\n').trim()
+
 const P1 = '  The bicycle stands as one of the most efficient machines ever built.'
 const P2 = '  It began in 1817 with Baron Karl von Drais and his Laufmaschine.'
 const P3 = '  The safety bicycle of 1885 set the shape every modern bicycle still keeps.'
@@ -237,7 +242,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.stream(frame([P1, P2, '⣷  Working...']))
     transport.stream(frame([P1, P2, P3, '⣟  Working...']))
 
-    expect(deltas(events).join('')).toBe([P1, P2, P3].join('\n').trim())
+    expect(deltas(events).join('')).toBe(answer(P1, P2, P3))
     expect(deltas(events).length).toBe(3)
     // Streaming happened strictly before completion — the whole point.
     expect(events.some((event) => event.type === 'run.completed')).toBe(false)
@@ -266,7 +271,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.stream(frame([P1, '⣽  Working...']))
     transport.stream(scrolledFrame([P1, P2, '⣷  Working...']))
 
-    expect(deltas(events).join('')).toBe([P1, P2].join('\n').trim())
+    expect(deltas(events).join('')).toBe(answer(P1, P2))
   })
 
   it('skips a frame caught mid-redraw and resumes cleanly on the next one', () => {
@@ -279,7 +284,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.stream(frame([P1, '  While the Draisienne lacked pedals, it introduced two-wheeled balance.', '⣷  Working...']))
     transport.stream(frame([P1, P2, P3, '⣟  Working...']))
 
-    expect(deltas(events).join('')).toBe([P1, P2, P3].join('\n').trim())
+    expect(deltas(events).join('')).toBe(answer(P1, P2, P3))
     expect(deltas(events).join('')).not.toContain('Draisienne')
   })
 
@@ -334,7 +339,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.handlers!.onReadyForInput()
 
     const completed = events.find((event) => event.type === 'run.completed') as { finalText: string } | undefined
-    const finalText = [P1, P2, P3].join('\n').trim()
+    const finalText = answer(P1, P2, P3)
     expect(completed?.finalText).toBe(finalText)
     expect(finalText.startsWith(deltas(events).join(''))).toBe(true)
   })
@@ -348,7 +353,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.stream(frame([P1, P2, P3, '⣷  Working...']))
     transport.handlers!.onReadyForInput()
 
-    expect(deltas(events).join('')).toBe(P1.trim())
+    expect(deltas(events).join('')).toBe(answer(P1))
     expect(events.at(-1)).toMatchObject({ type: 'run.cancelled' })
     expect(transport.cancelCalls).toBe(1)
   })
@@ -394,7 +399,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     transport.snapshot(frame([P1, P2], SETTLED_COMPOSE))
     transport.handlers!.onReadyForInput()
 
-    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: [P1, P2].join('\n').trim() })
+    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: answer(P1, P2) })
   })
 
   it('does not settle on the echo alone when a resumed process is still idle', () => {
@@ -415,7 +420,7 @@ describe('AntigravityPtySession progressive response streaming', () => {
     // The reply arrives; now the ready footer really does mean finished.
     transport.snapshot(frame([P1, P2], SETTLED_COMPOSE))
     transport.handlers!.onReadyForInput()
-    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: [P1, P2].join('\n').trim() })
+    expect(events.find((event) => event.type === 'run.completed')).toMatchObject({ finalText: answer(P1, P2) })
   })
 
   it('does not settle on the previous turn\u2019s replayed answer after a resume', () => {
