@@ -29,8 +29,67 @@ export class OrbitDatabase {
     }
     this.exec(SCHEMA_SQL)
     this.runMigrations()
+    this.relaxProjectOwnership()
     this.backfillTitleState()
     this.persist()
+  }
+
+  /** Lets a session belong to no project at all.
+   *
+   *  SQLite cannot drop a NOT NULL constraint in place, so the three tables
+   *  that carry a session's ownership are rebuilt with a nullable
+   *  `project_id`. Everything is copied across first and the swap happens
+   *  inside one transaction, so an interrupted run leaves the old table
+   *  intact rather than a half-migrated one.
+   *
+   *  Idempotent: it checks the constraint before doing anything, so it runs
+   *  exactly once and is a no-op on every launch afterwards. Foreign keys
+   *  are suspended only for the swap — dropping a referenced table with
+   *  them on would cascade the very rows being migrated. */
+  private relaxProjectOwnership(): void {
+    const tables: Array<{ name: string; columns: string }> = [
+      { name: 'conversations', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' },
+      { name: 'runs', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' },
+      { name: 'messages', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' }
+    ]
+    const pending = tables.filter((table) => this.columnIsNotNull(table.name, 'project_id'))
+    if (pending.length === 0) return
+
+    this.exec('PRAGMA foreign_keys = OFF')
+    try {
+      for (const table of pending) {
+        const definition = this.get<string | null>(
+          'SELECT sql FROM sqlite_master WHERE type = ? AND name = ?',
+          ['table', table.name],
+          (row) => nullableText(row, 'sql')
+        )
+        if (!definition) continue
+        // Reuse the table's own definition, with just this one column
+        // relaxed, so no other column, default or constraint can drift.
+        const rebuilt = definition
+          .replace(/CREATE TABLE (IF NOT EXISTS )?"?\w+"?/i, `CREATE TABLE "${table.name}__orbit_new"`)
+          .replace(/project_id TEXT NOT NULL REFERENCES/i, 'project_id TEXT REFERENCES')
+        const columns = this.query<string>(`PRAGMA table_info(${table.name})`, [], (row) => text(row, 'name')).join(', ')
+        this.exec('BEGIN')
+        this.exec(rebuilt)
+        this.exec(`INSERT INTO "${table.name}__orbit_new" (${columns}) SELECT ${columns} FROM ${table.name}`)
+        this.exec(`DROP TABLE ${table.name}`)
+        this.exec(`ALTER TABLE "${table.name}__orbit_new" RENAME TO ${table.name}`)
+        this.exec('COMMIT')
+      }
+      // The rebuild drops the indexes that lived on the old tables.
+      this.exec(SCHEMA_SQL)
+    } finally {
+      this.exec('PRAGMA foreign_keys = ON')
+    }
+  }
+
+  private columnIsNotNull(table: string, column: string): boolean {
+    const rows = this.query<{ name: string; notnull: number }>(`PRAGMA table_info(${table})`, [], (row) => ({
+      name: text(row, 'name'),
+      notnull: numberValue(row, 'notnull') ?? 0
+    }))
+    return rows.some((row) => row.name === column && row.notnull !== 0)
   }
 
   /** Settles `title_state` for rows that predate the column.

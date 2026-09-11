@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import fs from 'node:fs'
+import path from 'node:path'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,6 +11,7 @@ import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 import { CLEAR_DATA_CONFIRMATION } from '../../src/shared/clearData'
 import type { ModelOption } from '../../src/shared/domain'
 import type { ResolvedDefaultModel } from '../../src/shared/newSessionDefaults'
+import { STARTERS } from '../../src/renderer/app/components/EmptySession'
 
 const MODELS: ModelOption[] = [
   { id: ORBIT_DEFAULT_MODEL_ID, label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] },
@@ -252,5 +255,38 @@ describe('the + attachment menu', () => {
     await user.keyboard('{Enter}')
 
     expect(onPick).toHaveBeenCalledWith('image')
+  })
+})
+
+describe('semantic colour for symbols', () => {
+  const STYLES = fs.readFileSync(path.resolve(__dirname, '../../src/renderer/styles.css'), 'utf8')
+
+  it('names the four kinds as tokens rather than scattering hex codes', () => {
+    for (const token of ['--kind-explore', '--kind-build', '--kind-fix', '--kind-review']) {
+      expect(STYLES).toMatch(new RegExp(`${token}:\\s*#[0-9a-f]{6}`, 'i'))
+    }
+  })
+
+  it('gives each starter its own accent', () => {
+    for (const [starter, token] of [
+      ['explore', '--kind-explore'],
+      ['build', '--kind-build'],
+      ['fix', '--kind-fix'],
+      ['review', '--kind-review']
+    ]) {
+      expect(STYLES).toMatch(new RegExp(`\\.starter-${starter}\\s*\\{[^}]*--starter-accent:\\s*var\\(${token}\\)`))
+    }
+  })
+
+  it('colours the symbol, not the whole chip', () => {
+    // The surfaces stay calm: colour is there to tell the four apart.
+    expect(STYLES).toMatch(/\.starter svg \{\s*color: var\(--starter-accent/)
+    expect(STYLES).not.toMatch(/\.starter-\w+\s*\{[^}]*background:\s*var\(--kind-/)
+  })
+
+  it('puts each starter’s accent on its own chip class in the markup', () => {
+    for (const starter of STARTERS) {
+      expect(STYLES).toContain(`.starter-${starter.id}`)
+    }
   })
 })

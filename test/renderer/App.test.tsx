@@ -10,6 +10,21 @@ import { deriveSessionTitle, hasDefaultSessionTitle } from '../../src/shared/ses
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 
+/** The Unsorted workspace: no project behind it, and only the sessions that
+ *  belong to none. */
+const EMPTY_UNSORTED_SNAPSHOT: ProjectSnapshot = {
+  project: null,
+  conversations: [],
+  messages: [],
+  runs: [],
+  artifacts: [],
+  artifactVersions: [],
+  projectFiles: [],
+  references: []
+}
+const snapshotForUnsorted = (): ProjectSnapshot => ({ ...EMPTY_UNSORTED_SNAPSHOT })
+
+
 const WEBSITE: Project = { id: 'project_1', name: 'AgentDock Website', rootPath: '/home/dev/agentdock', createdAt: 'now', updatedAt: 'now' }
 const RENDERER: Project = { id: 'project_2', name: 'Renderer Check', rootPath: null, createdAt: 'now', updatedAt: 'now' }
 
@@ -112,6 +127,7 @@ describe('App', () => {
             ? snapshotFor(RENDERER, sessions.project_2 ?? [])
             : snapshotFor(WEBSITE, sessions.project_1 ?? [])
         ),
+        openUnsorted: vi.fn(async () => snapshotForUnsorted()),
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn(async () => '/home/dev/chosen') },
@@ -150,6 +166,8 @@ describe('App', () => {
           sessions[input.projectId] = [made, ...(sessions[input.projectId] ?? [])]
           return made
         }),
+        listUnsorted: vi.fn(async () => []),
+        assignProject: vi.fn(),
         rename: vi.fn(async (input) => {
           const list = sessions[activeProjectOf(input.conversationId)] ?? []
           const index = list.findIndex((item) => item.id === input.conversationId)
@@ -491,12 +509,13 @@ describe('App', () => {
     await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
   })
 
-  it('creates a session instantly from the menu too, in the project already open', async () => {
+  it('creates an Unsorted session from the global menu, needing no project', async () => {
     await boot()
     await userEvent.click(screen.getByLabelText('New project or session'))
     await userEvent.click(screen.getByRole('menuitem', { name: 'New session' }))
 
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_1' }))
+    // The global control is not about whichever project happens to be open.
+    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 

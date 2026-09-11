@@ -28,6 +28,9 @@ export const IPC_CHANNELS = {
   projectsTree: 'orbit:projects:tree',
   projectsCreate: 'orbit:projects:create',
   projectsOpen: 'orbit:projects:open',
+  workspaceOpenUnsorted: 'orbit:workspace:open-unsorted',
+  conversationsListUnsorted: 'orbit:conversations:list-unsorted',
+  conversationsAssignProject: 'orbit:conversations:assign-project',
   projectsSetRoot: 'orbit:projects:set-root',
   conversationsCreate: 'orbit:conversations:create',
   conversationsRename: 'orbit:conversations:rename',
@@ -63,7 +66,8 @@ export const IPC_CHANNELS = {
  *  `startup.session()` means first run: no project exists yet, so there is
  *  nowhere to put a session and the create-project state shows instead. */
 export interface StartupSession {
-  projectId: ID
+  /** Null for the Unsorted session every launch opens on. */
+  projectId: ID | null
   conversationId: ID
 }
 
@@ -81,7 +85,9 @@ export interface CreateProjectInput {
  *  genuinely have a value, and `setWorkingDirectory` can override a
  *  session's folder later. */
 export interface CreateConversationInput {
-  projectId: ID
+  /** Omitted or null creates an Unsorted session — one that belongs to no
+   *  project and can be used straight away. */
+  projectId?: ID | null
   title?: string
   /** Overrides the project's folder for this session only. Omitted/null
    *  means "inherit the project's folder". */
@@ -116,6 +122,11 @@ export interface ClearAllDataInput {
   /** The word the user typed. Checked in the main process too — see
    *  CLEAR_DATA_CONFIRMATION. */
   confirmation: string
+}
+
+export interface AssignConversationProjectInput {
+  conversationId: ID
+  projectId: ID
 }
 
 export interface RenameConversationInput {
@@ -168,7 +179,9 @@ export interface RespondToInteractionInput {
 }
 
 export interface SendMessageInput {
-  projectId: ID
+  /** Optional, and only ever a consistency check: the conversation is what
+   *  actually owns the turn, and an Unsorted one has no project at all. */
+  projectId?: ID | null
   conversationId: ID
   content: string
   attachmentFileIds?: ID[]
@@ -219,6 +232,9 @@ export interface OrbitApi {
     tree(): Promise<ProjectGroup[]>
     create(input: CreateProjectInput): Promise<Project>
     open(projectId: ID): Promise<ProjectSnapshot>
+    /** The Unsorted workspace — every session that belongs to no project.
+     *  Its snapshot has no `project`, which is the honest shape for it. */
+    openUnsorted(): Promise<ProjectSnapshot>
     setRoot(input: SetProjectRootInput): Promise<Project>
   }
   dialog: {
@@ -238,6 +254,11 @@ export interface OrbitApi {
   }
   conversations: {
     create(input: CreateConversationInput): Promise<Conversation>
+    /** Sessions with no project, for the sidebar's Unsorted group. */
+    listUnsorted(): Promise<Conversation[]>
+    /** Moves an Unsorted session into a project, in place — same session,
+     *  same transcript, same native conversation id. */
+    assignProject(input: AssignConversationProjectInput): Promise<Conversation>
     rename(input: RenameConversationInput): Promise<Conversation>
     delete(input: DeleteConversationInput): Promise<void>
     setTransport(input: SetConversationTransportInput): Promise<Conversation>

@@ -17,6 +17,7 @@ import {
   createReferenceSchema,
   deleteConversationSchema,
   idSchema,
+  assignConversationProjectSchema,
   clearAllDataSchema,
   importArtifactSchema,
   pickFolderSchema,
@@ -65,6 +66,12 @@ export function registerIpc(runtime: OrbitRuntime): void {
   })
   ipcMain.handle(IPC_CHANNELS.startupSession, () => runtime.ensureStartupSession())
   ipcMain.handle(IPC_CHANNELS.defaultModelStatus, () => runtime.defaultModelStatus())
+  ipcMain.handle(IPC_CHANNELS.workspaceOpenUnsorted, () => runtime.openUnsorted())
+  ipcMain.handle(IPC_CHANNELS.conversationsListUnsorted, () => runtime.listUnsortedConversations())
+  ipcMain.handle(IPC_CHANNELS.conversationsAssignProject, (_event, input: unknown) => {
+    const parsed = assignConversationProjectSchema.parse(input)
+    return runtime.assignConversationToProject(parsed.conversationId, parsed.projectId)
+  })
   ipcMain.handle(IPC_CHANNELS.dataClear, async (_event, input: unknown) => {
     const parsed = clearAllDataSchema.parse(input)
     if (parsed.confirmation !== CLEAR_DATA_CONFIRMATION) throw new Error('That confirmation did not match, so nothing was cleared.')

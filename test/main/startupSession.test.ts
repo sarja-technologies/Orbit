@@ -39,27 +39,21 @@ function groupsOf(...projects: Project[]): ProjectGroup[] {
   return projects.map((item) => ({ project: item, conversations: [] }))
 }
 
-describe('which project the launch session belongs to', () => {
+describe('where a launch session starts', () => {
   const WEBSITE = project('project_1', 'AgentDock')
   const RENDERER = project('project_2', 'Renderer')
 
-  it('uses the project the user was last in', () => {
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_2')).toBe('project_2')
+  it('starts in no project at all, whatever was open last', () => {
+    // Unsorted by design: launching Orbit and typing must not require
+    // picking a project, and the last one used is not a decision the user
+    // made about this session.
+    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_2')).toBeNull()
+    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_1')).toBeNull()
+    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), null)).toBeNull()
   })
 
-  it('falls back to the most recently touched project when that one is gone', () => {
-    // The tree is already ordered by recency, so this is deterministic
-    // rather than arbitrary.
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_deleted')).toBe('project_1')
-  })
-
-  it('uses the most recent project when nothing was remembered at all', () => {
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), null)).toBe('project_1')
-  })
-
-  it('has nowhere to put a session when no project exists', () => {
+  it('needs no project to exist first', () => {
     expect(startupProjectFor([], null)).toBeNull()
-    expect(startupProjectFor([], 'project_1')).toBeNull()
   })
 })
 
@@ -75,23 +69,19 @@ describe('exactly one launch session per application launch', () => {
     host = {
       listProjectTree: () => groups,
       readLastActiveProjectId: () => lastActive,
-      createConversation: vi.fn((projectId: string) => {
+      createConversation: vi.fn((projectId: string | null) => {
         made += 1
         return { id: `conversation_${made}`, projectId }
       })
     }
   })
 
-  it('creates the session on the first call', async () => {
+  it('creates one Unsorted session on the first call', async () => {
     const session = await new StartupSessionResolver(host).ensure()
-    expect(session).toEqual({ projectId: 'project_1', conversationId: 'conversation_1' })
-    expect(host.createConversation).toHaveBeenCalledTimes(1)
-  })
 
-  it('creates it through the ordinary session-creation path, with nothing special asked for', async () => {
-    await new StartupSessionResolver(host).ensure()
-    // Just a project: every new-session default is then the normal one.
-    expect(host.createConversation).toHaveBeenCalledWith('project_1')
+    expect(session).toEqual({ projectId: null, conversationId: 'conversation_1' })
+    expect(host.createConversation).toHaveBeenCalledTimes(1)
+    expect(host.createConversation).toHaveBeenCalledWith(null)
   })
 
   it('hands the same session back however many times it is asked for', async () => {
@@ -125,18 +115,20 @@ describe('exactly one launch session per application launch', () => {
     expect(host.createConversation).toHaveBeenCalledTimes(2)
   })
 
-  it('puts the session in the last-used project', async () => {
+  it('does not put the session in the last-used project', async () => {
     lastActive = 'project_2'
     await expect(new StartupSessionResolver(host).ensure()).resolves.toEqual({
-      projectId: 'project_2',
+      projectId: null,
       conversationId: 'conversation_1'
     })
   })
 
-  it('creates no session, and no project, on first run', async () => {
+  it('still produces a session on first run, with no project in existence', async () => {
     groups = []
-    await expect(new StartupSessionResolver(host).ensure()).resolves.toBeNull()
-    expect(host.createConversation).not.toHaveBeenCalled()
+    await expect(new StartupSessionResolver(host).ensure()).resolves.toEqual({
+      projectId: null,
+      conversationId: 'conversation_1'
+    })
   })
 })
 
@@ -160,7 +152,7 @@ describe('the launch session against the real runtime', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('opens on a brand-new session rather than the conversation last used', async () => {
+  it('opens on a brand-new Unsorted session, not the project or conversation last used', async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
     const project = runtime.createProject('AgentDock', workspace)
     const before = runtime.openProject(project.id).conversations[0]!
@@ -169,8 +161,9 @@ describe('the launch session against the real runtime', () => {
     const session = await runtime.ensureStartupSession()
 
     expect(session).not.toBeNull()
-    expect(session!.projectId).toBe(project.id)
+    expect(session!.projectId).toBeNull()
     expect(session!.conversationId).not.toBe(before.id)
+    expect(store.requireConversation(session!.conversationId).projectId).toBeNull()
   })
 
   it('leaves every earlier conversation in place and selectable', async () => {
@@ -180,10 +173,13 @@ describe('the launch session against the real runtime', () => {
 
     const session = await runtime.ensureStartupSession()
 
+    // The project's own sessions are untouched; the launch session is
+    // Unsorted and sits outside them.
     const ids = runtime.openProject(project.id).conversations.map((item) => item.id)
     expect(ids).toContain(first.id)
     expect(ids).toContain(second.id)
-    expect(ids).toContain(session!.conversationId)
+    expect(ids).not.toContain(session!.conversationId)
+    expect(runtime.listUnsortedConversations().map((item) => item.id)).toContain(session!.conversationId)
     // Still reachable, which is what selecting one in the sidebar does.
     expect(store.getConversation(second.id)?.title).toBe('Fix Login Bug')
   })
@@ -206,6 +202,7 @@ describe('the launch session against the real runtime', () => {
     // inherits the project's.
     expect(conversation.nativeConversationId).toBeNull()
     expect(conversation.workingDirectory).toBeNull()
+    expect(conversation.projectId).toBeNull()
     expect(store.getProject(project.id)?.rootPath).toBe(workspace)
   })
 
@@ -217,21 +214,27 @@ describe('the launch session against the real runtime', () => {
     await runtime.ensureStartupSession()
     await runtime.ensureStartupSession()
 
-    expect(runtime.openProject(project.id).conversations).toHaveLength(before + 1)
+    // One Unsorted session, and the project is exactly as it was.
+    expect(runtime.listUnsortedConversations()).toHaveLength(1)
+    expect(runtime.openProject(project.id).conversations).toHaveLength(before)
     expect(runtime.listProjects()).toHaveLength(1)
   })
 
-  it('creates nothing at all when there is no project yet', async () => {
-    await expect(runtime.ensureStartupSession()).resolves.toBeNull()
+  it('still opens on a usable session when no project exists at all', async () => {
+    // First run is no longer a dead end: the session needs no project.
+    const session = await runtime.ensureStartupSession()
+
+    expect(session).not.toBeNull()
+    expect(session!.projectId).toBeNull()
     expect(runtime.listProjects()).toHaveLength(0)
+    expect(runtime.listUnsortedConversations()).toHaveLength(1)
   })
 
   it('still names the launch session from its first prompt', async () => {
-    const project = runtime.createProject('AgentDock')
+    runtime.createProject('AgentDock')
     const session = await runtime.ensureStartupSession()
 
     await runtime.sendMessage({
-      projectId: project.id,
       conversationId: session!.conversationId,
       content: 'build me a futuristic robotics landing page'
     })

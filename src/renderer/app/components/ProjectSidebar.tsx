@@ -6,6 +6,10 @@ export type SessionIndicator = 'running' | 'attention' | null
 
 interface ProjectSidebarProps {
   groups: ProjectGroup[]
+  /** Sessions that belong to no project, shown in their own group above
+   *  the projects. A grouping, not a project — there is no folder, no
+   *  settings and nothing to open behind it. */
+  unsorted: Conversation[]
   /** Opens Orbit's settings. Lives in the sidebar's own footer, not beside
    *  any project. */
   onOpenSettings: () => void
@@ -19,14 +23,17 @@ interface ProjectSidebarProps {
    *  fixed rail width. */
   width: number
   onToggleProject: (projectId: ID) => void
-  onSelectSession: (projectId: ID, conversationId: ID) => void
+  /** Null names the Unsorted workspace rather than a project. */
+  onSelectSession: (projectId: ID | null, conversationId: ID) => void
   /** Opens the project-creation dialog: a project genuinely needs a name
    *  and a folder before it can exist. */
   onNewProject: () => void
   /** Creates a session in this project there and then — no dialog. A
    *  session needs nothing configured: it is named from its first prompt
    *  and runs in its project's folder. */
-  onNewSession: (projectId: ID) => void
+  /** Null creates an Unsorted session, which is what the global control
+   *  does; a project's own + passes that project's id. */
+  onNewSession: (projectId: ID | null) => void
   onRename: (conversationId: ID, title: string) => void
   onDelete: (conversationId: ID) => void
   onToggleCollapsed: () => void
@@ -38,6 +45,7 @@ interface ProjectSidebarProps {
  *  one. Rows are separated by rhythm and a soft selected fill, never boxes. */
 export function ProjectSidebar({
   groups,
+  unsorted,
   onOpenSettings,
   activeProjectId,
   activeConversationId,
@@ -65,8 +73,7 @@ export function ProjectSidebar({
         <button
           type="button"
           className="icon-button"
-          onClick={() => activeProjectId && onNewSession(activeProjectId)}
-          disabled={!activeProjectId}
+          onClick={() => onNewSession(null)}
           aria-label="New session"
           title="New session"
         >
@@ -95,6 +102,40 @@ export function ProjectSidebar({
       </div>
 
       <div className="project-tree">
+        {unsorted.length > 0 ? (
+          <div className={activeProjectId === null ? 'project-group current' : 'project-group'}>
+            <div className="project-row">
+              <span className="project-open project-open-static">
+                <span className="project-name">Unsorted</span>
+              </span>
+            </div>
+            <div className="session-list">
+              {unsorted.map((conversation) => (
+                <SessionRow
+                  key={conversation.id}
+                  conversation={conversation}
+                  active={conversation.id === activeConversationId}
+                  indicator={indicatorFor(conversation.id)}
+                  renaming={renamingId === conversation.id}
+                  confirmingDelete={confirmingDeleteId === conversation.id}
+                  onSelect={() => onSelectSession(null, conversation.id)}
+                  onStartRename={() => setRenamingId(conversation.id)}
+                  onCommitRename={(title) => {
+                    setRenamingId(null)
+                    if (title.trim() && title.trim() !== conversation.title) onRename(conversation.id, title.trim())
+                  }}
+                  onRequestDelete={() => setConfirmingDeleteId(conversation.id)}
+                  onCancelDelete={() => setConfirmingDeleteId(null)}
+                  onConfirmDelete={() => {
+                    setConfirmingDeleteId(null)
+                    onDelete(conversation.id)
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {groups.map((group) => {
           const expanded = expandedProjectIds.includes(group.project.id)
           return (
@@ -197,13 +238,15 @@ function GearGlyph(): JSX.Element {
 interface CreateMenuProps {
   activeProjectId: ID | null
   onNewProject: () => void
-  onNewSession: (projectId: ID) => void
+  /** Null creates an Unsorted session, which is what the global control
+   *  does; a project's own + passes that project's id. */
+  onNewSession: (projectId: ID | null) => void
 }
 
 /** The one creation affordance, compact enough to sit on the section header
  *  rather than taking a full-width button's worth of the sidebar. The two
  *  items are deliberately asymmetric: a project opens its dialog, a session
- *  just appears in the project you are already in. */
+ *  just appears — Unsorted, so it needs nothing chosen first. */
 function CreateMenu({ activeProjectId, onNewProject, onNewSession }: CreateMenuProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -250,14 +293,15 @@ function CreateMenu({ activeProjectId, onNewProject, onNewSession }: CreateMenuP
             <FolderGlyph />
             <span className="menu-item-label">New project</span>
           </button>
+          {/* Always available: a new session needs no project, and starts
+              Unsorted. A project's own + is how one is made inside it. */}
           <button
             type="button"
             role="menuitem"
             className="menu-item"
-            disabled={!activeProjectId}
             onClick={() => {
               setOpen(false)
-              if (activeProjectId) onNewSession(activeProjectId)
+              onNewSession(null)
             }}
           >
             <ChatGlyph />

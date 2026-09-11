@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Conversation, Project } from '@shared/domain'
+import type { Conversation, ID, Project } from '@shared/domain'
 
 interface ProjectControlProps {
   project: Project | null
@@ -12,6 +12,10 @@ interface ProjectControlProps {
   /** Clears a session's own folder override, returning it to the project's.
    *  Absent behaviour, not a delete: the project keeps its folder. */
   onUseProjectFolder: () => void
+  /** The projects an Unsorted session can be filed into. */
+  projects: Project[]
+  /** Files this session into a project, in place. */
+  onAssignProject: (projectId: ID) => void
 }
 
 /** Where this session's work actually happens, stated next to the model.
@@ -33,7 +37,9 @@ export function ProjectControl({
   conversation,
   disabled,
   onChooseProjectFolder,
-  onUseProjectFolder
+  onUseProjectFolder,
+  projects,
+  onAssignProject
 }: ProjectControlProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -57,26 +63,33 @@ export function ProjectControl({
   const override = conversation?.workingDirectory ?? null
   const projectRoot = project?.rootPath ?? null
   const effective = override ?? projectRoot
-  const projectName = project?.name ?? 'No project'
+  // An Unsorted session is a normal state, not a missing one: it runs in a
+  // workspace Orbit keeps for it, and can be filed into a project later.
+  const unsorted = conversation !== null && conversation.projectId === null
+  const projectName = project?.name ?? (unsorted ? 'No project' : 'No project')
 
   return (
     <div className="project-control" ref={wrapperRef}>
       <button
         type="button"
         className="project-trigger"
-        disabled={disabled || !project}
+        disabled={disabled || (!project && !unsorted)}
         aria-label="Project and working folder"
         aria-expanded={open}
         aria-haspopup="dialog"
         // The full path is a tooltip as well as popover content: the common
         // case is wanting to check it, not wanting to change it.
-        title={effective ?? 'No folder chosen'}
+        title={effective ?? (unsorted ? 'Orbit workspace' : 'No folder chosen')}
         onClick={() => setOpen((value) => !value)}
       >
         <FolderGlyph />
         <span className="project-trigger-text">
           <span className="project-trigger-name">{projectName}</span>
-          {effective ? <span className="project-trigger-path">{shortenPath(effective)}</span> : null}
+          {effective ? (
+            <span className="project-trigger-path">{shortenPath(effective)}</span>
+          ) : unsorted ? (
+            <span className="project-trigger-path">Orbit workspace</span>
+          ) : null}
         </span>
       </button>
 
@@ -84,7 +97,7 @@ export function ProjectControl({
         <div className="project-popover" role="dialog" aria-label="Project and working folder">
           <div className="project-popover-head">
             <span className="project-popover-name">{projectName}</span>
-            <span className="project-popover-role">{override ? 'Session folder' : 'Project folder'}</span>
+            <span className="project-popover-role">{unsorted ? 'Unsorted' : override ? 'Session folder' : 'Project folder'}</span>
           </div>
 
           {effective ? (
@@ -98,22 +111,57 @@ export function ProjectControl({
           )}
 
           <p className="project-popover-note">
-            {override
-              ? 'This session overrides its project’s folder.'
-              : 'This session uses its project’s folder.'}
+            {unsorted
+              ? 'This session belongs to no project. It is ready to use as it is — add it to one whenever you want to.'
+              : override
+                ? 'This session overrides its project’s folder.'
+                : 'This session uses its project’s folder.'}
           </p>
 
+          {unsorted && projects.length > 0 ? (
+            <div className="project-assign">
+              <label className="project-assign-label" htmlFor="project-assign">
+                Add to a project
+              </label>
+              <select
+                id="project-assign"
+                className="project-assign-select"
+                value=""
+                onChange={(event) => {
+                  if (!event.target.value) return
+                  setOpen(false)
+                  onAssignProject(event.target.value)
+                }}
+              >
+                <option value="">Choose a project…</option>
+                {projects.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.name}
+                  </option>
+                ))}
+              </select>
+              {/* Said plainly, because the alternative would be Orbit
+                  quietly pointing the next turn at the user's real files
+                  with this session's scratch history behind it. */}
+              <p className="project-assign-note">
+                The session keeps its own folder. Choose the project’s folder separately if you want it to work there.
+              </p>
+            </div>
+          ) : null}
+
           <div className="project-popover-actions">
-            <button
-              type="button"
-              className="project-popover-action"
-              onClick={() => {
-                setOpen(false)
-                onChooseProjectFolder()
-              }}
-            >
-              {projectRoot ? 'Change project folder…' : 'Choose project folder…'}
-            </button>
+            {!unsorted ? (
+              <button
+                type="button"
+                className="project-popover-action"
+                onClick={() => {
+                  setOpen(false)
+                  onChooseProjectFolder()
+                }}
+              >
+                {projectRoot ? 'Change project folder…' : 'Choose project folder…'}
+              </button>
+            ) : null}
             {override ? (
               <button
                 type="button"

@@ -9,6 +9,21 @@ import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
 
+/** The Unsorted workspace: no project behind it, and only the sessions that
+ *  belong to none. */
+const EMPTY_UNSORTED_SNAPSHOT: ProjectSnapshot = {
+  project: null,
+  conversations: [],
+  messages: [],
+  runs: [],
+  artifacts: [],
+  artifactVersions: [],
+  projectFiles: [],
+  references: []
+}
+const snapshotForUnsorted = (): ProjectSnapshot => ({ ...EMPTY_UNSORTED_SNAPSHOT })
+
+
 const AGENTDOCK: Project = { id: 'project_1', name: 'AgentDock', rootPath: '/home/dev/agentdock', createdAt: 'now', updatedAt: 'now' }
 const SIDECAR: Project = { id: 'project_2', name: 'Sidecar', rootPath: null, createdAt: 'now', updatedAt: 'now' }
 
@@ -50,6 +65,7 @@ describe('opening Orbit', () => {
   let created: number
   /** The memoized launch session, exactly as the main process holds it. */
   let launch: Promise<StartupSession | null> | null
+  let unsortedSessions: Conversation[]
 
   const snapshotFor = (project: Project): ProjectSnapshot => ({
     project,
@@ -76,6 +92,7 @@ describe('opening Orbit', () => {
     sessions = { project_1: [FIX_LOGIN, OLDER], project_2: [SIDECAR_SESSION] }
     created = 0
     launch = null
+    unsortedSessions = []
 
     const providerStatus: ProviderStatus = {
       id: 'antigravity',
@@ -100,6 +117,7 @@ describe('opening Orbit', () => {
           return made
         }),
         open: vi.fn(async (projectId) => snapshotFor(projects.find((item) => item.id === projectId) ?? AGENTDOCK)),
+        openUnsorted: vi.fn(async () => ({ ...snapshotForUnsorted(), conversations: unsortedSessions })),
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn(async () => '/home/dev/chosen') },
@@ -109,10 +127,10 @@ describe('opening Orbit', () => {
       startup: {
         session: vi.fn(async () => {
           launch ??= (async (): Promise<StartupSession | null> => {
-            const target = projects.find((item) => item.id === preferences.lastActiveProjectId) ?? projects[0]
-            if (!target) return null
-            const made = await api.conversations.create({ projectId: target.id })
-            return { projectId: target.id, conversationId: made.id }
+            // Unsorted: no project is chosen for it, and none needs to exist.
+            const made = await api.conversations.create({ projectId: null })
+            unsortedSessions = [made, ...unsortedSessions]
+            return { projectId: null, conversationId: made.id }
           })()
           return launch
         })
@@ -131,6 +149,8 @@ describe('opening Orbit', () => {
           sessions[input.projectId] = [made, ...(sessions[input.projectId] ?? [])]
           return made
         }),
+        listUnsorted: vi.fn(async () => unsortedSessions),
+        assignProject: vi.fn(),
         rename: vi.fn(),
         delete: vi.fn(),
         setTransport: vi.fn(),
@@ -165,7 +185,8 @@ describe('opening Orbit', () => {
     await open()
 
     await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_1' })
+    // Unsorted: no project is chosen for the launch session.
+    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null })
     await waitFor(() => expect(within(header()).getByText(DEFAULT_SESSION_TITLE)).toBeInTheDocument())
   })
 
@@ -185,12 +206,14 @@ describe('opening Orbit', () => {
     expect(within(header()).queryByText('Fix Login Bug')).not.toBeInTheDocument()
   })
 
-  it('keeps every earlier conversation in the sidebar, and lets one be opened by hand', async () => {
+  it('keeps every project conversation in the sidebar, and lets one be opened by hand', async () => {
     preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' }
     await open()
 
-    // Still listed, none of them deleted.
-    expect(screen.getByRole('button', { name: /^Fix Login Bug/ })).toBeInTheDocument()
+    // The launch session is Unsorted, so the project has to be expanded to
+    // see its sessions — they are still there, and none was deleted.
+    await userEvent.click(screen.getByRole('button', { name: 'AgentDock' }))
+    expect(await screen.findByRole('button', { name: /^Fix Login Bug/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Older Work/ })).toBeInTheDocument()
 
     // And still selectable after the launch session has taken the floor.
@@ -210,7 +233,7 @@ describe('opening Orbit', () => {
 
     expect(api.startup.session).toHaveBeenCalledTimes(3)
     expect(api.conversations.create).toHaveBeenCalledTimes(1)
-    expect(sessions.project_1).toHaveLength(3)
+    expect(unsortedSessions).toHaveLength(1)
   })
 
   it('creates no extra session when the renderer merely re-renders', async () => {
@@ -231,24 +254,28 @@ describe('opening Orbit', () => {
 
     await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(2))
     // The earlier launch session is still there — nothing is cleaned up.
-    expect(sessions.project_1).toHaveLength(4)
-    expect(screen.getByRole('button', { name: /^Fix Login Bug/ })).toBeInTheDocument()
+    expect(unsortedSessions).toHaveLength(2)
+    expect(sessions.project_1).toHaveLength(2)
   })
 
-  it('puts the fresh session in the project the user was last in', async () => {
+  it('does not put the fresh session in the project the user was last in', async () => {
     preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_2', lastActiveConversationId: 'conversation_3' }
     await open()
 
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_2' })
-    await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_2'))
-    await waitFor(() => expect(within(header()).getByText('Sidecar')).toBeInTheDocument())
+    // Neither the project nor the conversation is reopened: launching lands
+    // somewhere new, with nothing chosen.
+    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null })
+    expect(api.projects.open).not.toHaveBeenCalled()
+    expect(api.projects.openUnsorted).toHaveBeenCalled()
   })
 
-  it('falls back to the most recent project when the remembered one is gone', async () => {
-    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_deleted', lastActiveConversationId: 'conversation_gone' }
+  it('needs no project to exist at all', async () => {
+    projects = []
+    sessions = {}
     await open()
 
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: 'project_1' })
+    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null })
+    await waitFor(() => expect(screen.getByLabelText('Message Antigravity')).toBeInTheDocument())
   })
 
   it('creates no project when one already exists', async () => {
@@ -258,12 +285,11 @@ describe('opening Orbit', () => {
     expect(projects).toHaveLength(2)
   })
 
-  it('creates nothing on first run, and offers to make the first project', async () => {
+  it('creates no project on first run, only a session', async () => {
     projects = []
     sessions = {}
     await open()
 
-    expect(api.conversations.create).not.toHaveBeenCalled()
     expect(api.projects.create).not.toHaveBeenCalled()
     expect(await screen.findByText('No projects yet.')).toBeInTheDocument()
   })
@@ -284,20 +310,22 @@ describe('opening Orbit', () => {
     expect(permissions).toHaveTextContent(/Ask first/i)
   })
 
-  it('inherits the project’s working folder for the launch session', async () => {
+  it('shows the launch session as belonging to no project, and still usable', async () => {
     await open()
 
-    // The session has no folder of its own, so the project's is what shows.
-    await waitFor(() => expect(within(header()).getByText('/home/dev/agentdock')).toBeInTheDocument())
+    // "No project" is a state, not an error: the composer is ready.
+    await waitFor(() => expect(screen.getByLabelText('Project and working folder')).toHaveTextContent('No project'))
+    expect(screen.getByLabelText('Message Antigravity')).toBeEnabled()
   })
 
-  it('still makes a session in one click after landing in the launch one', async () => {
+  it('still makes a session inside a project in one click', async () => {
     await open()
     await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
 
     await userEvent.click(screen.getByLabelText('New session in AgentDock'))
 
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(2))
+    // A project's own + still puts the session in that project.
+    await waitFor(() => expect(api.conversations.create).toHaveBeenLastCalledWith({ projectId: 'project_1' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })

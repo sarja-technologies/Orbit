@@ -40,7 +40,12 @@ export interface ModelOption {
 
 export interface Conversation {
   id: ID
-  projectId: ID
+  /** The project this session belongs to, or null for an Unsorted one.
+   *
+   *  Unsorted is a real absence, not a hidden project: a session can be
+   *  started and used before the user has decided where it belongs, and can
+   *  be assigned to a project later without being recreated. */
+  projectId: ID | null
   title: string
   providerId: ProviderId
   nativeConversationId: string | null
@@ -71,7 +76,8 @@ export type MessageStatus = 'pending' | 'streaming' | 'completed' | 'failed' | '
 
 export interface Message {
   id: ID
-  projectId: ID
+  /** Null when the session that produced it is Unsorted. */
+  projectId: ID | null
   conversationId: ID
   runId: ID | null
   role: MessageRole
@@ -86,7 +92,8 @@ export type RunState = 'queued' | 'running' | 'waiting_for_interaction' | 'cance
 
 export interface Run {
   id: ID
-  projectId: ID
+  /** Null when the session that produced it is Unsorted. */
+  projectId: ID | null
   conversationId: ID
   providerId: ProviderId
   state: RunState
@@ -210,7 +217,8 @@ export interface OrbitPreferences {
 }
 
 export interface ProjectSnapshot {
-  project: Project
+  /** Null for the Unsorted workspace, which has no project behind it. */
+  project: Project | null
   conversations: Conversation[]
   messages: Message[]
   runs: Run[]

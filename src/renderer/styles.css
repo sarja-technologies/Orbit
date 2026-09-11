@@ -42,6 +42,15 @@
   --danger: #e08585;
   --danger-soft: rgba(224, 133, 133, 0.13);
   --success: #5cbf92;
+  /* Semantic accents for symbols. Named after what they mean, not after
+     the colour, so a starter and an activity row that stand for the same
+     kind of work read the same. Used on icons, hairlines and hover tints —
+     never on a whole surface: the app stays calm and the colour is there to
+     tell things apart at a glance. */
+  --kind-explore: #58b6c8;
+  --kind-build: #8d8cf0;
+  --kind-fix: #d8a75a;
+  --kind-review: #5cbf92;
 
   /* The reasoning tiers, as a real progression rather than one colour used
      three times: quiet steel at the bottom, teal in between, and purple
@@ -1927,17 +1936,43 @@ body.is-resizing {
   font-size: var(--text-meta);
 }
 
+.starter {
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+/* The icon carries the colour; the chip stays a dark, quiet surface. Each
+   starter keeps its own accent through rest, hover and focus so the four
+   are distinguishable without reading them. */
 .starter svg {
-  color: var(--text-muted);
+  color: var(--starter-accent, var(--text-muted));
 }
 
 .starter:hover {
   background: var(--bg-active);
+  border-color: color-mix(in srgb, var(--starter-accent, var(--border-strong)) 38%, transparent);
   color: var(--text-primary);
 }
 
-.starter:hover svg {
-  color: var(--text-secondary);
+.starter:focus-visible {
+  outline: 2px solid var(--starter-accent, var(--accent));
+  outline-offset: 2px;
+}
+
+.starter-explore {
+  --starter-accent: var(--kind-explore);
+}
+
+.starter-build {
+  --starter-accent: var(--kind-build);
+}
+
+.starter-fix {
+  --starter-accent: var(--kind-fix);
+}
+
+.starter-review {
+  --starter-accent: var(--kind-review);
 }
 
 .session-blank .transcript-viewport {
@@ -3800,4 +3835,99 @@ button.danger:disabled {
   left: 0;
   z-index: 20;
   min-width: 140px;
+}
+
+
+/* ---------- semantic symbol colour ---------- */
+
+/* The same four meanings the starters use, applied to the symbols that
+   stand for them elsewhere. Icons only: the rows keep their own surfaces. */
+.activity-item[data-kind='command'] .activity-item-mark,
+.activity-item[data-kind='command'] svg {
+  color: var(--kind-build);
+}
+
+.activity-item[data-kind='read'] svg,
+.activity-item[data-kind='list'] svg {
+  color: var(--kind-explore);
+}
+
+.activity-item[data-kind='search'] svg {
+  color: var(--kind-explore);
+}
+
+.activity-item[data-kind='edit'] svg {
+  color: var(--kind-fix);
+}
+
+.activity-item-failed svg {
+  color: var(--danger);
+}
+
+/* A resolved interaction that was approved reads as done, not as neutral. */
+.transcript-note-mark {
+  color: var(--success);
+}
+
+.transcript-note-denied .transcript-note-mark {
+  color: var(--danger);
+}
+
+/* Attachments and artifacts: quiet, but not the same grey as body text. */
+.sent-file svg,
+.artifact-row svg {
+  color: var(--kind-explore);
+}
+
+/* Permission state is the one place colour is genuinely a warning. */
+.permission-trigger.is-permissive svg {
+  color: var(--attention);
+}
+
+/* ---------- unsorted sessions ---------- */
+
+/* The Unsorted group's header is a label, not a button: there is no project
+   behind it to open, rename or configure. */
+.project-open-static {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.project-assign {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.project-assign-label {
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+}
+
+.project-assign-select {
+  padding: 4px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-meta);
+}
+
+.project-assign-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.project-assign-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
 }

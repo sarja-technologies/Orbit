@@ -17,7 +17,9 @@ export type RuntimeEvent =
 
 export interface RuntimeEventBase {
   type: string
-  projectId: ID
+  /** Null when the run belongs to an Unsorted session. Events are matched
+   *  by `runId` everywhere that matters; this is context, not identity. */
+  projectId: ID | null
   conversationId: ID
   runId: ID
   createdAt: string

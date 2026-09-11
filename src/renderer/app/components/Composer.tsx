@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent } from 'react'
-import type { Conversation, ModelOption, Project, ReasoningEffort } from '@shared/domain'
+import type { Conversation, ID, ModelOption, Project, ReasoningEffort } from '@shared/domain'
 import type { PermissionMode } from '@shared/permissionMode'
 import type { DraftAttachment } from '../lib/attachments'
 import { imageItemsFromClipboard } from '../lib/attachments'
@@ -30,6 +30,9 @@ interface ComposerProps {
   onSelectPermissionMode: (mode: PermissionMode) => void
   onChooseProjectFolder: () => void
   onUseProjectFolder: () => void
+  /** Projects an Unsorted session can be filed into. */
+  projects: Project[]
+  onAssignProject: (projectId: ID) => void
   /** Lets the empty-state starters hand focus back to the composer after
    *  they fill it, so the user can keep typing without reaching for it. */
   registerFocus?: (focus: () => void) => void
@@ -72,6 +75,8 @@ export function Composer({
   onSelectPermissionMode,
   onChooseProjectFolder,
   onUseProjectFolder,
+  projects,
+  onAssignProject,
   registerFocus
 }: ComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -157,6 +162,8 @@ export function Composer({
             disabled={disabled}
             onChooseProjectFolder={onChooseProjectFolder}
             onUseProjectFolder={onUseProjectFolder}
+            projects={projects}
+            onAssignProject={onAssignProject}
           />
 
           <div className="composer-spacer" />

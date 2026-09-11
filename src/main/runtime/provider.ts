@@ -3,7 +3,8 @@ import type { RuntimeEvent } from '@shared/runtime-events'
 import type { PermissionMode } from '@shared/permissionMode'
 
 export interface ProviderSendInput {
-  projectId: ID
+  /** Null for an Unsorted session. */
+  projectId: ID | null
   conversationId: ID
   runId: ID
   prompt: string

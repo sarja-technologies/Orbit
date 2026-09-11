@@ -83,7 +83,7 @@ describe('OrbitStore', () => {
       contentHash: 'hash'
     })
     const snapshot = store.openProjectSnapshot(project.id)
-    expect(snapshot.project.name).toBe('Launch')
+    expect(snapshot.project!.name).toBe('Launch')
     expect(snapshot.conversations).toHaveLength(1)
     expect(snapshot.messages[0]?.content).toBe('Build a page')
     expect(snapshot.runs[0]?.id).toBe(run.id)
