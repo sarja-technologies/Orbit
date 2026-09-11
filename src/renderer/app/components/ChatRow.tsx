@@ -29,6 +29,15 @@ interface ChatRowProps {
   status?: ReactNode
   /** Widens the bubble's own class list, e.g. to mark it streaming. */
   bubbleClassName?: string
+  /** Hover/focus actions for this message — Copy today.
+   *
+   *  A sibling of the bubble, never a child of it: rendered inside, the
+   *  action was a block in the bubble's own flow, so every message paid for
+   *  a row of button height plus its margin even while the action was
+   *  invisible. A two-character message came out as tall as a two-line one.
+   *  Out here it is positioned against the row instead and contributes no
+   *  height at all. */
+  actions?: ReactNode
   children: ReactNode
 }
 
@@ -50,6 +59,7 @@ export function ChatRow({
   timestamp,
   status,
   bubbleClassName,
+  actions,
   children
 }: ChatRowProps): JSX.Element {
   const isUser = role === 'user'
@@ -68,6 +78,7 @@ export function ChatRow({
         </div>
       ) : null}
       <div className={`chat-bubble chat-bubble-${role}${bubbleClassName ? ` ${bubbleClassName}` : ''}`}>{children}</div>
+      {actions}
     </div>
   )
 }
