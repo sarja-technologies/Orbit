@@ -275,7 +275,7 @@ export class AntigravityPtySession {
         this.emit({ type: 'run.started', nativeConversationId: this.nativeConversationId })
         // Say which setting is actually being deferred. A permission mode
         // that cannot be applied yet matters more than a model that cannot:
-        // the user picked "Skip approvals" and this turn is still going to
+        // the user picked "Bypass permissions" and this turn is still going to
         // run under the mode the process was launched with, so the notice
         // has to state that rather than letting the composer's label stand
         // unchallenged.
@@ -285,7 +285,7 @@ export class AntigravityPtySession {
             ? {
                 type: 'run.notice',
                 code: 'permission.deferred',
-                message: `This turn still runs under the permission mode this session started with (${this.spawnedPermissionMode === 'skip' ? 'Skip approvals' : 'Ask first'}). Antigravity applies a permission change only when the conversation can be resumed, which takes one more turn — it will apply automatically from the next message.`
+                message: `This turn still runs under the permission mode this session started with (${this.spawnedPermissionMode === 'skip' ? 'Bypass permissions' : 'Ask first'}). Antigravity applies a permission change only when the conversation can be resumed, which takes one more turn — it will apply automatically from the next message.`
               }
             : {
                 type: 'run.notice',

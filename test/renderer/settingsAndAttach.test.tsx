@@ -9,6 +9,7 @@ import { AttachMenu } from '../../src/renderer/app/components/AttachMenu'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { EMPTY_PREFERENCES } from '../../src/shared/reasoningPolicy'
 import { CLEAR_DATA_CONFIRMATION } from '../../src/shared/clearData'
+import { DEFAULT_PERMISSION_MODE, PERMISSION_MODES, normalizePermissionMode, permissionArgs } from '../../src/shared/permissionMode'
 import type { ModelOption } from '../../src/shared/domain'
 import type { ResolvedDefaultModel } from '../../src/shared/newSessionDefaults'
 import { STARTERS } from '../../src/renderer/app/components/EmptySession'
@@ -105,7 +106,7 @@ describe('Orbit settings', () => {
     panel()
     const select = screen.getByLabelText(/Default permissions/) as HTMLSelectElement
 
-    expect([...select.options].map((option) => option.textContent)).toEqual(['Ask first', 'Skip approvals'])
+    expect([...select.options].map((option) => option.textContent)).toEqual(['Ask first', 'Bypass permissions'])
     expect(select.value).toBe('ask')
   })
 
@@ -288,5 +289,51 @@ describe('semantic colour for symbols', () => {
     for (const starter of STARTERS) {
       expect(STYLES).toContain(`.starter-${starter.id}`)
     }
+  })
+})
+
+describe('the permission modes Orbit offers, by name', () => {
+  it('calls the bypass mode "Bypass permissions" everywhere it is named', () => {
+    const bypass = PERMISSION_MODES.find((mode) => mode.id === 'skip')!
+
+    expect(bypass.label).toBe('Bypass permissions')
+    expect(bypass.description).toBe('Run tools without asking for permission.')
+    // The words changed; what it does did not.
+    expect(bypass.nativeMode).toBe('always-proceed')
+    expect(permissionArgs('skip')).toEqual(['--dangerously-skip-permissions'])
+  })
+
+  it('keeps the internal id as `skip`, so nothing stored has to be migrated', () => {
+    expect(PERMISSION_MODES.map((mode) => mode.id)).toEqual(['ask', 'skip'])
+    expect(normalizePermissionMode('skip')).toBe('skip')
+    expect(DEFAULT_PERMISSION_MODE).toBe('ask')
+  })
+
+  it('leaves Ask first exactly as it was', () => {
+    const ask = PERMISSION_MODES.find((mode) => mode.id === 'ask')!
+
+    expect(ask.label).toBe('Ask first')
+    expect(ask.nativeMode).toBe('request-review')
+    expect(permissionArgs('ask')).toEqual([])
+  })
+
+  it('has no user-visible "Skip approvals" left anywhere in the source', () => {
+    // A rename is only done when the old words are gone.
+    const root = path.resolve(__dirname, '../../src')
+    const offenders: string[] = []
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+          continue
+        }
+        if (!/\.(ts|tsx|css)$/.test(entry.name)) continue
+        if (/skip approvals/i.test(fs.readFileSync(full, 'utf8'))) offenders.push(full)
+      }
+    }
+    walk(root)
+
+    expect(offenders).toEqual([])
   })
 })

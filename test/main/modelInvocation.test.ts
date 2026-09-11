@@ -873,7 +873,7 @@ describe('a permission change on a live pty session', () => {
   it('retires the process so the new mode is actually the one agy launches with', async () => {
     // Sticky PTY ownership must not outlive the flags it was spawned with:
     // a process started under Ask first is still in request-review, so
-    // reusing it while the composer says Skip approvals would run the turn
+    // reusing it while the composer says Bypass permissions would run the turn
     // under semantics the user did not choose.
     const { instance, spawns, transports } = ptyHarness(conversationIdFromSecondTurn())
 

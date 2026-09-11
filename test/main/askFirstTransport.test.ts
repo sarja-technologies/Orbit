@@ -49,7 +49,7 @@ class ApprovalProvider implements AgentProvider {
     this.lastInput = input
     onEvent({ ...this.base(input), type: 'run.started', nativeConversationId: 'native-1' })
 
-    // Skip approvals launches with --dangerously-skip-permissions, so agy
+    // Bypass permissions launches with --dangerously-skip-permissions, so agy
     // never asks: the action simply happens.
     if (input.permissionMode === 'skip') {
       this.actionPerformed = true
@@ -104,7 +104,7 @@ describe('which transport a turn runs on', () => {
     expect(transportForTurn({ current: 'structured', permissionMode: 'ask', hasImageAttachment: false })).toBe('pty')
   })
 
-  it('leaves a Skip approvals session on the headless path', () => {
+  it('leaves a Bypass permissions session on the headless path', () => {
     expect(transportForTurn({ current: 'structured', permissionMode: 'skip', hasImageAttachment: false })).toBe('structured')
   })
 
@@ -217,7 +217,7 @@ describe('Ask First', () => {
     ).rejects.toThrow(/does not belong/i)
   })
 
-  it('keeps Skip approvals on always-proceed, asking nothing', async () => {
+  it('keeps Bypass permissions on always-proceed, asking nothing', async () => {
     const { run } = await startTurn('skip')
 
     expect(provider.lastInput?.permissionMode).toBe('skip')

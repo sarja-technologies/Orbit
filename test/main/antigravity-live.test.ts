@@ -633,14 +633,14 @@ describe('Ask First against the real agy', () => {
   )
 })
 
-/** Skip approvals, end to end through the real runtime and the real agy.
+/** Bypass permissions, end to end through the real runtime and the real agy.
  *
- *  The reported bug: a session showing "Skip approvals" ran its tools, then
+ *  The reported bug: a session showing "Bypass permissions" ran its tools, then
  *  told the user Antigravity had "needed permission it could not ask for".
  *  This proves the whole path — the persisted mode, the transport it picks,
  *  the flag agy is launched with, the state agy reports back, and that an
  *  ordinary file-writing turn completes with no approval anywhere. */
-describe('Skip approvals against the real agy', () => {
+describe('Bypass permissions against the real agy', () => {
   it.runIf(live)(
     'runs a file-writing turn with no approval, and no permission error',
     async () => {
@@ -698,6 +698,74 @@ describe('Skip approvals against the real agy', () => {
     240_000
   )
 })
+
+/** A model chosen in the UI has to become the model agy is launched with.
+ *
+ *  Proves the whole path against the real CLI: the selection persists, the
+ *  next run resolves it, and agy's own `init` event reports running as that
+ *  model — then again on the way back, so it is not a one-way latch. */
+describe('a model change against the real agy', () => {
+  it.runIf(live)(
+    'launches the next turn as whichever catalogue model is selected',
+    async () => {
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-model-live-'))
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-model-data-'))
+      dirs.push(workspace, dataDir)
+
+      const db = new OrbitDatabase({ dataDir })
+      await db.init()
+      const store = new OrbitStore(db)
+      const provider = new AntigravityProvider()
+      const runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dataDir)), provider, dataDir, '0.1.0')
+      const catalogue = await runtime.listModels()
+
+      // Real ids from the live catalogue — never invented.
+      const other = catalogue.find((model) => model.id !== ORBIT_DEFAULT_MODEL_ID)
+      expect(other, 'the live catalogue should offer more than one model').toBeDefined()
+
+      // An Unsorted session: no project, nothing chosen first.
+      const session = runtime.createConversation(null)
+      runtime.setConversationPermissionMode(session.id, 'skip')
+      expect(store.requireConversation(session.id).model).toBe(ORBIT_DEFAULT_MODEL_ID)
+
+      const runAs = async (modelId: string): Promise<string | null> => {
+        runtime.setConversationModel(session.id, modelId, null)
+        expect(store.requireConversation(session.id).model, 'the selection must persist').toBe(modelId)
+        // agy reports the model it is actually running as in its own init
+        // event, which is the fact this is answerable to.
+        return livePermissionModel(workspace, ['--model', modelId, '--effort', 'low'])
+      }
+
+      expect(await runAs(other!.id)).toBe(other!.id)
+      // ...and back again.
+      expect(await runAs(ORBIT_DEFAULT_MODEL_ID)).toBe(ORBIT_DEFAULT_MODEL_ID)
+      expect(store.requireConversation(session.id).model).toBe(ORBIT_DEFAULT_MODEL_ID)
+
+      await provider.shutdown()
+      db.close()
+    },
+    240_000
+  )
+})
+
+/** The model agy announces in its own `init` event for a given argv. */
+function livePermissionModel(cwd: string, extraArgs: string[]): string | null {
+  const result = spawnSync('agy', [...extraArgs, '--output-format', 'stream-json', '-p', 'Reply with exactly: OK'], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 150_000
+  })
+  for (const line of (result.stdout ?? '').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as { event?: string; init?: { model?: string } }
+      if (parsed.event === 'init' && parsed.init?.model) return parsed.init.model
+    } catch {
+      // Non-JSON chrome on stdout is not an error here.
+    }
+  }
+  return null
+}
 
 function permissionPromptsUnavailableReason(): string | null {
   const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json')
