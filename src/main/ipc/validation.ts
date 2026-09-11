@@ -126,7 +126,12 @@ export const respondToInteractionSchema = z.object({
 })
 
 export const sendMessageSchema = z.object({
-  projectId: idSchema,
+  // Null/absent is an Unsorted session — one that belongs to no project.
+  // The conversation is what owns the turn; this is only ever a consistency
+  // check against what the caller believed (see OrbitRuntime.sendMessage),
+  // so requiring a string here rejected a legitimate state before the
+  // runtime could look at it. Same semantics as createConversationSchema.
+  projectId: idSchema.nullish().transform((value) => value ?? null),
   conversationId: idSchema,
   content: z.string().trim().min(1).max(100_000),
   attachmentFileIds: z.array(idSchema).optional(),
@@ -137,6 +142,11 @@ export const cancelRunSchema = z.object({
   runId: idSchema
 })
 
+/** Attachments are project-scoped for real, not by oversight: a stored file
+ *  row requires a project (project_files.project_id is NOT NULL) and the
+ *  bytes live under that project's directory. An Unsorted session therefore
+ *  has nowhere to put one, and the composer disables the control rather
+ *  than letting a send fail at this boundary. */
 export const attachFilesSchema = z.object({
   projectId: idSchema,
   category: attachmentPickerCategorySchema.default('files')

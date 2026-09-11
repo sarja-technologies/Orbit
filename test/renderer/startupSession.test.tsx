@@ -175,7 +175,21 @@ describe('opening Orbit', () => {
       defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },
       models: { list: vi.fn(async () => MODELS) },
-      messages: { send: vi.fn() },
+      messages: {
+        send: vi.fn(async () => ({
+          id: 'run_1',
+          projectId: null,
+          conversationId: 'conversation_new_1',
+          providerId: 'antigravity' as const,
+          state: 'running' as const,
+          startedAt: 'now',
+          endedAt: null,
+          cancellationRequestedAt: null,
+          nativeRunId: null,
+          error: null,
+          metadata: {}
+        }))
+      },
       runs: { cancel: vi.fn(), onEvent: vi.fn(() => () => undefined) },
       interactions: { respond: vi.fn() },
       files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn(), thumbnail: vi.fn(async () => null), pathForFile: vi.fn(() => null) },
@@ -389,6 +403,30 @@ describe('opening Orbit', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Permissions' })).toHaveTextContent(/Ask first/i))
     expect(vi.mocked(api.conversations.setPermissionMode).mock.calls.at(-1)?.[0]).toMatchObject({ permissionMode: 'ask' })
+  })
+
+  it('sends from the Unsorted session with no project, and says so to the runtime', async () => {
+    // The reported failure came from here: the composer sent projectId null
+    // and the IPC validator rejected it before the runtime was reached.
+    await open()
+    await userEvent.type(screen.getByLabelText('Message Antigravity'), 'Reply with the exact model name you are running as.')
+    await userEvent.click(screen.getByLabelText('Send message'))
+
+    await waitFor(() =>
+      expect(api.messages.send).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: null, conversationId: 'conversation_new_1' })
+      )
+    )
+  })
+
+  it('offers no attachment control it cannot honour in an Unsorted session', async () => {
+    await open()
+
+    // Attachments are stored against a project, so rather than a control
+    // that silently does nothing, it is disabled and says why.
+    const attach = screen.getByRole('button', { name: 'Add files' })
+    expect(attach).toBeDisabled()
+    expect(attach).toHaveAttribute('title', expect.stringMatching(/stored in a project/i))
   })
 
   it('shows the launch session as belonging to no project, and still usable', async () => {

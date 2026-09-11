@@ -154,7 +154,15 @@ export function Composer({
             action that starts it. Deliberately not a toolbar: these are
             facts about the session that happen to be adjustable. */}
         <div className="composer-controls">
-          <AttachMenu disabled={disabled} onPick={onPickFiles} />
+          <AttachMenu
+            disabled={disabled}
+            unavailableReason={
+              conversation && conversation.projectId === null
+                ? 'Attachments are stored in a project. Add this session to one to attach files.'
+                : null
+            }
+            onPick={onPickFiles}
+          />
 
           <ProjectControl
             project={project}
