@@ -49,12 +49,14 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
       showIdentity={showRole}
       timestamp={message.createdAt}
       {...(identity ? { identity } : {})}
+      // The message's own source text, never the rendered markup: what
+      // lands on the clipboard is what was written. Passed as the row's
+      // actions rather than as content, so the bubble holds the message and
+      // nothing else.
+      actions={<MessageActions text={message.content} label={isUser ? 'your message' : 'reply'} />}
     >
       {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
-      {/* The message's own source text, never the rendered markup: what
-          lands on the clipboard is what was written. */}
-      <MessageActions text={message.content} label={isUser ? 'your message' : 'reply'} />
     </ChatRow>
   )
 }

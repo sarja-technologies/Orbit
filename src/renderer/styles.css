@@ -1149,6 +1149,7 @@ body.is-resizing {
    subordinate activity both align to, and the reader's collapses to a
    single right-justified column. */
 .chat-row {
+  position: relative;
   display: grid;
   grid-template-columns: var(--chat-mark) minmax(0, 1fr);
   grid-template-rows: auto auto;
@@ -3435,22 +3436,52 @@ body.is-resizing {
 
 /* Revealed by hover or by focus landing anywhere in the row, so the copy
    button is reachable with a pointer and with the keyboard alike, without
-   parking a control under every message permanently. */
+   parking a control under every message permanently.
+ 
+   Positioned against the row rather than laid out in it. This used to be a
+   block inside the bubble, which meant every message reserved a row of
+   button height plus its margin even while the action was invisible — a
+   one-word message rendered as tall as a two-line one. Taking it out of
+   flow entirely is what keeps the bubble the size of its text, and it also
+   means revealing the action cannot reflow the transcript.
+ 
+   It hangs into the gap between turns (--space-5), which is taller than the
+   control, so it never lands on the next message. Opacity, never
+   `visibility` or `display`: the button has to stay in the tab order to be
+   reachable by keyboard at all, and pointer-events is what stops an
+   invisible one from swallowing clicks. */
 .message-actions {
+  position: absolute;
+  top: 100%;
+  z-index: 1;
   display: flex;
   gap: var(--space-1);
-  margin-top: var(--space-1);
+  /* Rides on the bubble's bottom edge, overlapping only its padding — less
+     than the 12px/16px the bubble reserves there, so it can never land on a
+     glyph — and hanging the rest into the gap below. Pulling it up this far
+     is what keeps clear air between it and the next turn. */
+  margin-top: -6px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 120ms ease;
+}
+
+/* Assistant actions start on the shared content rail, under the bubble's
+   own left edge; the reader's sit under the right edge their bubble is
+   justified to. */
+.chat-row-assistant .message-actions {
+  left: var(--chat-rail);
+}
+
+.chat-row-user .message-actions {
+  right: 0;
+  justify-content: flex-end;
 }
 
 .chat-row:hover .message-actions,
 .chat-row:focus-within .message-actions {
   opacity: 1;
-}
-
-.chat-row-user .message-actions {
-  justify-content: flex-end;
+  pointer-events: auto;
 }
 
 .message-action {
@@ -3460,7 +3491,9 @@ body.is-resizing {
   padding: 3px var(--space-2);
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: transparent;
+  /* Opaque, because it floats over the bubble's edge: transparent here let
+     the bubble show through the pill and its border cross the edge. */
+  background: var(--bg-elevated);
   color: var(--text-muted);
   font: inherit;
   font-size: 11px;
