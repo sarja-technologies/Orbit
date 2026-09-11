@@ -87,6 +87,41 @@ describe('the copy action lives outside the bubble', () => {
     expect(bubble.querySelector('button')).toBeNull()
   })
 
+  it('keeps a one-sentence reply’s bubble to its text alone', () => {
+    const { container } = block(message({ role: 'assistant', content: 'Hello! How can I help you today?' }))
+    const bubble = container.querySelector('.chat-bubble-assistant')!
+
+    // One child — the prose — and nothing else taking up interior space.
+    expect(bubble.children).toHaveLength(1)
+    expect(bubble.textContent).toBe('Hello! How can I help you today?')
+    expect(bubble.querySelector('.message-actions')).toBeNull()
+  })
+
+  it('keeps short messages of every shape to their content', () => {
+    for (const content of ['hi', 'hello', 'okay']) {
+      const user = block(message({ role: 'user', content }))
+      expect(user.container.querySelector('.chat-bubble-user')!.textContent).toBe(content)
+      expect(user.container.querySelector('.chat-bubble-user')!.children).toHaveLength(1)
+      user.unmount()
+
+      const assistant = block(message({ role: 'assistant', content }))
+      expect(assistant.container.querySelector('.chat-bubble-assistant')!.textContent).toBe(content)
+      assistant.unmount()
+    }
+  })
+
+  it('still renders markdown structure inside the bubble', () => {
+    const { container } = block(
+      message({ role: 'assistant', content: '## Heading\n\nFirst paragraph.\n\nSecond paragraph.' })
+    )
+    const bubble = container.querySelector('.chat-bubble-assistant')!
+
+    // Tightening the interior must not have flattened the content itself.
+    expect(bubble.querySelector('.prose')).not.toBeNull()
+    expect(bubble.textContent).toContain('First paragraph.')
+    expect(bubble.textContent).toContain('Second paragraph.')
+  })
+
   it('adds no bubble children for an assistant reply either', () => {
     const { container } = block(message({ role: 'assistant', content: 'Done.' }))
     const bubble = container.querySelector('.chat-bubble-assistant')!
@@ -225,5 +260,53 @@ describe('bubbles are sized by their content', () => {
     const rule = ruleFor('.chat-bubble pre,\n.chat-bubble table')
     expect(rule).toMatch(/max-width:\s*100%/)
     expect(rule).toMatch(/overflow-x:\s*auto/)
+  })
+})
+
+describe('the bubble interior is tight without being cramped', () => {
+  it('pads both roles from one shared pair, rather than per role', () => {
+    // The assistant used to override the base with a larger, squarer pad,
+    // which is what left a one-line reply more than half empty.
+    expect(ruleFor('.chat-bubble')).toMatch(/padding:\s*var\(--chat-bubble-pad-y\)\s+var\(--chat-bubble-pad-x\)/)
+    expect(ruleFor('.chat-bubble-assistant')).not.toMatch(/padding/)
+  })
+
+  it('keeps the bubble’s own measure tighter than the page rhythm', () => {
+    const root = ruleFor(':root')
+    const y = /--chat-bubble-pad-y:\s*(\d+)px/.exec(root)
+    const x = /--chat-bubble-pad-x:\s*(\d+)px/.exec(root)
+    const space4 = /--space-4:\s*(\d+)px/.exec(root)
+
+    expect(y, 'expected a --chat-bubble-pad-y token').not.toBeNull()
+    expect(x, 'expected a --chat-bubble-pad-x token').not.toBeNull()
+    // A bubble already carries a border, a background and generous
+    // line-height; matching the page's own --space-4 read as dead space.
+    expect(Number(y![1])).toBeLessThan(Number(space4![1]))
+    expect(Number(x![1])).toBeLessThan(Number(space4![1]))
+    // ...but still enough to breathe.
+    expect(Number(y![1])).toBeGreaterThanOrEqual(8)
+    expect(Number(x![1])).toBeGreaterThanOrEqual(10)
+    // Wider than it is tall, the way text actually wants to sit.
+    expect(Number(x![1])).toBeGreaterThan(Number(y![1]))
+  })
+
+  it('nothing props a bubble open beyond its text', () => {
+    const rule = ruleFor('.chat-bubble')
+    expect(rule).not.toMatch(/min-height/)
+    expect(rule).not.toMatch(/height:/)
+  })
+
+  it('tightens paragraph rhythm inside a reply, which only ever renders in a bubble', () => {
+    const root = ruleFor(':root')
+    const space3 = Number(/--space-3:\s*(\d+)px/.exec(root)![1])
+    const space4 = Number(/--space-4:\s*(\d+)px/.exec(root)![1])
+
+    expect(ruleFor('.prose > * + *')).toMatch(/margin-top:\s*var\(--space-3\)/)
+    expect(space3).toBeLessThan(space4)
+  })
+
+  it('still lets prose keep its readable line-height', () => {
+    // Tightening was a padding fix, not a typography one.
+    expect(ruleFor('.prose')).toMatch(/line-height:\s*1\.7/)
   })
 })
