@@ -56,7 +56,10 @@ export function ChatRow({
   const time = timestamp ? clockTime(timestamp) : ''
 
   return (
-    <div className={`chat-row chat-row-${role}`}>
+    // Without an identity line there is no first row to fill, so the grid
+    // is told that rather than leaving an empty one whose row-gap still
+    // costs a line of dead space.
+    <div className={`chat-row chat-row-${role}${showIdentity ? '' : ' chat-row-grouped'}`}>
       {!isUser && showIdentity ? <AssistantMark identity={identity} /> : null}
       {showIdentity ? (
         <div className="chat-meta">
@@ -110,27 +113,40 @@ export function ReplyingBadge({ label = 'Replying' }: { label?: string }): JSX.E
 
 /** Stands in for the assistant bubble between "sent" and the first token.
  *  Its own component, and its own row, so streaming updates never touch
- *  the settled transcript above it. */
+ *  the settled transcript above it.
+ *
+ *  Exactly one status presentation, never two. This used to draw a
+ *  `Replying` badge in the identity line *and* a bubble underneath saying
+ *  "<model> is replying", which said the same thing twice on two rows that
+ *  did not share an edge. It is now a single line — the mark in its gutter,
+ *  the text on the assistant content rail — so the wait sits exactly where
+ *  the answer will appear. */
 export function PendingReply({
+  who,
   label,
-  identity = RUNTIME_IDENTITY,
-  badge
+  identity = RUNTIME_IDENTITY
 }: {
+  /** Named separately only when the phase does not already carry the name,
+   *  which is what gives "<model> · Stopping…" its own reading. */
+  who?: string | null
   label?: string
   identity?: AgentIdentity
-  badge?: string
 }): JSX.Element {
   return (
-    <div className="chat-row chat-row-assistant" aria-live="polite">
+    <div className="chat-row chat-row-assistant chat-row-status" aria-live="polite">
       <AssistantMark identity={identity} />
-      <div className="chat-meta">
-        <span className="chat-name">{identity.name}</span>
-        <ReplyingBadge {...(badge ? { label: badge } : {})} />
-      </div>
-      <div className="chat-bubble chat-bubble-assistant chat-bubble-pending">
+      <p className="chat-status">
+        {who ? (
+          <>
+            <span className="chat-status-who">{who}</span>
+            <span className="chat-status-sep" aria-hidden="true">
+              ·
+            </span>
+          </>
+        ) : null}
+        <span className="chat-status-label">{label ?? `${identity.name} is replying`}</span>
         <TypingDots />
-        <span className="chat-pending-label">{label ?? `${identity.name} is replying`}</span>
-      </div>
+      </p>
     </div>
   )
 }

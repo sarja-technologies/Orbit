@@ -577,10 +577,15 @@ describe('OrbitRuntime', () => {
     expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('pty')
   })
 
-  it('leaves a text-only conversation on the default transport', async () => {
+  it('leaves a text-only Skip-approvals conversation on the default transport', async () => {
     const project = runtime.createProject('No escalation')
     const conversation = runtime.openProject(project.id).conversations[0]!
+    // Nothing will ever be asked of this session, so it keeps the cheaper
+    // headless path. (An `ask` session does not — see the Ask First suite.)
+    runtime.setConversationPermissionMode(conversation.id, 'skip')
+
     await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Just text' })
+
     expect(provider.lastInput?.transport).toBe('structured')
     expect(runtime.openProject(project.id).conversations[0]?.transport).toBe('structured')
   })

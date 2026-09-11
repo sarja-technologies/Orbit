@@ -26,6 +26,7 @@ import type { ArtifactService } from '@main/artifacts/artifactService'
 import { effortForNewSession } from '@shared/reasoningPolicy'
 import { ORBIT_DEFAULT_MODEL_ID } from '@shared/defaultModel'
 import type { PermissionMode } from '@shared/permissionMode'
+import { transportForTurn } from '@shared/transportPolicy'
 import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from '@shared/sessionTitle'
 import { nowIso } from '@main/util/ids'
 import { StartupSessionResolver } from '@main/startup/startupSession'
@@ -186,13 +187,18 @@ export class OrbitRuntime extends EventEmitter {
       .filter((artifact): artifact is Artifact => artifact !== null && artifact.projectId === project.id)
       .map((artifact) => ({ id: artifact.id, name: artifact.name, location: artifact.location, mimeType: artifact.mimeType }))
 
-    // Automatic capability escalation, decided BEFORE delivery: attaching an
-    // image needs the live session, so the conversation moves itself there
-    // rather than making the user understand transports. Still one-way — see
-    // setConversationTransport.
-    const transport = attachments.some(isImageFile)
-      ? this.setConversationTransport(conversation.id, 'pty').transport
-      : conversation.transport
+    // Capability escalation, decided BEFORE delivery rather than discovered
+    // during the turn. Two things need the live session: attaching an image
+    // (the headless path has no native attachment mechanism) and, more
+    // importantly, "Ask first" — agy cannot present an approval headlessly,
+    // so asking has to be possible before anything runs, not after a tool
+    // has already been refused. Still one-way — see setConversationTransport.
+    const wanted = transportForTurn({
+      current: conversation.transport,
+      permissionMode: conversation.permissionMode,
+      hasImageAttachment: attachments.some(isImageFile)
+    })
+    const transport = wanted === conversation.transport ? conversation.transport : this.setConversationTransport(conversation.id, wanted).transport
 
     void this.provider
       .sendMessage(
@@ -380,9 +386,14 @@ export class OrbitRuntime extends EventEmitter {
     if (event.type === 'text.delta') active && (active.text += event.delta)
     if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
     if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
-    // Antigravity needed to ask something the headless path cannot present.
-    // Escalate the conversation so the next turn can ask the user directly,
-    // without ever asking the user to pick a transport themselves.
+    // Defensive only. An `ask` session is already on the PTY before its
+    // turn starts (see transportForTurn), so normal Ask First never reaches
+    // this. It survives for the cases that are not normal Ask First — a
+    // `skip` session agy refused something in anyway, or a headless denial
+    // from a path that predates the pre-flight choice — and escalates the
+    // conversation so the next turn can ask directly. The partially
+    // executed turn is deliberately NOT retried: re-running it could repeat
+    // tool side effects that already happened.
     if (event.type === 'interaction.required' && !event.canRespond) {
       this.setConversationTransport(event.conversationId, 'pty')
     }

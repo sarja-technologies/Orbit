@@ -399,13 +399,13 @@ describe('reply-in-progress state', () => {
       />
     )
 
-  it('holds an animated assistant bubble open before the first token arrives, named after the working model', () => {
+  it('holds one animated status line open before the first token arrives, named after the working model', () => {
     const { container } = session()
 
     expect(screen.getByText('3.8 Flash is replying')).toBeInTheDocument()
     expect(container.querySelectorAll('.typing-dot')).toHaveLength(3)
     // The wait happens on the assistant's side, where the answer will land.
-    expect(container.querySelector('.chat-row-assistant .chat-bubble-pending')).not.toBeNull()
+    expect(container.querySelector('.chat-row-assistant .chat-status')).not.toBeNull()
   })
 
   it('marks the working turn with the model\u2019s own logo, never Orbit\u2019s', () => {
@@ -438,10 +438,12 @@ describe('reply-in-progress state', () => {
   })
 
   it('states a deliberate stop as a stop, while the run finishes tearing down', () => {
-    session({ stopping: true })
+    const { container } = session({ stopping: true })
 
+    // Same geometry as replying — one status row, attributed to the model.
     expect(screen.getByText('Stopping…')).toBeInTheDocument()
-    expect(screen.getAllByText('Stopping').length).toBeGreaterThan(0)
+    expect(screen.getByText('3.8 Flash')).toBeInTheDocument()
+    expect(container.querySelectorAll('.chat-status')).toHaveLength(1)
     expect(document.body.textContent).not.toMatch(/couldn’t be read|went wrong|try again/i)
   })
 

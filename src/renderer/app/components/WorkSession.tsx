@@ -186,11 +186,7 @@ export function WorkSession({
                   The activity rail below carries the specifics; this line
                   only says which of the two phases the turn is in. */}
               {!pendingInteraction && !streamText ? (
-                <PendingReply
-                  identity={identity}
-                  {...(stopping ? { badge: 'Stopping' } : {})}
-                  label={pendingLabel(identity.name, activityByRun[activeRunId], stopping)}
-                />
+                <PendingReply identity={identity} {...pendingLabel(identity.name, activityByRun[activeRunId], stopping)} />
               ) : null}
 
               {/* Tool work is subordinate to the reply: indented onto the
@@ -203,22 +199,30 @@ export function WorkSession({
               ) : null}
 
               {pendingInteraction ? (
-                <InteractionCard
-                  event={pendingInteraction}
-                  busy={respondingInteractionId === pendingInteraction.interactionId}
-                  onRespond={onRespond}
-                />
+                <div className="chat-rail">
+                  <InteractionCard
+                    event={pendingInteraction}
+                    busy={respondingInteractionId === pendingInteraction.interactionId}
+                    onRespond={onRespond}
+                  />
+                </div>
               ) : null}
             </div>
           ) : null}
 
-          {unavailableInteraction ? <InactiveInteraction event={unavailableInteraction} reason="unavailable" /> : null}
+          {unavailableInteraction ? (
+            <div className="chat-rail">
+              <InactiveInteraction event={unavailableInteraction} reason="unavailable" />
+            </div>
+          ) : null}
           {staleInteraction ? (
-            <ErrorNote
-              title="That request is no longer active"
-              body="It was already answered or the turn moved on. Send another message to continue."
-              details={null}
-            />
+            <div className="chat-rail">
+              <ErrorNote
+                title="That request is no longer active"
+                body="It was already answered or the turn moved on. Send another message to continue."
+                details={null}
+              />
+            </div>
           ) : null}
         </div>
 
@@ -260,13 +264,21 @@ function hasSteps(activity: ActivityState | undefined): boolean {
   return Boolean(activity && activity.items.length > 0)
 }
 
-/** The one-line phase, named after whoever is actually answering. Says
+/** The one-line phase, attributed to whoever is actually answering. Says
  *  "working" only when a step is genuinely running — a turn whose steps
- *  have all finished is waiting on text again, not still working. */
-function pendingLabel(name: string, activity: ActivityState | undefined, stopping: boolean): string {
-  if (stopping) return 'Stopping…'
-  if (activity && hasRunningStep(activity)) return `${name} is working`
-  return `${name} is replying`
+ *  have all finished is waiting on text again, not still working.
+ *
+ *  `who` is set only for phases whose wording does not already carry the
+ *  name, so stopping reads "<model> · Stopping…" on the same geometry as
+ *  "<model> is replying" rather than as a differently shaped row. */
+function pendingLabel(
+  name: string,
+  activity: ActivityState | undefined,
+  stopping: boolean
+): { who: string | null; label: string } {
+  if (stopping) return { who: name, label: 'Stopping…' }
+  if (activity && hasRunningStep(activity)) return { who: null, label: `${name} is working` }
+  return { who: null, label: `${name} is replying` }
 }
 
 const MessageTurn = memo(function MessageTurn({

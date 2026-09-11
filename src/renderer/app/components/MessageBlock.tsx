@@ -38,7 +38,7 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
   // live session. Either way, say so rather than leaving a blank gap the
   // reader has to interpret.
   if (message.role === 'assistant' && message.content.trim().length === 0) {
-    return <div className="transcript-note">This turn finished without any text to show.</div>
+    return <div className="transcript-note chat-rail">This turn finished without any text to show.</div>
   }
 
   const isUser = message.role === 'user'
@@ -66,7 +66,7 @@ export const MessageBlock = memo(MessageBlockView)
  *  ready, and there is nothing to recover from. */
 export function StoppedNote(): JSX.Element {
   return (
-    <div className="transcript-note transcript-note-stopped" role="status">
+    <div className="transcript-note transcript-note-stopped chat-rail" role="status">
       <span className="transcript-note-mark" aria-hidden="true">
         <StopGlyph />
       </span>
@@ -105,7 +105,11 @@ function FailureBlock({ message, error }: { message: Message; error: RuntimeErro
   // Persisted failures only carry the message text, so the code is
   // unknown here; the generic mapping still yields honest product copy.
   const view = describeRuntimeError(error ?? { code: 'provider.failed', message: message.content, retryable: true })
-  return <ErrorNote title={view.title} body={view.body} details={view.details ?? message.content} />
+  return (
+    <div className="chat-rail">
+      <ErrorNote title={view.title} body={view.body} details={view.details ?? message.content} />
+    </div>
+  )
 }
 
 interface ErrorNoteProps {
