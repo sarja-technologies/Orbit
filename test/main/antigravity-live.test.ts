@@ -4,6 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AntigravityProvider } from '../../src/main/runtime/providers/antigravity/AntigravityProvider'
+import { OrbitDatabase } from '../../src/main/persistence/database'
+import { OrbitStore } from '../../src/main/persistence/store'
+import { FileStorage } from '../../src/main/files/fileStorage'
+import { ArtifactService } from '../../src/main/artifacts/artifactService'
+import { OrbitRuntime } from '../../src/main/runtime/orbitRuntime'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { InteractionRequiredEvent, RuntimeEvent } from '../../src/shared/runtime-events'
 import { spawnSync } from 'node:child_process'
@@ -521,6 +526,113 @@ function traceStreaming(provider: AntigravityProvider, value: ProviderSendInput)
  *  This is read only to explain a skip honestly. Orbit never writes this
  *  file, never passes `--dangerously-skip-permissions`, and never
  *  auto-approves anything itself — when agy does ask, the user answers. */
+/** The Ask First invariant, end to end, through the real OrbitRuntime and
+ *  the real agy — not the provider alone.
+ *
+ *  This is the bug this suite exists for: Orbit used to start an `ask`
+ *  session on the headless transport, discover mid-turn that agy had no way
+ *  to present an approval, and report the action as skipped *after the
+ *  fact*. The fix is a pre-flight transport choice, so what matters here is
+ *  that the turn is already interactive before anything runs, and that a
+ *  denial genuinely prevents the action. */
+describe('Ask First against the real agy', () => {
+  it.runIf(live)(
+    'runs an Ask First turn interactively and lets a denial actually stop the action',
+    async () => {
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-askfirst-live-'))
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-askfirst-data-'))
+      dirs.push(workspace, dataDir)
+
+      const db = new OrbitDatabase({ dataDir })
+      await db.init()
+      const store = new OrbitStore(db)
+      const provider = new AntigravityProvider()
+      const runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dataDir)), provider, dataDir, '0.1.0')
+      await runtime.listModels()
+
+      const events: RuntimeEvent[] = []
+      runtime.on('event', (event: RuntimeEvent) => events.push(event))
+
+      const project = runtime.createProject('Ask First live', workspace)
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      expect(conversation.permissionMode).toBe('ask')
+
+      // Drive one turn, answering the first actionable approval with
+      // `decide`, and resolve when the run ends.
+      const driveTurn = (content: string, decide: (interaction: InteractionRequiredEvent) => string | null) =>
+        new Promise<{ runId: string; asked: InteractionRequiredEvent | null }>((resolve, reject) => {
+          let asked: InteractionRequiredEvent | null = null
+          let runId = ''
+          const onEvent = (event: RuntimeEvent): void => {
+            if (event.runId !== runId) return
+            if (event.type === 'interaction.required' && event.canRespond && !asked) {
+              asked = event
+              const optionId = decide(event)
+              if (optionId === null) return
+              void runtime
+                .respondToInteraction({ conversationId: conversation.id, runId, interactionId: event.interactionId, optionId })
+                .catch(reject)
+            }
+            if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
+              runtime.off('event', onEvent)
+              resolve({ runId, asked })
+            }
+          }
+          void runtime
+            .sendMessage({ projectId: project.id, conversationId: conversation.id, content })
+            .then((run) => {
+              runId = run.id
+              runtime.on('event', onEvent)
+            })
+            .catch(reject)
+        })
+
+      // --- the approval is DENIED: the file must not appear ---
+      const denied = await driveTurn(
+        'Run the shell command `touch ask-first-denied.txt` in this folder. Do not create the file any other way.',
+        (interaction) => {
+          const no = interaction.options.find((option) => /^(no|deny|reject)/i.test(option.label))
+          return no?.id ?? interaction.options[interaction.options.length - 1]?.id ?? null
+        }
+      )
+
+      // The transport was chosen BEFORE the turn ran — that is the fix.
+      expect(store.requireConversation(conversation.id).transport).toBe('pty')
+
+      // Orbit never told the user an approval was skipped because it could
+      // not be asked for. That was the reported bug.
+      const unanswerable = events.filter((event) => event.type === 'interaction.required' && !event.canRespond)
+      expect(unanswerable, 'Ask First must never produce a non-actionable headless denial').toHaveLength(0)
+      expect(events.some((event) => event.type === 'interaction.required' && event.sourceEvidence === 'headless-denial')).toBe(false)
+
+      if (denied.asked) {
+        expect(denied.asked.transport).toBe('pty')
+        expect(denied.asked.canRespond).toBe(true)
+        expect(fs.existsSync(path.join(workspace, 'ask-first-denied.txt')), 'a denied command must not have run').toBe(false)
+      } else {
+        // Whether agy asks at all is a property of the machine it is signed
+        // in on, not of Orbit. Saying so beats pretending otherwise.
+        expect(
+          permissionPromptsUnavailableReason(),
+          'agy raised no permission prompt and this machine has no allow-list explaining why'
+        ).not.toBeNull()
+      }
+
+      // --- the approval is GRANTED: the harmless action proceeds ---
+      const approved = await driveTurn(
+        'Run the shell command `touch ask-first-approved.txt` in this folder. Do not create the file any other way.',
+        (interaction) => interaction.options[0]?.id ?? null
+      )
+      if (approved.asked) expect(approved.asked.canRespond).toBe(true)
+      expect(fs.existsSync(path.join(workspace, 'ask-first-approved.txt')), 'an approved command should have run').toBe(true)
+
+      await provider.shutdown()
+      db.close()
+    },
+    300_000
+  )
+})
+
 function permissionPromptsUnavailableReason(): string | null {
   const settingsPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json')
   let allow: unknown

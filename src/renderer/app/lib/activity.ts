@@ -101,7 +101,10 @@ const SUMMARY_NOUNS: Partial<Record<ToolActivityKind, { one: string; many: strin
   edit: { one: 'file', many: 'files', verb: 'edited' },
   read: { one: 'file', many: 'files', verb: 'read' },
   search: { one: 'search', many: 'searches', verb: 'searched' },
-  list: { one: 'listing', many: 'listings', verb: 'listed' }
+  // "Listed 1 listing" was the old wording and it read as a typo. This
+  // kind only ever comes from directory listings (list_dir / list_files /
+  // ls — see toolActivity.ts), so the folder is the truthful noun.
+  list: { one: 'folder', many: 'folders', verb: 'listed' }
 }
 
 /** Order the summary reads in, so "Ran 3 commands, edited 2 files" always

@@ -80,7 +80,16 @@
      can sit in without glare, the reader's is an accent tint that reads as
      sent at a glance. Kept as tokens so the two stay in relation. */
   --chat-mark: 26px;
+  /* Where every piece of assistant-side content starts: past the mark's
+     gutter and its column gap. The identity line and the bubble's own edge
+     sit here because they are grid column 2; everything subordinate — the
+     pending status, activity, interaction cards, resolved notes and turn
+     errors — is put here by .chat-rail / .chat-aside rather than by each
+     component guessing its own margin. */
   --chat-rail: calc(var(--chat-mark) + var(--space-3));
+  /* The hairline aside puts its BORDER here so its TEXT still lands on
+     --chat-rail: rail - padding - the border's own pixel. */
+  --chat-aside-hairline: calc(var(--chat-rail) - var(--space-3) - 1px);
   --chat-user-max: min(78%, 560px);
   --chat-assistant-bg: #2b3138;
   --chat-assistant-border: rgba(255, 255, 255, 0.085);
@@ -1293,19 +1302,43 @@ body.is-resizing {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
-.chat-bubble-pending {
-  display: inline-flex;
+/* The single pending line. Sits in the bubble's own grid cell, on the
+   content rail, with no bubble padding of its own — so waiting for a reply
+   costs one quiet row rather than a badge plus an empty card. */
+.chat-row-status .chat-status {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
   align-items: center;
-  gap: var(--space-3);
-  justify-self: start;
-  width: auto;
-  padding: var(--space-3) var(--space-4);
+  gap: var(--space-2);
+  min-height: var(--chat-mark);
+  margin: 0;
   color: var(--text-secondary);
   font-size: var(--text-meta);
+  letter-spacing: 0.01em;
 }
 
-.chat-pending-label {
-  letter-spacing: 0.01em;
+.chat-status-who {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.chat-status-sep {
+  color: var(--text-muted);
+}
+
+/* No identity line above it, so there is no first row to leave empty — and
+   no row-gap paid for one. The mark aligns to the status itself. */
+.chat-row-status,
+.chat-row-grouped {
+  grid-template-rows: auto;
+}
+
+.chat-row-status .chat-mark,
+.chat-row-status .chat-status,
+.chat-row-grouped .chat-mark,
+.chat-row-grouped .chat-bubble {
+  grid-row: 1;
 }
 
 .typing-dots {
@@ -1376,14 +1409,25 @@ body.is-resizing {
 /* Tool work, resolved permissions — everything that explains a turn
    rather than being it. Indented onto the assistant's rail and hung off a
    hairline so it reads as a margin note against the reply. */
+/* Subordinate assistant content that earns a hairline: the activity rail
+   and resolved-interaction notes. The border sits in the mark's gutter so
+   the text lines up with the bubble above it — it used to start a full
+   --space-3 to the right of the rail, which is what made the collapsed
+   activity summary look like a stray line. */
 .chat-aside {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin-left: var(--chat-rail);
+  margin-left: var(--chat-aside-hairline);
   padding-left: var(--space-3);
   border-left: 1px solid var(--border);
   font-size: var(--text-meta);
+}
+
+/* The same anchor, without the hairline — for blocks that carry their own
+   surface (interaction cards) or their own marker (turn errors, notes). */
+.chat-rail {
+  margin-left: var(--chat-rail);
 }
 
 /* ---------- prose ---------- */
