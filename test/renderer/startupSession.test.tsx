@@ -28,7 +28,8 @@ const AGENTDOCK: Project = { id: 'project_1', name: 'AgentDock', rootPath: '/hom
 const SIDECAR: Project = { id: 'project_2', name: 'Sidecar', rootPath: null, createdAt: 'now', updatedAt: 'now' }
 
 const MODELS: ModelOption[] = [
-  { id: ORBIT_DEFAULT_MODEL_ID, label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] }
+  { id: ORBIT_DEFAULT_MODEL_ID, label: 'Gemini 3.8 Flash', supportedReasoningEfforts: ['low', 'medium', 'high'] },
+  { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro', supportedReasoningEfforts: ['low', 'high'] }
 ]
 
 function conversation(overrides: Partial<Conversation> & { id: string; projectId: string; title: string }): Conversation {
@@ -154,8 +155,20 @@ describe('opening Orbit', () => {
         rename: vi.fn(),
         delete: vi.fn(),
         setTransport: vi.fn(),
-        setModel: vi.fn(),
-        setPermissionMode: vi.fn(),
+        // Stateful, like the real store: a refresh after the write must
+        // read back the change, not the value the session was created with.
+        setModel: vi.fn(async ({ conversationId, model, reasoningEffort }) => {
+          unsortedSessions = unsortedSessions.map((item) =>
+            item.id === conversationId ? { ...item, model, reasoningEffort } : item
+          )
+          return unsortedSessions.find((item) => item.id === conversationId)!
+        }),
+        setPermissionMode: vi.fn(async ({ conversationId, permissionMode }) => {
+          unsortedSessions = unsortedSessions.map((item) =>
+            item.id === conversationId ? { ...item, permissionMode } : item
+          )
+          return unsortedSessions.find((item) => item.id === conversationId)!
+        }),
         setWorkingDirectory: vi.fn()
       },
       data: { clearAll: vi.fn() },
@@ -297,7 +310,7 @@ describe('opening Orbit', () => {
   it('opens the launch session on Orbit’s concrete default model, not “Default model”', async () => {
     await open()
 
-    const trigger = await screen.findByLabelText('Model and reasoning')
+    const trigger = await screen.findByRole('button', { name: 'Model and reasoning' })
     await waitFor(() => expect(trigger).toBeEnabled())
     expect(trigger).toHaveTextContent('3.8 Flash')
     expect(trigger).not.toHaveTextContent('Default model')
@@ -306,8 +319,76 @@ describe('opening Orbit', () => {
   it('gives the launch session the ordinary permission default', async () => {
     await open()
 
-    const permissions = await screen.findByLabelText('Permissions')
+    const permissions = await screen.findByRole('button', { name: 'Permissions' })
     expect(permissions).toHaveTextContent(/Ask first/i)
+  })
+
+  it('changes the model of an Unsorted session, visibly and immediately', async () => {
+    // The reported bug: the launch session lives in the Unsorted list, and
+    // the optimistic update only ever touched the project tree — so picking
+    // a model appeared to do nothing at all.
+    await open()
+    const trigger = await screen.findByRole('button', { name: 'Model and reasoning' })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    expect(trigger).toHaveTextContent('3.8 Flash')
+
+    await userEvent.click(trigger)
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ }))
+
+    // The closed control reflects the choice, without waiting for a reload.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Model and reasoning' })).toHaveTextContent('3.1 Pro'))
+    expect(api.conversations.setModel).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conversation_new_1', model: 'gemini-3.1-pro' })
+    )
+  })
+
+  it('switches the model of an Unsorted session more than once', async () => {
+    await open()
+    const trigger = (): HTMLElement => screen.getByRole('button', { name: 'Model and reasoning' })
+    await waitFor(() => expect(trigger()).toBeEnabled())
+
+    /** The popover stays open after a selection, so it is only reopened
+     *  when it actually closed. */
+    const pick = async (name: RegExp): Promise<void> => {
+      if (trigger().getAttribute('aria-expanded') !== 'true') await userEvent.click(trigger())
+      await userEvent.click(await screen.findByRole('menuitemradio', { name }))
+    }
+
+    await pick(/Gemini 3\.1 Pro/)
+    await waitFor(() => expect(trigger()).toHaveTextContent('3.1 Pro'))
+
+    await pick(/Gemini 3\.8 Flash/)
+    await waitFor(() => expect(trigger()).toHaveTextContent('3.8 Flash'))
+
+    expect(vi.mocked(api.conversations.setModel).mock.calls.at(-1)?.[0]).toMatchObject({ model: ORBIT_DEFAULT_MODEL_ID })
+  })
+
+  it('changes the permission mode of an Unsorted session, visibly and immediately', async () => {
+    await open()
+    const permissions = await screen.findByRole('button', { name: 'Permissions' })
+    expect(permissions).toHaveTextContent(/Ask first/i)
+
+    await userEvent.click(permissions)
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Permissions' })).toHaveTextContent(/Bypass permissions/i))
+    // The label changed; the stored mode is still the internal `skip`.
+    expect(api.conversations.setPermissionMode).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conversation_new_1', permissionMode: 'skip' })
+    )
+  })
+
+  it('switches an Unsorted session back to Ask first', async () => {
+    await open()
+    await userEvent.click(await screen.findByRole('button', { name: 'Permissions' }))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Permissions' })).toHaveTextContent(/Bypass permissions/i))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Permissions' }))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Ask first/ }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Permissions' })).toHaveTextContent(/Ask first/i))
+    expect(vi.mocked(api.conversations.setPermissionMode).mock.calls.at(-1)?.[0]).toMatchObject({ permissionMode: 'ask' })
   })
 
   it('shows the launch session as belonging to no project, and still usable', async () => {

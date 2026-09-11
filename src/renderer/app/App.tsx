@@ -582,7 +582,7 @@ export function App(): JSX.Element {
     // The composer shows a session's settings the moment they are chosen,
     // but the runtime reads them back from the database when it launches the
     // turn. Between those two points the displayed mode and the mode agy is
-    // actually started with can disagree — pick "Skip approvals" and press
+    // actually started with can disagree — pick "Bypass permissions" and press
     // Send quickly enough and the turn used to go out under Ask first.
     // Waiting on the writes already in flight closes that window without
     // adding a delay: when nothing is pending this resolves immediately.
@@ -612,6 +612,25 @@ export function App(): JSX.Element {
     }
   }
 
+  /** Applies a change to a session wherever the renderer is holding it.
+   *
+   *  A session lives in one of two lists: under its project in `tree`, or in
+   *  `unsorted` when it belongs to no project. `activeConversation` is read
+   *  from whichever applies, so an optimistic update that touched only
+   *  `tree` left an Unsorted session showing its old settings — the control
+   *  appeared to do nothing even though the write had succeeded. Both lists
+   *  are updated here so no caller has to know, or remember, which one a
+   *  session is in. */
+  function updateConversationLocal(conversationId: ID, patch: Partial<Conversation>): void {
+    setTree((current) =>
+      current.map((group) => ({
+        ...group,
+        conversations: group.conversations.map((item) => (item.id === conversationId ? { ...item, ...patch } : item))
+      }))
+    )
+    setUnsorted((current) => current.map((item) => (item.id === conversationId ? { ...item, ...patch } : item)))
+  }
+
   /** Persisted per conversation, so a session keeps the model it was
    *  started with instead of silently drifting to whatever was picked last.
    *
@@ -620,14 +639,7 @@ export function App(): JSX.Element {
    *  the UI briefly showing a session with no model. */
   async function persistModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Promise<void> {
     const resolved = resolveModelId(model)
-    setTree((current) =>
-      current.map((group) => ({
-        ...group,
-        conversations: group.conversations.map((item) =>
-          item.id === conversationId ? { ...item, model: resolved, reasoningEffort } : item
-        )
-      }))
-    )
+    updateConversationLocal(conversationId, { model: resolved, reasoningEffort })
     try {
       await trackSessionSetting(() => requireOrbitApi().conversations.setModel({ conversationId, model: resolved, reasoningEffort }))
     } catch (error) {
@@ -694,14 +706,7 @@ export function App(): JSX.Element {
   async function selectPermissionMode(mode: PermissionMode): Promise<void> {
     if (!activeConversation) return
     const conversationId = activeConversation.id
-    setTree((current) =>
-      current.map((group) => ({
-        ...group,
-        conversations: group.conversations.map((item) =>
-          item.id === conversationId ? { ...item, permissionMode: mode } : item
-        )
-      }))
-    )
+    updateConversationLocal(conversationId, { permissionMode: mode })
     try {
       await trackSessionSetting(() =>
         requireOrbitApi().conversations.setPermissionMode({ conversationId, permissionMode: mode })

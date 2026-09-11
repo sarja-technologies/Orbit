@@ -179,8 +179,22 @@ describe('App', () => {
         }),
         delete: vi.fn(),
         setTransport: vi.fn(),
-        setPermissionMode: vi.fn(),
-        setModel: vi.fn(),
+        // Stateful, like the real store: a refresh after the write reads
+        // back the change rather than the value the session started with.
+        setPermissionMode: vi.fn(async ({ conversationId, permissionMode }) => {
+          const projectId = activeProjectOf(conversationId)
+          sessions[projectId] = (sessions[projectId] ?? []).map((item) =>
+            item.id === conversationId ? { ...item, permissionMode } : item
+          )
+          return sessions[projectId]!.find((item) => item.id === conversationId)!
+        }),
+        setModel: vi.fn(async ({ conversationId, model, reasoningEffort }) => {
+          const projectId = activeProjectOf(conversationId)
+          sessions[projectId] = (sessions[projectId] ?? []).map((item) =>
+            item.id === conversationId ? { ...item, model, reasoningEffort } : item
+          )
+          return sessions[projectId]!.find((item) => item.id === conversationId)!
+        }),
         setWorkingDirectory: vi.fn()
       },
       data: { clearAll: vi.fn() },
@@ -349,7 +363,7 @@ describe('App', () => {
   it('persists a permission change against the session it belongs to', async () => {
     await bootInto(/^Improve Orbit UI/)
     await userEvent.click(await screen.findByLabelText('Permissions'))
-    await userEvent.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
 
     await waitFor(() =>
       expect(api.conversations.setPermissionMode).toHaveBeenCalledWith({
@@ -972,7 +986,7 @@ describe('App', () => {
 
     await bootInto(/^Improve Orbit UI/)
     await userEvent.click(await screen.findByLabelText('Permissions'))
-    await userEvent.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
     await waitFor(() => expect(api.conversations.setPermissionMode).toHaveBeenCalled())
 
     // The write is still in flight. Send now.
@@ -994,6 +1008,30 @@ describe('App', () => {
 
     // The gate is a real dependency, not a delay.
     await waitFor(() => expect(api.messages.send).toHaveBeenCalled())
+  })
+
+  it('updates a project session’s model locally too, not only Unsorted ones', async () => {
+    // The shared helper must not have fixed one list by breaking the other.
+    await bootInto(/^Improve Orbit UI/)
+    const trigger = (): HTMLElement => screen.getByRole('button', { name: 'Model and reasoning' })
+    await waitFor(() => expect(trigger()).toBeEnabled())
+
+    await userEvent.click(trigger())
+    await userEvent.click(await screen.findByRole('menuitemradio', { name: /Gemini 3\.1 Pro/ }))
+
+    await waitFor(() => expect(trigger()).toHaveTextContent('3.1 Pro'))
+    expect(api.conversations.setModel).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conversation_1', model: 'gemini-3.1-pro' })
+    )
+  })
+
+  it('shows a project session’s permission change immediately', async () => {
+    await bootInto(/^Improve Orbit UI/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Permissions' }))
+    await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Permissions' })).toHaveTextContent(/Bypass permissions/i))
   })
 
   it('does not expose a manual transport control', async () => {

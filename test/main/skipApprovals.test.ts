@@ -66,14 +66,14 @@ const toolFailure = {
 
 const success = { event: 'result', result: { conversation_id: 'n1', status: 'SUCCESS', response: 'The command failed.' } }
 
-describe('Skip approvals launches agy in always-proceed', () => {
+describe('Bypass permissions launches agy in always-proceed', () => {
   it('passes the real bypass flag, and nothing at all for Ask first', () => {
     expect(permissionArgs('skip')).toEqual(['--dangerously-skip-permissions'])
     // Asking is agy's own default and needs no flag.
     expect(permissionArgs('ask')).toEqual([])
   })
 
-  it('keeps Skip approvals on the headless path and Ask first on the interactive one', () => {
+  it('keeps Bypass permissions on the headless path and Ask first on the interactive one', () => {
     expect(transportForTurn({ current: 'structured', permissionMode: 'skip', hasImageAttachment: false })).toBe('structured')
     expect(transportForTurn({ current: 'structured', permissionMode: 'ask', hasImageAttachment: false })).toBe('pty')
   })
@@ -82,7 +82,7 @@ describe('Skip approvals launches agy in always-proceed', () => {
 describe('an ordinary tool failure is not an approval problem', () => {
   it('does not turn "Permission denied" in a tool error into a permission card', () => {
     // The reported bug: a turn that ran its tools fine, on a session
-    // showing Skip approvals, reporting that Antigravity "needed permission
+    // showing Bypass permissions, reporting that Antigravity "needed permission
     // it could not ask for". The words came from the command's own output.
     const events = replay([toolFailure, success], 'skip')
 
@@ -164,12 +164,12 @@ describe('what agy itself refuses', () => {
 })
 
 describe('the copy each condition gets', () => {
-  it('does not blame a missing prompt when approvals are skipped', () => {
+  it('does not blame a missing prompt when permissions are bypassed', () => {
     const view = describeRuntimeError({ code: 'provider.action_restricted', message: 'Antigravity denied: Write /etc/passwd.', retryable: false })
 
     expect(view.title).not.toMatch(/could not ask/i)
     expect(view.title).toBe('Antigravity would not do that')
-    expect(view.body).toMatch(/already skipped/i)
+    expect(view.body).toMatch(/already bypasses permissions/i)
   })
 
   it('keeps the un-askable-permission copy for the case that really is one', () => {

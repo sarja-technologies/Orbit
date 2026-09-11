@@ -164,7 +164,7 @@ describe('permission control', () => {
     const rows = screen.getAllByRole('menuitemradio')
     expect(rows.map((row) => row.textContent)).toHaveLength(2)
     expect(screen.getByRole('menuitemradio', { name: /Ask first/ })).toBeInTheDocument()
-    expect(screen.getByRole('menuitemradio', { name: /Skip approvals/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitemradio', { name: /Bypass permissions/ })).toBeInTheDocument()
   })
 
   it('does not present agy’s execution modes as permission choices', async () => {
@@ -182,9 +182,9 @@ describe('permission control', () => {
     const user = userEvent.setup()
     render(<PermissionControl mode="skip" disabled={false} onSelect={vi.fn()} />)
     const trigger = screen.getByLabelText('Permissions')
-    expect(trigger).toHaveTextContent('Skip approvals')
+    expect(trigger).toHaveTextContent('Bypass permissions')
     await user.click(trigger)
-    expect(screen.getByRole('menuitemradio', { name: /Skip approvals/ })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('menuitemradio', { name: /Bypass permissions/ })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByRole('menuitemradio', { name: /Ask first/ })).toHaveAttribute('aria-checked', 'false')
   })
 
@@ -200,7 +200,7 @@ describe('permission control', () => {
     const onSelect = vi.fn()
     render(<PermissionControl mode="ask" disabled={false} onSelect={onSelect} />)
     await user.click(screen.getByLabelText('Permissions'))
-    await user.click(screen.getByRole('menuitemradio', { name: /Skip approvals/ }))
+    await user.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
     expect(onSelect).toHaveBeenCalledWith('skip')
   })
 })

@@ -43,8 +43,10 @@ export const PERMISSION_MODES: readonly PermissionModeInfo[] = [
   },
   {
     id: 'skip',
-    label: 'Skip approvals',
-    description: 'Every permission request is approved automatically. Tools run without asking.',
+    // The id stays `skip` — it is what the database, the transport policy
+    // and every test already speak. Only the words the user reads changed.
+    label: 'Bypass permissions',
+    description: 'Run tools without asking for permission.',
     nativeMode: 'always-proceed'
   }
 ]
