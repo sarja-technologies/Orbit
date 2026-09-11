@@ -3,6 +3,10 @@ import type { AttachmentPickerCategory } from '@shared/attachmentPicker'
 
 interface AttachMenuProps {
   disabled: boolean
+  /** Why the control is unavailable, when it is. Attachments are stored
+   *  against a project, so an Unsorted session genuinely has nowhere to put
+   *  one — saying so beats a control that silently does nothing. */
+  unavailableReason?: string | null
   /** Opens the native picker for one category. The filters live in the main
    *  process — the renderer only ever names which of the three it wants. */
   onPick: (category: AttachmentPickerCategory) => void
@@ -23,7 +27,8 @@ const ITEMS: Array<{ id: AttachmentPickerCategory; label: string }> = [
  *  front of a modal would be two. Closes on Escape and on a click outside,
  *  and the items are ordinary buttons, so it is navigable by keyboard
  *  without any roving-index machinery of its own. */
-export function AttachMenu({ disabled, onPick }: AttachMenuProps): JSX.Element {
+export function AttachMenu({ disabled, unavailableReason, onPick }: AttachMenuProps): JSX.Element {
+  const blocked = disabled || Boolean(unavailableReason)
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const firstItemRef = useRef<HTMLButtonElement>(null)
@@ -51,8 +56,9 @@ export function AttachMenu({ disabled, onPick }: AttachMenuProps): JSX.Element {
         type="button"
         className="composer-attach"
         onClick={() => setOpen((value) => !value)}
-        disabled={disabled}
+        disabled={blocked}
         aria-label="Add files"
+        {...(unavailableReason ? { title: unavailableReason } : {})}
         aria-haspopup="menu"
         aria-expanded={open}
       >
