@@ -152,8 +152,10 @@ describe('the action costs the row no height', () => {
     expect(rule).toMatch(/pointer-events:\s*none/)
   })
 
-  it('reveals on hover and on focus reaching anywhere in the row', () => {
-    const reveal = ruleFor('.chat-row:hover .message-actions,\n.chat-row:focus-within .message-actions')
+  it('reveals on hovering the message, and on focus reaching anywhere in the row', () => {
+    const reveal = ruleFor(
+      '.chat-row:has(.chat-bubble:hover) .message-actions,\n.chat-row:has(.message-actions:hover) .message-actions,\n.chat-row:focus-within .message-actions'
+    )
 
     expect(reveal).toMatch(/opacity:\s*1/)
     expect(reveal).toMatch(/pointer-events:\s*auto/)

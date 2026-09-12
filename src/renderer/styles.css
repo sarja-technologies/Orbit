@@ -1142,8 +1142,11 @@ body.is-resizing {
   display: flex;
   flex-direction: column;
   /* Tighter than the old flat log: the bubbles now carry the separation,
-     so this only has to keep turns from touching. */
-  gap: var(--space-5);
+     so this only has to keep turns from touching — and to hold the message
+     action, which hangs into this gap. A 20px gap was fractionally shorter
+     than the action pill, which is why the pill used to be pulled up into
+     the bubble instead of sitting in the space meant for it. */
+  gap: var(--space-6);
 }
 
 .transcript-empty {
@@ -1153,12 +1156,25 @@ body.is-resizing {
   color: var(--text-muted);
 }
 
+/* NOT `content-visibility: auto`, which is what this used to be.
+   `content-visibility: auto` implies PAINT containment, and paint
+   containment clips descendants to the box. The message Copy action is
+   deliberately out of flow, hanging below its row into the gap between
+   turns — so it was clipped at the turn's bottom edge, and all that
+   survived was the top sliver of a 999px-rounded pill: the small rounded
+   protrusion that appeared under a bubble. It came and went with hover,
+   focus and scrolling because `content-visibility: auto` also re-evaluates
+   relevance as the user moves around.
+
+   `contain: layout style` keeps the isolation that actually helps a long
+   transcript and drops the clipping. It also drops the guessed
+   `contain-intrinsic-size`, which made a turn's height a placeholder until
+   it was measured — churn the transcript's own scroll pinning had to fight. */
 .turn {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  content-visibility: auto;
-  contain-intrinsic-size: auto 160px;
+  contain: layout style;
 }
 
 /* ---------- conversation rows ---------- */
@@ -3586,11 +3602,13 @@ body.is-resizing {
   z-index: 1;
   display: flex;
   gap: var(--space-1);
-  /* Rides on the bubble's bottom edge, overlapping only its padding — less
-     than the 12px/16px the bubble reserves there, so it can never land on a
-     glyph — and hanging the rest into the gap below. Pulling it up this far
-     is what keeps clear air between it and the next turn. */
-  margin-top: -6px;
+  /* Sits fully in the gap below the bubble, touching neither it nor the
+     next turn. It used to be pulled up 6px to overlap the bubble's own
+     bottom padding, which is what made it read as something growing out of
+     the bubble rather than a control belonging to the message. The gap
+     between turns is now sized to hold it (see .transcript-inner), so it no
+     longer has to steal that space from the bubble. */
+  margin-top: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -3608,7 +3626,16 @@ body.is-resizing {
   justify-content: flex-end;
 }
 
-.chat-row:hover .message-actions,
+/* Revealed by the MESSAGE, not by the row.
+   `.chat-row:hover` was the old trigger, and a chat row is a grid spanning
+   the full width of the transcript — so the pointer anywhere on that
+   horizontal band, metres from a short bubble, popped the action into
+   view. That is what made it read as appearing at random. The trigger is
+   now the bubble's own box, plus the action itself so moving onto it does
+   not dismiss it, plus focus anywhere in the row so a keyboard user still
+   gets it without a pointer. */
+.chat-row:has(.chat-bubble:hover) .message-actions,
+.chat-row:has(.message-actions:hover) .message-actions,
 .chat-row:focus-within .message-actions {
   opacity: 1;
   pointer-events: auto;
@@ -3643,10 +3670,11 @@ body.is-resizing {
   border-color: var(--danger);
 }
 
-/* Keyboard users get the actions the moment they are focused, even before
-   the row is hovered. */
+/* Keyboard users get the actions the moment they are focused: the reveal
+   itself comes from `.chat-row:focus-within` above, because opacity on the
+   button could never beat its own container's `opacity: 0`. This is the
+   focus ring only. */
 .message-action:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
