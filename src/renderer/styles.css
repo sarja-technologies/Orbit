@@ -1535,6 +1535,69 @@ body.is-resizing {
   border-top: 1px solid var(--border);
 }
 
+/* ---------- tables ---------- */
+
+/* The scroll container, not the table, is what scrolls. `overflow-x` on a
+   <table> does nothing — a table is not a scroll container — so a wide
+   table used to have no way to behave other than stretching whatever held
+   it. The wrapper is a block box that can, and it carries the border so the
+   rounded edge clips the rows inside it. */
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  /* Keeps a scrolled table's own edges from touching the bubble's. */
+  background: var(--bg-inset);
+}
+
+.prose table {
+  /* `auto` lets a column with a long cell blow past the container; fixed
+     shares the width out and lets the cells wrap instead. */
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.prose th,
+.prose td {
+  padding: 6px var(--space-3);
+  text-align: left;
+  vertical-align: top;
+  /* A table is the one place `anywhere` is wrong: it would break short
+     words mid-character to avoid widening a column. Long unbroken tokens
+     (a path, a URL) still get to break rather than force a scroll. */
+  overflow-wrap: break-word;
+}
+
+.prose th[data-align='center'],
+.prose td[data-align='center'] {
+  text-align: center;
+}
+
+.prose th[data-align='right'],
+.prose td[data-align='right'] {
+  text-align: right;
+}
+
+.prose thead th {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* Row separators only. Vertical rules turn a small table into a grid and
+   make the text harder to scan, not easier. */
+.prose tbody tr + tr td {
+  border-top: 1px solid var(--border);
+}
+
+.prose thead + tbody tr:first-child td {
+  border-top: 1px solid var(--border);
+}
+
 .prose-link {
   color: var(--accent);
 }
