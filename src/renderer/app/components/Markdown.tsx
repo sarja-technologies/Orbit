@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from 'react'
-import { parseMarkdown, type Block, type Inline } from '../lib/markdown'
+import { parseMarkdown, type Block, type ColumnAlign, type Inline } from '../lib/markdown'
+import { requireOrbitApi } from '../orbitApi'
 
 /** Renders parsed Markdown as React elements. Model output never becomes
  *  raw HTML — see lib/markdown.ts for why. */
@@ -56,11 +57,64 @@ function BlockView({ block }: { block: Block }): JSX.Element | null {
           <InlineList nodes={block.content} />
         </blockquote>
       )
+    case 'table':
+      return <TableBlock block={block} />
     case 'rule':
       return <hr />
     default:
       return null
   }
+}
+
+/** A GFM table.
+ *
+ *  Wrapped in its own scroll container rather than allowed to stretch the
+ *  bubble: a table wider than the message measure scrolls sideways inside
+ *  its own box, so the transcript's column never moves. Cells are padded to
+ *  the header's width so a short row cannot collapse the grid, and a row
+ *  with extra cells keeps them rather than silently losing data. */
+function TableBlock({ block }: { block: Extract<Block, { type: 'table' }> }): JSX.Element {
+  const columns = block.header.length
+
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            {block.header.map((cell, index) => (
+              <th key={index} {...alignProps(block.align[index])}>
+                <InlineList nodes={cell} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {block.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {padCells(row, columns).map((cell, index) => (
+                <td key={index} {...alignProps(block.align[index])}>
+                  {cell ? <InlineList nodes={cell} /> : null}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** Alignment travels as a data attribute so the stylesheet owns the actual
+ *  text-align, and an unspecified column is left alone entirely. */
+function alignProps(align: ColumnAlign | undefined): { 'data-align'?: string } {
+  return align ? { 'data-align': align } : {}
+}
+
+/** A row shorter than the header gets empty cells; a longer one keeps every
+ *  cell it has. Never truncates — a dropped cell would be lost content. */
+function padCells(row: Inline[][], columns: number): (Inline[] | null)[] {
+  if (row.length >= columns) return row
+  return [...row, ...Array.from({ length: columns - row.length }, () => null)]
 }
 
 function InlineList({ nodes }: { nodes: Inline[] }): JSX.Element {
@@ -98,10 +152,15 @@ function InlineList({ nodes }: { nodes: Inline[] }): JSX.Element {
 function CodeBlock({ language, value }: { language: string | null; value: string }): JSX.Element {
   const [copied, setCopied] = useState(false)
 
+  // Orbit's own clipboard IPC, for the same reason MessageActions uses it:
+  // a packaged Orbit loads over file://, which is not a secure context, so
+  // `navigator.clipboard` is undefined there. This button worked in
+  // development and did nothing at all in the real app.
   const copy = (): void => {
-    void navigator.clipboard
-      .writeText(value)
-      .then(() => {
+    void requireOrbitApi()
+      .clipboard.writeText(value)
+      .then((written) => {
+        if (!written) return
         setCopied(true)
         setTimeout(() => setCopied(false), 1400)
       })

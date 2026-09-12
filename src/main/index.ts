@@ -1,6 +1,7 @@
 import { app, Menu } from 'electron'
 import path from 'node:path'
 import { createMainWindow } from './app/createWindow'
+import { applicationMenuTemplate } from './app/appMenu'
 import { OrbitDatabase } from './persistence/database'
 import { OrbitStore } from './persistence/store'
 import { FileStorage } from './files/fileStorage'
@@ -22,18 +23,19 @@ async function bootstrap(): Promise<void> {
     return
   }
 
-  // Orbit has no use for Electron's default File/Edit/View/Window/Help
-  // strip: every action it offers lives in Orbit's own UI, and on Linux and
-  // Windows that menu is drawn inside the window, where it reads as part of
-  // the app. Removed through the application-menu API rather than hidden
-  // with CSS, so it is genuinely absent rather than merely invisible.
-  //
-  // This costs nothing else: the menu's accelerators are conveniences, not
-  // capabilities, and the renderer's own key handling is untouched — as is
-  // every sandbox/isolation setting (see createSecureWebPreferences).
-  Menu.setApplicationMenu(null)
-
   await app.whenReady()
+
+  // Orbit still has no use for a File/View/Help strip — but on macOS the
+  // menu is not decoration: it is where the standard editing shortcuts
+  // physically live. Removing it entirely took Cmd+V, Cmd+C, Cmd+X, Cmd+A
+  // and Cmd+Z with it. See appMenu.ts for why, and for what each platform
+  // gets instead.
+  //
+  // Set after `whenReady` because the native menu cannot be installed
+  // before the app has finished launching.
+  const menuTemplate = applicationMenuTemplate(process.platform, app.name)
+  Menu.setApplicationMenu(menuTemplate ? Menu.buildFromTemplate(menuTemplate) : null)
+
   void logGpuStatus('app-ready')
   const dataDir = process.env.ORBIT_USER_DATA_DIR || app.getPath('userData')
   database = new OrbitDatabase({ dataDir })
