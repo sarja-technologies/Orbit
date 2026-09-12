@@ -3,7 +3,7 @@
 // in the installed Antigravity CLI; Orbit never handles API keys or tokens.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { ID, ModelOption, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
@@ -202,7 +202,6 @@ export class AntigravityProvider implements AgentProvider {
           ...(described.detail ? { detail: described.detail } : {}),
           providerStepId: String(step.step_index ?? '')
         })
-        this.discoverArtifact(active, step.tool_name ?? '', step.tool_info?.parameters)
       }
       // agy 1.1.27 represents headless ask_question/ask_permission as an
       // opaque unknown step, then completes after skipping it. That is agy's
@@ -268,14 +267,20 @@ export class AntigravityProvider implements AgentProvider {
       } else this.fail(active, 'provider.failed', result.error ?? 'Antigravity reported an error.')
     }
   }
-  private discoverArtifact(active: ActiveRun, tool: string, parameters: Record<string, unknown> | undefined): void {
-    if (!/(write|create|edit|save)/i.test(tool) || !parameters) return
-    const candidate = [parameters.path, parameters.file_path, parameters.filename].find((value): value is string => typeof value === 'string')
-    if (!candidate) return
-    const sourcePath = resolve(active.input.workspacePath, candidate)
-    const workspace = `${resolve(active.input.workspacePath)}/`
-    if (sourcePath.startsWith(workspace) && existsSync(sourcePath)) this.emit(active, { type: 'artifact.discovered', sourcePath, metadata: { tool } })
-  }
+  // Artifact discovery deliberately does NOT live here any more.
+  //
+  // What was here read `parameters.path` / `file_path` / `filename`. agy
+  // names its parameters in PascalCase — `TargetFile`, `AbsolutePath` (see
+  // toolActivity.ts, captured live) — so none of those keys ever existed
+  // and the discovery never fired once. Had it fired it would have
+  // registered every source file an agent wrote as an artifact, and it
+  // could only ever have worked on this transport: a PTY turn has no tool
+  // stream at all, only a screen.
+  //
+  // It is now the runtime's job, from a workspace media scan diffed across
+  // the turn — real filesystem evidence, identical on both transports, and
+  // scoped to media Orbit can actually preview. See main/artifacts/
+  // mediaScan.ts.
   private complete(active: ActiveRun, finalText: string, usage?: Record<string, unknown>): void {
     if (active.settled) return
     active.settled = true

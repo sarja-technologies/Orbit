@@ -29,6 +29,7 @@ import { resolveDefaultModel, resolveDefaultPermissionMode } from '@shared/newSe
 import type { PermissionMode } from '@shared/permissionMode'
 import { transportForTurn } from '@shared/transportPolicy'
 import { DEFAULT_SESSION_TITLE, deriveTitleForPrompt } from '@shared/sessionTitle'
+import { newOrChangedMedia, scanMedia, type MediaFile } from '@main/artifacts/mediaScan'
 import { readRepositoryState } from '@main/git/repositoryState'
 import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
 import { nowIso } from '@main/util/ids'
@@ -36,6 +37,13 @@ import { StartupSessionResolver } from '@main/startup/startupSession'
 
 interface ActiveRunState {
   text: string
+  /** Media present in the workspace when the turn started, and the folder
+   *  it was taken in. Diffed when the turn ends to find what the agent
+   *  genuinely produced — see artifacts/mediaScan.ts for why this is a
+   *  filesystem diff rather than a reading of the tool stream. Null when
+   *  the session has no project, which is the one case Orbit cannot store
+   *  an artifact for (artifacts are project-scoped in the schema). */
+  media: { workspacePath: string; before: Map<string, MediaFile> } | null
 }
 
 export class OrbitRuntime extends EventEmitter {
@@ -235,9 +243,16 @@ export class OrbitRuntime extends EventEmitter {
         referencedArtifactIds: input.referencedArtifactIds ?? []
       }
     })
-    this.activeRuns.set(run.id, { text: '' })
-
     const workspacePath = this.resolveWorkspacePath(project, conversation)
+    // Taken before anything runs, so "new since this turn started" is a
+    // fact rather than a guess. Only for a session in a project: an
+    // artifact row requires one (artifacts.project_id is NOT NULL), so
+    // scanning for an Unsorted session would find media it could not then
+    // register.
+    this.activeRuns.set(run.id, {
+      text: '',
+      media: project ? { workspacePath, before: scanMedia(workspacePath) } : null
+    })
     // An Unsorted session keeps its own save directory beside its workspace,
     // so nothing it produces lands in a project it does not belong to.
     const saveDir = project
@@ -465,6 +480,58 @@ export class OrbitRuntime extends EventEmitter {
     return managed
   }
 
+  /** Registers media that appeared in the workspace during this turn.
+   *
+   *  Everything here is evidence-based: a file is registered only if it is
+   *  genuinely new, or genuinely changed, since the snapshot taken when the
+   *  turn started, and only if it is media Orbit can preview. An agent
+   *  writing source files produces nothing here, which is the point — those
+   *  stay in Files.
+   *
+   *  Deliberately best-effort. A media scan must never be able to fail a
+   *  turn: the answer the user was waiting for matters more than a preview
+   *  of a file they can still open from disk. */
+  private registerProducedMedia(event: RuntimeEvent, active: ActiveRunState | undefined): void {
+    const snapshot = active?.media
+    if (!snapshot || !event.projectId) return
+    // Taken once. Clearing it means a second terminal event for the same
+    // run — which the guard above this already drops — could never
+    // re-register the same files.
+    active.media = null
+
+    let produced: MediaFile[]
+    try {
+      produced = newOrChangedMedia(snapshot.before, scanMedia(snapshot.workspacePath))
+    } catch {
+      return
+    }
+
+    for (const file of produced) {
+      try {
+        const artifact = this.artifactService.registerProviderArtifact({
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          runId: event.runId,
+          sourcePath: file.filePath,
+          metadata: { detectedBy: 'workspace-media-scan' }
+        })
+        const produced: RuntimeEvent = {
+          type: 'artifact.produced',
+          projectId: event.projectId,
+          conversationId: event.conversationId,
+          runId: event.runId,
+          providerId: 'antigravity',
+          createdAt: nowIso(),
+          artifact
+        }
+        this.store.addRunEvent(produced)
+        this.emit('event', produced)
+      } catch {
+        // One unreadable file must not stop the rest from registering.
+      }
+    }
+  }
+
   private handleProviderEvent(event: RuntimeEvent): void {
     const active = this.activeRuns.get(event.runId)
     const run = safeRequireRun(this.store, event.runId)
@@ -535,6 +602,13 @@ export class OrbitRuntime extends EventEmitter {
         return
       }
     }
+    // Media the turn actually produced, registered before the run is
+    // marked finished so the artifacts are already there when the renderer
+    // reloads the project on completion. Runs for every ending — a
+    // cancelled or failed turn can still have written an image before it
+    // stopped, and that file is just as real.
+    if (isTerminalEvent(event)) this.registerProducedMedia(event, active)
+
     if (event.type === 'run.completed') {
       const text = event.finalText || active?.text || ''
       if (event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)

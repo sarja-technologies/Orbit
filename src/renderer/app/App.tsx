@@ -39,6 +39,8 @@ import { ProviderLogoSprite } from './components/ProviderLogo'
 import { applyActivity, emptyActivity, finalizeActivity, pruneActivity, type ActivityState } from './lib/activity'
 import { agentIdentity } from './lib/agentIdentity'
 import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
+import { mediaKindFor } from '@shared/mediaArtifacts'
+import { ArtifactToasts, type ArtifactNotice } from './components/ArtifactToast'
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
@@ -107,6 +109,7 @@ export function App(): JSX.Element {
   const [artifactContent, setArtifactContent] = useState<ArtifactContent | null>(null)
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [artifactNotices, setArtifactNotices] = useState<ArtifactNotice[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [modelStatus, setModelStatus] = useState<ResolvedDefaultModel | null>(null)
   const [clearing, setClearing] = useState(false)
@@ -466,6 +469,19 @@ export function App(): JSX.Element {
     }
     if (event.type === 'artifact.produced') {
       setSelectedArtifactId(event.artifact.id)
+      // Only media gets a toast. A user-imported file or any other
+      // artifact is something the user already knows about, and announcing
+      // it would be noise.
+      const kind = mediaKindFor(event.artifact.name)
+      if (kind) {
+        setArtifactNotices((current) =>
+          // Keyed by artifact id, so the same registration can never be
+          // announced twice however many times the event is delivered.
+          current.some((item) => item.artifactId === event.artifact.id)
+            ? current
+            : [...current, { artifactId: event.artifact.id, name: event.artifact.name, kind }]
+        )
+      }
       void openWorkspace(event.projectId, event.conversationId)
     }
     if (event.type === 'run.notice') setNotice(event.message)
@@ -969,6 +985,16 @@ export function App(): JSX.Element {
             {notice}
           </button>
         ) : null}
+
+        <ArtifactToasts
+          notices={artifactNotices}
+          onOpen={(artifactId) => {
+            setSelectedArtifactId(artifactId)
+            setContextTab('artifacts')
+            setArtifactNotices((current) => current.filter((item) => item.artifactId !== artifactId))
+          }}
+          onDismiss={(artifactId) => setArtifactNotices((current) => current.filter((item) => item.artifactId !== artifactId))}
+        />
 
         <div className="body">
           <main

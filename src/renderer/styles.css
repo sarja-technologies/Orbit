@@ -3689,6 +3689,99 @@ body.is-resizing {
   cursor: pointer;
 }
 
+/* ---------- artifact notifications ---------- */
+
+/* Out of the way, and on their own timer. A generated image is good news:
+   it should cost the reader nothing, never take focus, and never need
+   dismissing. Bottom-right so it is clear of the composer and the
+   transcript's own reading column. */
+.artifact-toasts {
+  position: fixed;
+  right: var(--space-5);
+  bottom: var(--space-5);
+  z-index: 30;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--space-2);
+  /* The container never intercepts the pointer; only the toasts do. */
+  pointer-events: none;
+}
+
+.artifact-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 320px;
+  padding: var(--space-2) var(--space-4) var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  pointer-events: auto;
+  animation: artifact-toast-in 180ms ease-out;
+}
+
+.artifact-toast:hover {
+  border-color: var(--border-strong);
+}
+
+.artifact-toast:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.artifact-toast-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.artifact-toast-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.artifact-toast-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.artifact-toast-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes artifact-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-toast {
+    animation: none;
+  }
+}
+
 /* ---------- repository quick actions ---------- */
 
 /* Suggestions about the repository, sitting above the composer surface
