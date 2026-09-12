@@ -38,6 +38,7 @@ import { ContextPanel, type ContextTab } from './components/ContextPanel'
 import { ProviderLogoSprite } from './components/ProviderLogo'
 import { applyActivity, emptyActivity, finalizeActivity, pruneActivity, type ActivityState } from './lib/activity'
 import { agentIdentity } from './lib/agentIdentity'
+import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
 import { draftFromProjectFile, isImage, isNativeImage, projectedState, type DraftAttachment } from './lib/attachments'
@@ -73,6 +74,7 @@ export function App(): JSX.Element {
   const [models, setModels] = useState<ModelOption[]>([])
   const [preferences, setPreferences] = useState<OrbitPreferences>(EMPTY_PREFERENCES)
   const [composer, setComposer] = useState('')
+  const [repository, setRepository] = useState<RepositoryState>(NO_REPOSITORY)
   const [attachments, setAttachments] = useState<DraftAttachment[]>([])
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({})
   const [streamTextByRun, setStreamTextByRun] = useState<Record<string, string>>({})
@@ -139,6 +141,29 @@ export function App(): JSX.Element {
   const conversations = workspace.activeProjectId === null ? unsorted : (activeGroup?.conversations ?? [])
   const activeConversation = conversations.find((item) => item.id === workspace.activeConversationId) ?? null
   const activeRunId = activeConversation ? runningRunByConversation[activeConversation.id] ?? null : null
+
+  // Read once per session, and again whenever a turn finishes — a turn is
+  // the thing most likely to have changed the working tree, and the chips
+  // must not keep offering "Commit changes" after the agent has committed.
+  // Deliberately not polled: git is not free, and nothing else here can
+  // change the repository behind Orbit's back mid-turn.
+  const repositoryConversationId = activeConversation?.id ?? null
+  useEffect(() => {
+    if (!repositoryConversationId || activeRunId) return
+    let cancelled = false
+    void requireOrbitApi()
+      .repository.state({ conversationId: repositoryConversationId })
+      .then((next) => {
+        if (!cancelled) setRepository(next)
+      })
+      .catch(() => {
+        // A folder Orbit cannot read git in simply shows no chips.
+        if (!cancelled) setRepository(NO_REPOSITORY)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [repositoryConversationId, activeRunId])
   // Who is actually working: the session's own model, resolved against the
   // real catalogue. Orbit's Saturn stands for Orbit and is never used here.
   const identity = useMemo(() => agentIdentity(models, activeConversation?.model ?? null), [models, activeConversation?.model])
@@ -573,12 +598,20 @@ export function App(): JSX.Element {
     await openWorkspace(projectId, conversationId)
   }
 
-  async function send(): Promise<void> {
+  /** Sends the composer's contents, or `promptOverride` when one is given.
+   *
+   *  The override is how a repository quick action submits: it takes the
+   *  same path a typed message does — same IPC call, same run bookkeeping,
+   *  same permission mode — so a chip is genuinely a shortcut for words and
+   *  not a second way to start a turn. A draft already in the composer is
+   *  left alone rather than being overwritten or sent alongside it. */
+  async function send(promptOverride?: string): Promise<void> {
     // A session is all that is needed. An Unsorted one has no project and
     // must still send: picking a project is a later decision, not a
     // precondition for using Orbit.
     if (!activeConversation) return
-    if (!composer.trim() && attachments.length === 0) return
+    const override = promptOverride?.trim() || null
+    if (!override && !composer.trim() && attachments.length === 0) return
     // The composer shows a session's settings the moment they are chosen,
     // but the runtime reads them back from the database when it launches the
     // turn. Between those two points the displayed mode and the mode agy is
@@ -587,13 +620,13 @@ export function App(): JSX.Element {
     // Waiting on the writes already in flight closes that window without
     // adding a delay: when nothing is pending this resolves immediately.
     await settledSessionSettings()
-    const content = composer.trim() || 'See the attached files.'
+    const content = override ?? (composer.trim() || 'See the attached files.')
     const fileIds = attachments.map((attachment) => attachment.fileId)
 
     // Reflect the outcome each attachment is heading for before the turn
     // starts, so nothing silently changes meaning mid-send.
     setAttachments((current) => current.map((item) => ({ ...item, state: projectedState(item, nativeMediaAvailable) })))
-    setComposer('')
+    if (!override) setComposer('')
 
     try {
       const run = await requireOrbitApi().messages.send({
@@ -607,7 +640,10 @@ export function App(): JSX.Element {
       setAttachments([])
       await refreshProject()
     } catch (error) {
-      setComposer(content)
+      // Only a typed message is handed back to the composer. Restoring an
+      // override would drop a quick action's prompt into a draft the user
+      // never wrote.
+      if (!override) setComposer(content)
       setNotice(error instanceof Error ? error.message : 'Message could not be sent.')
     }
   }
@@ -983,6 +1019,9 @@ export function App(): JSX.Element {
                 conversation={activeConversation}
                 permissionMode={activeConversation.permissionMode}
                 onSelectPermissionMode={(mode) => void selectPermissionMode(mode)}
+                repository={repository}
+                repositoryActionsEnabled={preferences.showRepositoryActions ?? true}
+                onSendPrompt={(prompt) => void send(prompt)}
                 onChooseProjectFolder={() => void chooseProjectFolder()}
                 onUseProjectFolder={() => void useProjectFolder()}
                 projects={tree.map((group) => group.project)}
@@ -1060,6 +1099,7 @@ export function App(): JSX.Element {
           onClose={() => setSettingsOpen(false)}
           onSelectDefaultModel={(modelId) => void saveDefaults({ ...preferences, defaultModelId: modelId })}
           onSelectDefaultPermissionMode={(mode) => void saveDefaults({ ...preferences, defaultPermissionMode: mode })}
+          onToggleRepositoryActions={(enabled) => void saveDefaults({ ...preferences, showRepositoryActions: enabled })}
           onClearAllData={(confirmation) => void clearAllData(confirmation)}
         />
       ) : null}

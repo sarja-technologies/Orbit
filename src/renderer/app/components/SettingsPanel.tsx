@@ -18,6 +18,7 @@ interface SettingsPanelProps {
   onClose: () => void
   onSelectDefaultModel: (modelId: string) => void
   onSelectDefaultPermissionMode: (mode: PermissionMode) => void
+  onToggleRepositoryActions: (enabled: boolean) => void
   onClearAllData: (confirmation: string) => void
 }
 
@@ -37,6 +38,7 @@ export function SettingsPanel({
   onClose,
   onSelectDefaultModel,
   onSelectDefaultPermissionMode,
+  onToggleRepositoryActions,
   onClearAllData
 }: SettingsPanelProps): JSX.Element {
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -129,6 +131,29 @@ export function SettingsPanel({
                   </option>
                 ))}
               </select>
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <h3 className="settings-section-title">Composer</h3>
+
+          <div className="settings-row">
+            <label className="settings-label" htmlFor="settings-repository-actions">
+              Repository quick actions
+              <span className="settings-hint">
+                Shortcuts for common git requests, shown when a session is inside a repository. They send a message to
+                Antigravity — they never run git themselves.
+              </span>
+            </label>
+            <div className="settings-field">
+              <input
+                id="settings-repository-actions"
+                className="settings-toggle"
+                type="checkbox"
+                checked={preferences.showRepositoryActions ?? true}
+                onChange={(event) => onToggleRepositoryActions(event.target.checked)}
+              />
             </div>
           </div>
         </section>

@@ -57,12 +57,27 @@ describe('the native picker each + category opens', () => {
 describe('Orbit’s window chrome', () => {
   const mainSource = fs.readFileSync(path.resolve(__dirname, '../../src/main/index.ts'), 'utf8')
 
-  it('removes Electron’s native File/Edit/View/Window/Help menu', () => {
-    // Through the application-menu API, so the strip is genuinely absent
-    // rather than hidden with CSS — and before the window is created, so it
-    // never paints once and disappears.
-    expect(mainSource).toMatch(/Menu\.setApplicationMenu\(null\)/)
-    expect(mainSource.indexOf('Menu.setApplicationMenu(null)')).toBeLessThan(mainSource.indexOf('createMainWindow()'))
+  it('sets the application menu from Orbit’s own template, before the window exists', () => {
+    // This used to assert `Menu.setApplicationMenu(null)` on every
+    // platform. That removed Electron's File/Edit/View/Window/Help strip —
+    // and on macOS it also removed the NSMenu key equivalents that ARE the
+    // standard editing shortcuts, so Cmd+V stopped working entirely. The
+    // menu is now per-platform (see app/appMenu.ts and appMenu.test.ts):
+    // null on Windows and Linux, and the minimum macOS needs.
+    expect(mainSource).toMatch(/Menu\.setApplicationMenu\(menuTemplate \? Menu\.buildFromTemplate\(menuTemplate\) : null\)/)
+    expect(mainSource).toMatch(/applicationMenuTemplate\(process\.platform, app\.name\)/)
+    // Still before the window is created, so a menu never paints once and
+    // changes afterwards.
+    expect(mainSource.indexOf('Menu.setApplicationMenu(')).toBeLessThan(mainSource.indexOf('createMainWindow()'))
+  })
+
+  it('still offers no File, View or Help strip of its own', () => {
+    const menu = fs.readFileSync(path.resolve(__dirname, '../../src/main/app/appMenu.ts'), 'utf8')
+
+    // The original intent is intact: Orbit's actions live in Orbit's UI.
+    expect(menu).not.toMatch(/label:\s*'File'/)
+    expect(menu).not.toMatch(/label:\s*'View'/)
+    expect(menu).not.toMatch(/label:\s*'Help'/)
   })
 
   it('does not weaken the renderer’s sandbox to do it', () => {

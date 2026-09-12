@@ -9,6 +9,8 @@ import { AttachmentChip } from './AttachmentChip'
 import { ModelControls } from './ModelControls'
 import { ProjectControl } from './ProjectControl'
 import { PermissionControl } from './PermissionControl'
+import { RepositoryActions } from './RepositoryActions'
+import type { RepositoryState } from '@shared/repositoryActions'
 
 interface ComposerProps {
   value: string
@@ -28,6 +30,13 @@ interface ComposerProps {
   conversation: Conversation | null
   permissionMode: PermissionMode
   onSelectPermissionMode: (mode: PermissionMode) => void
+  /** Git state of the folder this session runs in, and whether the user
+   *  wants the quick actions at all. */
+  repository: RepositoryState
+  repositoryActionsEnabled: boolean
+  /** Submits a prompt exactly as typing it would. Used by the repository
+   *  quick actions, which are shortcuts for words — never for git. */
+  onSendPrompt: (prompt: string) => void
   onChooseProjectFolder: () => void
   onUseProjectFolder: () => void
   /** Projects an Unsorted session can be filed into. */
@@ -73,6 +82,9 @@ export function Composer({
   conversation,
   permissionMode,
   onSelectPermissionMode,
+  repository,
+  repositoryActionsEnabled,
+  onSendPrompt,
   onChooseProjectFolder,
   onUseProjectFolder,
   projects,
@@ -121,6 +133,16 @@ export function Composer({
   return (
     <div className="composer">
       {replying ? <div className="composer-hint">Replying to Antigravity</div> : null}
+
+      {/* Above the surface, not inside the control row: these are
+          suggestions about the repository, not settings the next turn runs
+          with, and the control row is already saying enough. */}
+      <RepositoryActions
+        state={repository}
+        enabled={repositoryActionsEnabled}
+        disabled={disabled || running}
+        onSendPrompt={onSendPrompt}
+      />
 
       <div className="composer-surface">
         {attachments.length > 0 ? (

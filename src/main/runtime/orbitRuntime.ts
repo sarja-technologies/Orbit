@@ -29,6 +29,8 @@ import { resolveDefaultModel, resolveDefaultPermissionMode } from '@shared/newSe
 import type { PermissionMode } from '@shared/permissionMode'
 import { transportForTurn } from '@shared/transportPolicy'
 import { DEFAULT_SESSION_TITLE, deriveTitleForPrompt } from '@shared/sessionTitle'
+import { readRepositoryState } from '@main/git/repositoryState'
+import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
 import { nowIso } from '@main/util/ids'
 import { StartupSessionResolver } from '@main/startup/startupSession'
 
@@ -363,6 +365,22 @@ export class OrbitRuntime extends EventEmitter {
    *  never manufactures a tier the catalogue does not list. */
   setConversationModel(conversationId: ID, model: string | null, reasoningEffort: ReasoningEffort | null): Conversation {
     return this.store.setConversationModel(conversationId, model, reasoningEffort)
+  }
+
+  /** The git state of the folder this session actually runs in.
+   *
+   *  Read-only, and only ever used to decide which repository quick
+   *  actions to offer. The actions themselves never run git — they submit
+   *  a prompt, and the agent does the work under this session's own
+   *  permission mode (see shared/repositoryActions.ts).
+   *
+   *  Resolves the workspace the same way a turn does, so the state
+   *  describes the folder the agent would genuinely be working in. */
+  async getRepositoryState(conversationId: ID): Promise<RepositoryState> {
+    const conversation = this.store.getConversation(conversationId)
+    if (!conversation) return NO_REPOSITORY
+    const project = conversation.projectId ? this.store.getProject(conversation.projectId) : null
+    return readRepositoryState(this.resolveWorkspacePath(project, conversation))
   }
 
   /** Persists how a session handles permission requests. Applied as a real

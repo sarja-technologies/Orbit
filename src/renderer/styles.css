@@ -3679,6 +3679,78 @@ body.is-resizing {
   outline-offset: 1px;
 }
 
+/* A plain checkbox, sized and tinted to the rest of the settings fields.
+   Deliberately a real <input type=checkbox>: it is already keyboard
+   operable and already announces its own state. */
+.settings-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ---------- repository quick actions ---------- */
+
+/* Suggestions about the repository, sitting above the composer surface
+   rather than inside its control row — that row states what the next turn
+   runs with, and these are not settings. Quiet by default: they must read
+   as offered, not as the primary thing to do. */
+.repo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-1) var(--space-2);
+}
+
+.repo-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+
+.repo-branch-name {
+  font-family: var(--font-mono);
+  /* A long branch name must not push the actions off the row. */
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-action {
+  padding: 3px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.repo-action:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.repo-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Inert while a turn runs. Kept in place rather than hidden, so the
+   composer does not reflow the moment a message is sent. */
+.repo-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ---------- settings ---------- */
 
 /* The sidebar's own footer. Pinned under the project list so Orbit's

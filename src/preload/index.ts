@@ -33,6 +33,9 @@ const orbitApi: OrbitApi = {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.preferencesGet),
     set: (preferences) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSet, preferences)
   },
+  repository: {
+    state: (input) => ipcRenderer.invoke(IPC_CHANNELS.repositoryState, input)
+  },
   conversations: {
     create: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsCreate, input),
     listUnsorted: () => ipcRenderer.invoke(IPC_CHANNELS.conversationsListUnsorted),

@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/app/App'
+import { NO_REPOSITORY } from '../../src/shared/repositoryActions'
 import type { OrbitApi } from '../../src/shared/contracts'
 import type { Conversation, Message, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RunEventListener, RuntimeEvent } from '../../src/shared/runtime-events'
@@ -148,6 +149,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
       interactions: { respond: vi.fn() },
       files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn(), thumbnail: vi.fn(async () => null), pathForFile: vi.fn(() => null) },
       artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }
     Object.defineProperty(window, 'orbit', { value: api, configurable: true })

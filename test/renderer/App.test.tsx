@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../../src/renderer/app/App'
+import { NO_REPOSITORY } from '../../src/shared/repositoryActions'
 import type { OrbitApi, StartupSession } from '../../src/shared/contracts'
 import type { Conversation, ModelOption, OrbitPreferences, Project, ProjectSnapshot, ProviderStatus, Run } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
@@ -232,6 +233,7 @@ describe('App', () => {
         pathForFile: vi.fn(() => null)
       },
       artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }
     Object.defineProperty(window, 'orbit', { value: api, configurable: true })

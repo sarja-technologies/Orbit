@@ -53,7 +53,8 @@ export const preferencesSchema = z.object({
   lastActiveProjectId: idSchema.nullable().default(null),
   lastActiveConversationId: idSchema.nullable().default(null),
   defaultModelId: z.string().min(1).max(200).nullable().default(null),
-  defaultPermissionMode: z.enum(['ask', 'skip']).nullable().default(null)
+  defaultPermissionMode: z.enum(['ask', 'skip']).nullable().default(null),
+  showRepositoryActions: z.boolean().nullable().default(null)
 })
 
 /** Bounded so an enormous renderer string can never be pushed at the OS
@@ -84,6 +85,13 @@ export const renameConversationSchema = z.object({
 })
 
 export const deleteConversationSchema = z.object({
+  conversationId: idSchema
+})
+
+/** Naming one existing session and nothing else. The main process resolves
+ *  that session's real workspace itself — the renderer never supplies a
+ *  path to run git in. */
+export const repositoryStateSchema = z.object({
   conversationId: idSchema
 })
 

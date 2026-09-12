@@ -1,6 +1,7 @@
 import type { AttachmentPickerCategory } from './attachmentPicker'
 import type { ResolvedDefaultModel } from './newSessionDefaults'
 import type { PermissionMode } from './permissionMode'
+import type { RepositoryState } from './repositoryActions'
 import type {
   Artifact,
   ArtifactVersion,
@@ -59,7 +60,8 @@ export const IPC_CHANNELS = {
   artifactsImport: 'orbit:artifacts:import',
   artifactsContent: 'orbit:artifacts:content',
   artifactsReveal: 'orbit:artifacts:reveal',
-  referencesCreate: 'orbit:references:create'
+  referencesCreate: 'orbit:references:create',
+  repositoryState: 'orbit:repository:state'
 } as const
 
 /** The one brand-new session an application launch opens on. Null from
@@ -251,6 +253,13 @@ export interface OrbitApi {
   preferences: {
     get(): Promise<OrbitPreferences>
     set(preferences: OrbitPreferences): Promise<OrbitPreferences>
+  }
+  repository: {
+    /** Read-only git state for the folder a session runs in, used only to
+     *  decide which quick actions are worth offering. Resolves to "not a
+     *  repository" for anything it cannot read — see
+     *  main/git/repositoryState.ts. */
+    state(input: { conversationId: ID }): Promise<RepositoryState>
   }
   conversations: {
     create(input: CreateConversationInput): Promise<Conversation>

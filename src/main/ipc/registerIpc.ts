@@ -23,6 +23,7 @@ import {
   pickFolderSchema,
   preferencesSchema,
   renameConversationSchema,
+  repositoryStateSchema,
   setConversationWorkingDirectorySchema,
   setProjectRootSchema,
   respondToInteractionSchema,
@@ -82,6 +83,9 @@ export function registerIpc(runtime: OrbitRuntime): void {
     app.relaunch()
     app.exit(0)
   })
+  ipcMain.handle(IPC_CHANNELS.repositoryState, (_event, input: unknown) =>
+    runtime.getRepositoryState(repositoryStateSchema.parse(input).conversationId)
+  )
   ipcMain.handle(IPC_CHANNELS.preferencesGet, () => runtime.getPreferences())
   ipcMain.handle(IPC_CHANNELS.preferencesSet, (_event, input: unknown) => runtime.setPreferences(preferencesSchema.parse(input)))
   // The one place Orbit asks the OS where work should happen. Directory-only

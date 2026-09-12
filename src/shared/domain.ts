@@ -214,6 +214,11 @@ export interface OrbitPreferences {
   /** The permission mode NEW sessions are created in. Null means the
    *  factory default ('ask'). Existing sessions keep whatever they have. */
   defaultPermissionMode: PermissionMode | null
+  /** Whether the composer offers repository quick actions when the session
+   *  is running inside a git repository. Null means the factory default,
+   *  which is on — see shared/repositoryActions.ts for what they are and
+   *  why they only ever send a prompt. */
+  showRepositoryActions: boolean | null
 }
 
 export interface ProjectSnapshot {

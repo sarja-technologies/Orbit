@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { NO_REPOSITORY } from '../../src/shared/repositoryActions'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -194,6 +195,7 @@ describe('opening Orbit', () => {
       interactions: { respond: vi.fn() },
       files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn(), thumbnail: vi.fn(async () => null), pathForFile: vi.fn(() => null) },
       artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }
     Object.defineProperty(window, 'orbit', { value: api, configurable: true })

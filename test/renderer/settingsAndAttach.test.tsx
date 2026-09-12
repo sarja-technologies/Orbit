@@ -30,6 +30,7 @@ function panel(overrides: Partial<Parameters<typeof SettingsPanel>[0]> = {}) {
     onClose: vi.fn(),
     onSelectDefaultModel: vi.fn(),
     onSelectDefaultPermissionMode: vi.fn(),
+    onToggleRepositoryActions: vi.fn(),
     onClearAllData: vi.fn(),
     ...overrides
   }

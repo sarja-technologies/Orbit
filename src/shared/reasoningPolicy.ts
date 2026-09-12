@@ -24,7 +24,8 @@ export const EMPTY_PREFERENCES: OrbitPreferences = {
   lastActiveProjectId: null,
   lastActiveConversationId: null,
   defaultModelId: null,
-  defaultPermissionMode: null
+  defaultPermissionMode: null,
+  showRepositoryActions: null
 }
 
 /** The sidebar's width bounds, in pixels. The default is deliberately wider
@@ -190,7 +191,11 @@ export function normalizePreferences(value: unknown): OrbitPreferences {
     // quietly dropping the user's choice on read.
     defaultModelId: nonEmptyString(raw.defaultModelId),
     defaultPermissionMode:
-      raw.defaultPermissionMode === 'ask' || raw.defaultPermissionMode === 'skip' ? raw.defaultPermissionMode : null
+      raw.defaultPermissionMode === 'ask' || raw.defaultPermissionMode === 'skip' ? raw.defaultPermissionMode : null,
+    // Null means "never chosen", which resolves to on. Only a real boolean
+    // is a choice, so an unrecognized value falls back to the default
+    // rather than being read as "off".
+    showRepositoryActions: typeof raw.showRepositoryActions === 'boolean' ? raw.showRepositoryActions : null
   }
 }
 
