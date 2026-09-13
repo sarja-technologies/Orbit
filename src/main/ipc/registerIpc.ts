@@ -66,6 +66,9 @@ export function registerIpc(runtime: OrbitRuntime): void {
     return runtime.setConversationWorkingDirectory(parsed.conversationId, parsed.workingDirectory)
   })
   ipcMain.handle(IPC_CHANNELS.startupSession, () => runtime.ensureStartupSession())
+  ipcMain.handle(IPC_CHANNELS.conversationsMarkActive, (_event, conversationId: unknown) => {
+    runtime.markConversationActive(idSchema.parse(conversationId))
+  })
   ipcMain.handle(IPC_CHANNELS.defaultModelStatus, () => runtime.defaultModelStatus())
   ipcMain.handle(IPC_CHANNELS.workspaceOpenUnsorted, () => runtime.openUnsorted())
   ipcMain.handle(IPC_CHANNELS.conversationsListUnsorted, () => runtime.listUnsortedConversations())
@@ -162,7 +165,11 @@ export function registerIpc(runtime: OrbitRuntime): void {
     return runtime.importArtifacts(parsed.projectId, result.filePaths, parsed.conversationId ?? null)
   })
   ipcMain.handle(IPC_CHANNELS.artifactsContent, (_event, artifactId: unknown) => runtime.getArtifactContent(idSchema.parse(artifactId)))
-  ipcMain.handle(IPC_CHANNELS.artifactsReveal, async (_event, artifactId: unknown) => runtime.revealArtifact(idSchema.parse(artifactId)))
+  // Each of these takes an artifact id and nothing else. Which file the OS
+  // is shown is decided — and re-validated — in the main process.
+  ipcMain.handle(IPC_CHANNELS.artifactsDescribe, (_event, artifactId: unknown) => runtime.describeArtifact(idSchema.parse(artifactId)))
+  ipcMain.handle(IPC_CHANNELS.artifactsOpen, (_event, artifactId: unknown) => runtime.openArtifact(idSchema.parse(artifactId)))
+  ipcMain.handle(IPC_CHANNELS.artifactsReveal, (_event, artifactId: unknown) => runtime.revealArtifact(idSchema.parse(artifactId)))
   ipcMain.handle(IPC_CHANNELS.referencesCreate, (_event, input: unknown) => {
     const parsed = createReferenceSchema.parse(input)
     return runtime.createReference(parsed.projectId, parsed.artifactId, parsed.destinationConversationId)

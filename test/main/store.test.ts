@@ -236,7 +236,9 @@ describe('OrbitStore', () => {
     fs.rmSync(path.join(dir, 'orbit.sqlite'), { force: true })
     const legacy = new OrbitDatabase({ dataDir: dir })
     await legacy.init()
-    legacy.exec('DROP TABLE conversations; DROP TABLE projects;')
+    // Rebuilding the pre-migration shape by hand, as an old database was
+    // written: without foreign-key enforcement.
+    legacy.exec('PRAGMA foreign_keys = OFF; DROP TABLE conversations; DROP TABLE projects;')
     legacy.exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
     legacy.exec(
       `CREATE TABLE conversations (
@@ -333,7 +335,9 @@ describe('OrbitStore', () => {
     fs.rmSync(path.join(dir, 'orbit.sqlite'), { force: true })
     const legacy = new OrbitDatabase({ dataDir: dir })
     await legacy.init()
-    legacy.exec('DROP TABLE conversations; DROP TABLE projects;')
+    // Rebuilding the pre-migration shape by hand, as an old database was
+    // written: without foreign-key enforcement.
+    legacy.exec('PRAGMA foreign_keys = OFF; DROP TABLE conversations; DROP TABLE projects;')
     legacy.exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
     legacy.exec(
       `CREATE TABLE conversations (

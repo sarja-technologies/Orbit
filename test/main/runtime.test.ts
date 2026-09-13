@@ -514,17 +514,30 @@ describe('OrbitRuntime', () => {
     expect(snapshot.messages.some((message) => message.status === 'failed' && message.content.includes('authentication required'))).toBe(true)
   })
 
-  it('imports explicit provider-discovered artifact paths', async () => {
-    const sourcePath = path.join(dir, 'generated.txt')
+  it('imports explicit provider-discovered artifact paths inside the workspace', async () => {
+    const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-discovered-')))
+    const sourcePath = path.join(workspace, 'generated.txt')
     fs.writeFileSync(sourcePath, 'generated output')
     runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new ArtifactProvider(sourcePath), dir, '0.1.0')
-    const project = runtime.createProject('Artifacts')
+    const project = runtime.createProject('Artifacts', workspace)
     const conversation = runtime.openProject(project.id).conversations[0]!
     const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Create a file' })
     await vi.waitFor(() => expect(store.requireRun(run.id).state).toBe('completed'))
     const snapshot = runtime.openProject(project.id)
     expect(snapshot.artifacts[0]?.name).toBe('generated.txt')
     expect(snapshot.artifacts[0]?.creatorRunId).toBe(run.id)
+    fs.rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('ignores a provider-discovered path outside the workspace without failing the turn', async () => {
+    const outside = path.join(dir, 'outside.txt')
+    fs.writeFileSync(outside, 'not the workspace')
+    runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new ArtifactProvider(outside), dir, '0.1.0')
+    const project = runtime.createProject('Artifacts')
+    const conversation = runtime.openProject(project.id).conversations[0]!
+    const run = await runtime.sendMessage({ projectId: project.id, conversationId: conversation.id, content: 'Create a file' })
+    await vi.waitFor(() => expect(store.requireRun(run.id).state).toBe('completed'))
+    expect(runtime.openProject(project.id).artifacts).toEqual([])
   })
 
   it('emits only run-attributed events', async () => {

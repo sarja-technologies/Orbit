@@ -3,6 +3,9 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { createId } from '@main/util/ids'
 
+/** Name prefix of a copy that has not been finalised yet. */
+export const TEMPORARY_PREFIX = '.orbit-incomplete-'
+
 export interface StoredFile {
   originalPath: string
   storedPath: string
@@ -11,15 +14,28 @@ export interface StoredFile {
   contentHash: string
 }
 
+/** Who an artifact's stored copy belongs to. A session with no project
+ *  keeps its outputs beside its own id, so nothing it produced lands inside
+ *  a project it does not belong to. */
+export type ArtifactOwner = { projectId: string } | { conversationId: string }
+
 export class FileStorage {
   constructor(private readonly dataDir: string) {}
 
-  storeProjectFile(projectId: string, sourcePath: string): StoredFile {
-    return this.copyInto(projectId, 'files', sourcePath)
+  /** Orbit's own data folder — the one place every stored copy lives. */
+  get root(): string {
+    return this.dataDir
   }
 
-  storeArtifact(projectId: string, sourcePath: string): StoredFile {
-    return this.copyInto(projectId, 'artifacts', sourcePath)
+  storeProjectFile(projectId: string, sourcePath: string): StoredFile {
+    return this.copyInto(path.join('projects', projectId), 'files', sourcePath)
+  }
+
+  /** `name` overrides the stored display name — the provider sometimes knows
+   *  a better one than the file on disk (see generatedOutputs.ts). */
+  storeArtifact(owner: ArtifactOwner | string, sourcePath: string, name?: string): StoredFile {
+    const scope = typeof owner === 'string' ? path.join('projects', owner) : 'projectId' in owner ? path.join('projects', owner.projectId) : path.join('conversations', owner.conversationId)
+    return this.copyInto(scope, 'artifacts', sourcePath, name)
   }
 
   /** Stores bytes that never existed as a file on disk — specifically a
@@ -39,15 +55,26 @@ export class FileStorage {
     }
   }
 
-  private copyInto(projectId: string, kind: 'files' | 'artifacts', sourcePath: string): StoredFile {
+  private copyInto(scope: string, kind: 'files' | 'artifacts', sourcePath: string, displayName?: string): StoredFile {
     const stat = fs.statSync(sourcePath)
     if (!stat.isFile()) throw new Error('Only regular files can be imported into Orbit.')
     if (stat.size > 100 * 1024 * 1024) throw new Error('Orbit MVP imports are capped at 100 MB per file.')
-    const name = path.basename(sourcePath)
-    const destDir = path.join(this.dataDir, 'projects', projectId, kind)
+    const name = displayName || path.basename(sourcePath)
+    const destDir = path.join(this.dataDir, scope, kind)
     fs.mkdirSync(destDir, { recursive: true })
     const storedPath = path.join(destDir, `${createId(kind.slice(0, -1))}-${sanitizeName(name)}`)
-    fs.copyFileSync(sourcePath, storedPath)
+    // Copied under a temporary name and renamed into place, so a copy that
+    // fails or is interrupted never leaves a half-written file under a name
+    // that looks finished. A leftover temporary file is reclaimed by the
+    // storage sweep (artifactStorageGc.ts).
+    const temporaryPath = path.join(destDir, `${TEMPORARY_PREFIX}${createId('copy')}`)
+    try {
+      fs.copyFileSync(sourcePath, temporaryPath)
+      fs.renameSync(temporaryPath, storedPath)
+    } catch (error) {
+      fs.rmSync(temporaryPath, { force: true })
+      throw error
+    }
     return {
       originalPath: sourcePath,
       storedPath,

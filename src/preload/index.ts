@@ -45,7 +45,10 @@ const orbitApi: OrbitApi = {
     setTransport: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetTransport, input),
     setModel: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetModel, input),
     setPermissionMode: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetPermissionMode, input),
-    setWorkingDirectory: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetWorkingDirectory, input)
+    setWorkingDirectory: (input) => ipcRenderer.invoke(IPC_CHANNELS.conversationsSetWorkingDirectory, input),
+    markActive: async (conversationId) => {
+      await ipcRenderer.invoke(IPC_CHANNELS.conversationsMarkActive, conversationId)
+    }
   },
   clipboard: {
     writeText: (text) => ipcRenderer.invoke(IPC_CHANNELS.clipboardWriteText, text)
@@ -88,6 +91,8 @@ const orbitApi: OrbitApi = {
     list: (projectId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsList, projectId),
     import: (input) => ipcRenderer.invoke(IPC_CHANNELS.artifactsImport, input),
     getContent: (artifactId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsContent, artifactId),
+    describe: (artifactId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsDescribe, artifactId),
+    open: (artifactId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsOpen, artifactId),
     reveal: (artifactId) => ipcRenderer.invoke(IPC_CHANNELS.artifactsReveal, artifactId)
   },
   references: {

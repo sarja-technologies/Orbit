@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import type { Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
+import type { Artifact, Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
 import { hasRunningStep, type ActivityState } from '../lib/activity'
 import type { AgentIdentity } from '../lib/agentIdentity'
@@ -8,6 +8,7 @@ import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
 import { ActivitySummary, LiveActivity } from './ActivityLine'
 import { InactiveInteraction, InteractionCard, ResolvedInteraction } from './InteractionCard'
+import { TurnArtifacts } from './TurnArtifacts'
 import { useTranscriptScroll } from '../lib/useTranscriptScroll'
 
 export interface ResolvedRecord {
@@ -22,6 +23,9 @@ interface WorkSessionProps {
   messages: Message[]
   runs: Run[]
   projectFiles: ProjectFile[]
+  /** Everything the workspace's turns produced. Each is drawn under the
+   *  reply of the run that created it. */
+  artifacts?: Artifact[]
   thumbnails: Record<string, string>
   activeRunId: ID | null
   streamText: string
@@ -47,6 +51,7 @@ export function WorkSession({
   messages,
   runs,
   projectFiles,
+  artifacts = EMPTY_ARTIFACTS,
   thumbnails,
   activeRunId,
   streamText,
@@ -73,6 +78,19 @@ export function WorkSession({
     }
     return next
   }, [projectFilesById, runs])
+  // Keyed by the run that produced them, which is exactly the key the
+  // assistant message for that turn carries. A user import has no run and
+  // stays in the Artifacts panel only.
+  const artifactsByRun = useMemo(() => {
+    const next = new Map<ID, Artifact[]>()
+    for (const artifact of [...artifacts].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      if (artifact.source !== 'provider' || !artifact.creatorRunId) continue
+      const list = next.get(artifact.creatorRunId)
+      if (list) list.push(artifact)
+      else next.set(artifact.creatorRunId, [artifact])
+    }
+    return next
+  }, [artifacts])
   const resolvedByRun = useMemo(() => {
     const next = new Map<ID, ResolvedRecord[]>()
     for (const record of resolvedRecords) {
@@ -105,6 +123,7 @@ export function WorkSession({
   const revision = [
     messages.length,
     messages[messages.length - 1]?.id ?? '',
+    artifacts.length,
     streamText.length,
     activeRunId ?? '',
     activeRunId ? (activityByRun[activeRunId]?.items.length ?? 0) : 0,
@@ -148,6 +167,7 @@ export function WorkSession({
                 error={message.runId ? (runsById.get(message.runId)?.error ?? null) : null}
                 activity={activity}
                 resolved={resolved}
+                artifacts={message.role === 'assistant' && message.runId ? (artifactsByRun.get(message.runId) ?? EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS}
                 identity={identity}
               />
             )
@@ -256,6 +276,7 @@ export function WorkSession({
 
 const EMPTY_ATTACHMENTS: ProjectFile[] = []
 const EMPTY_RESOLVED: ResolvedRecord[] = []
+const EMPTY_ARTIFACTS: Artifact[] = []
 
 /** A run is given an activity state the moment it starts, so the state
  *  existing says nothing. Only recorded steps do — and without this the
@@ -289,6 +310,7 @@ const MessageTurn = memo(function MessageTurn({
   error,
   activity,
   resolved,
+  artifacts,
   identity
 }: {
   message: Message
@@ -298,6 +320,7 @@ const MessageTurn = memo(function MessageTurn({
   error: Run['error'] | null
   activity: ActivityState | undefined
   resolved: ResolvedRecord[]
+  artifacts: Artifact[]
   identity: AgentIdentity
 }): JSX.Element {
   return (
@@ -320,7 +343,11 @@ const MessageTurn = memo(function MessageTurn({
         thumbnails={thumbnails}
         error={error}
         identity={identity}
+        hasArtifacts={artifacts.length > 0}
       />
+      {/* What the turn produced, directly under what it said — including a
+          stopped or failed turn, which keeps only provably finished files. */}
+      <TurnArtifacts artifacts={artifacts} />
     </div>
   )
 })

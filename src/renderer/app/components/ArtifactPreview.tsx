@@ -5,6 +5,7 @@ import { formatBytes } from '../lib/attachments'
 export function ArtifactPreview({ artifact, content }: { artifact: Artifact | null; content: ArtifactContent | null }): JSX.Element {
   if (!artifact) return <p className="context-empty">Select something to preview it.</p>
   if (!content) return <p className="context-empty">Loading…</p>
+  if (!content.available) return <p className="context-empty">This file is no longer available.</p>
   if (content.dataUrl && content.previewKind === 'image') return <img className="artifact-image" src={content.dataUrl} alt={artifact.name} />
   if (content.dataUrl && content.previewKind === 'audio') return <audio controls src={content.dataUrl} />
   if (content.dataUrl && content.previewKind === 'video') return <video controls src={content.dataUrl} />

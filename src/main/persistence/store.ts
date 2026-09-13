@@ -169,10 +169,62 @@ export class OrbitStore {
   /** Removes a conversation and everything scoped to it. Messages, runs and
    *  run_events all declare ON DELETE CASCADE against conversations/runs, so
    *  this single delete is sufficient — see schema.ts. */
-  deleteConversation(conversationId: ID): void {
+  /** Deletes a conversation and the artifacts that belong to it, and returns
+   *  every storage location those artifact rows named, for the caller to
+   *  reclaim once the rows are gone.
+   *
+   *  What belongs to a session: everything its turns produced, and anything
+   *  it holds while Unsorted. A file a user imported into a project's
+   *  Artifacts is project material and stays, as it always has. */
+  deleteConversation(conversationId: ID): string[] {
     const conversation = this.requireConversation(conversationId)
+    const owned = this.db.query(
+      "SELECT id FROM artifacts WHERE creator_conversation_id = ? AND (project_id IS NULL OR source = 'provider')",
+      [conversationId],
+      (row) => text(row, 'id')
+    )
+    const locations = owned.flatMap((artifactId) => this.artifactLocations(artifactId))
+    // Rows first, then the conversation. Files are the caller's, afterwards —
+    // an interruption can only ever leave an unreferenced file behind.
+    for (const artifactId of owned) this.db.run('DELETE FROM artifacts WHERE id = ?', [artifactId])
     this.db.run('DELETE FROM conversations WHERE id = ?', [conversationId])
     this.touchProject(conversation.projectId)
+    // A remembered session that no longer exists is forgotten, so nothing
+    // downstream ever has to reason about a dangling id.
+    const preferences = this.readPreferences()
+    if (preferences.lastActiveConversationId === conversationId) {
+      this.writePreferences({ ...preferences, lastActiveConversationId: null, lastActiveProjectId: null })
+    }
+    return locations
+  }
+
+  /** Deletes one artifact (its versions cascade) and returns the storage
+   *  locations its rows named, for the caller to reclaim afterwards. */
+  deleteArtifact(artifactId: ID): string[] {
+    const locations = this.artifactLocations(artifactId)
+    this.db.run('DELETE FROM artifacts WHERE id = ?', [artifactId])
+    return locations
+  }
+
+  /** Every storage location any artifact or artifact-version row names. */
+  referencedArtifactLocations(): string[] {
+    return this.db.query(
+      `SELECT location AS path FROM artifacts
+       UNION SELECT location FROM artifact_versions
+       UNION SELECT preview_location FROM artifact_versions WHERE preview_location IS NOT NULL`,
+      [],
+      (row) => text(row, 'path')
+    )
+  }
+
+  private artifactLocations(artifactId: ID): string[] {
+    return this.db.query(
+      `SELECT location AS path FROM artifacts WHERE id = ?
+       UNION SELECT location FROM artifact_versions WHERE artifact_id = ?
+       UNION SELECT preview_location FROM artifact_versions WHERE artifact_id = ? AND preview_location IS NOT NULL`,
+      [artifactId, artifactId, artifactId],
+      (row) => text(row, 'path')
+    )
   }
 
   /** Persists the model/effort choice for one conversation. Either may be
@@ -303,6 +355,11 @@ export class OrbitStore {
 
   /** Sessions that belong to no project. Their own group in the sidebar,
    *  ordered by recency like a project's are. */
+  /** The most recently used conversation anywhere, Unsorted included. */
+  mostRecentConversation(): Conversation | null {
+    return this.db.get('SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 1', [], mapConversation)
+  }
+
   listUnsortedConversations(): Conversation[] {
     return this.db.query('SELECT * FROM conversations WHERE project_id IS NULL ORDER BY updated_at DESC', [], mapConversation)
   }
@@ -318,8 +375,17 @@ export class OrbitStore {
       conversations,
       messages: this.db.query('SELECT * FROM messages WHERE project_id IS NULL ORDER BY sequence ASC', [], mapMessage),
       runs: this.db.query('SELECT * FROM runs WHERE project_id IS NULL ORDER BY started_at ASC', [], mapRun),
-      artifacts: [],
-      artifactVersions: [],
+      // What those sessions produced. Files and references stay
+      // project-only: attaching and referencing are project features.
+      artifacts: this.db.query('SELECT * FROM artifacts WHERE project_id IS NULL ORDER BY updated_at DESC', [], mapArtifact),
+      artifactVersions: this.db.query(
+        `SELECT av.* FROM artifact_versions av
+         JOIN artifacts a ON a.id = av.artifact_id
+         WHERE a.project_id IS NULL
+         ORDER BY av.created_at ASC`,
+        [],
+        mapArtifactVersion
+      ),
       projectFiles: [],
       references: []
     }
@@ -346,6 +412,11 @@ export class OrbitStore {
     this.db.run('UPDATE conversations SET project_id = ?, updated_at = ? WHERE id = ?', [projectId, updatedAt, conversationId])
     this.db.run('UPDATE messages SET project_id = ? WHERE conversation_id = ?', [projectId, conversationId])
     this.db.run('UPDATE runs SET project_id = ? WHERE conversation_id = ?', [projectId, conversationId])
+    // Outputs the session produced while Unsorted travel with it, so its
+    // transcript still shows them and the project's Artifacts lists them.
+    this.db.run('UPDATE artifacts SET project_id = ? WHERE creator_conversation_id = ? AND project_id IS NULL', [projectId, conversationId])
+    const preferences = this.readPreferences()
+    if (preferences.lastActiveConversationId === conversationId) this.writePreferences({ ...preferences, lastActiveProjectId: projectId })
     this.touchProject(projectId)
     this.touchProject(conversation.projectId)
     return { ...conversation, projectId, updatedAt }
@@ -460,6 +531,15 @@ export class OrbitStore {
     return this.requireRun(runId)
   }
 
+  /** Runs with no recorded ending. */
+  listUnfinishedRuns(): Run[] {
+    return this.db.query(
+      "SELECT * FROM runs WHERE state IN ('queued', 'running', 'waiting_for_interaction', 'cancelling') ORDER BY started_at ASC",
+      [],
+      mapRun
+    )
+  }
+
   requireRun(runId: ID): Run {
     const run = this.db.get('SELECT * FROM runs WHERE id = ?', [runId], mapRun)
     if (!run) throw new Error(`Run not found: ${runId}`)
@@ -483,7 +563,7 @@ export class OrbitStore {
   }
 
   createArtifact(input: {
-    projectId: ID
+    projectId: ID | null
     creatorConversationId: ID | null
     creatorRunId: ID | null
     type: ArtifactType
@@ -574,6 +654,15 @@ export class OrbitStore {
 
   getArtifact(artifactId: ID): Artifact | null {
     return this.db.get('SELECT * FROM artifacts WHERE id = ?', [artifactId], mapArtifact)
+  }
+
+  /** Every artifact a conversation's turns produced, oldest first. */
+  listConversationArtifacts(conversationId: ID): Artifact[] {
+    return this.db.query('SELECT * FROM artifacts WHERE creator_conversation_id = ? ORDER BY created_at ASC', [conversationId], mapArtifact)
+  }
+
+  getArtifactVersion(versionId: ID): ArtifactVersion | null {
+    return this.db.get('SELECT * FROM artifact_versions WHERE id = ?', [versionId], mapArtifactVersion)
   }
 
   listArtifactVersions(projectId: ID): ArtifactVersion[] {
@@ -763,7 +852,7 @@ function mapRun(row: Record<string, unknown>): Run {
 function mapArtifact(row: Record<string, unknown>): Artifact {
   return {
     id: text(row, 'id'),
-    projectId: text(row, 'project_id'),
+    projectId: nullableText(row, 'project_id'),
     creatorConversationId: nullableText(row, 'creator_conversation_id'),
     creatorRunId: nullableText(row, 'creator_run_id'),
     type: text(row, 'type') as ArtifactType,

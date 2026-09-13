@@ -7,12 +7,12 @@ import { OrbitStore } from '../../src/main/persistence/store'
 import { FileStorage } from '../../src/main/files/fileStorage'
 import { ArtifactService } from '../../src/main/artifacts/artifactService'
 import { OrbitRuntime } from '../../src/main/runtime/orbitRuntime'
-import { StartupSessionResolver, startupProjectFor, type StartupSessionHost } from '../../src/main/startup/startupSession'
+import { StartupSessionResolver, resolveStartupSession, type StartupSessionHost } from '../../src/main/startup/startupSession'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
 import { DEFAULT_PERMISSION_MODE } from '../../src/shared/permissionMode'
 import { DEFAULT_SESSION_TITLE } from '../../src/shared/sessionTitle'
 import type { AgentProvider, ProviderSendInput } from '../../src/main/runtime/provider'
-import type { ModelOption, Project, ProjectGroup, ProviderStatus } from '../../src/shared/domain'
+import type { Conversation, ModelOption, ProviderStatus } from '../../src/shared/domain'
 import type { RuntimeEvent } from '../../src/shared/runtime-events'
 
 const CATALOGUE: ModelOption[] = [
@@ -31,104 +31,96 @@ class QuietProvider implements AgentProvider {
   async sendMessage(_input: ProviderSendInput, _onEvent: (event: RuntimeEvent) => void): Promise<void> {}
 }
 
-function project(id: string, name: string): Project {
-  return { id, name, rootPath: null, createdAt: 'now', updatedAt: 'now' }
+function conversation(id: string, projectId: string | null, updatedAt = '2026-09-13T10:00:00.000Z'): Conversation {
+  return {
+    id,
+    projectId,
+    title: id,
+    providerId: 'antigravity',
+    nativeConversationId: null,
+    status: 'idle',
+    transport: 'structured',
+    model: ORBIT_DEFAULT_MODEL_ID,
+    permissionMode: DEFAULT_PERMISSION_MODE,
+    reasoningEffort: 'medium',
+    workingDirectory: null,
+    createdAt: updatedAt,
+    updatedAt
+  }
 }
 
-function groupsOf(...projects: Project[]): ProjectGroup[] {
-  return projects.map((item) => ({ project: item, conversations: [] }))
-}
-
-describe('where a launch session starts', () => {
-  const WEBSITE = project('project_1', 'AgentDock')
-  const RENDERER = project('project_2', 'Renderer')
-
-  it('starts in no project at all, whatever was open last', () => {
-    // Unsorted by design: launching Orbit and typing must not require
-    // picking a project, and the last one used is not a decision the user
-    // made about this session.
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_2')).toBeNull()
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), 'project_1')).toBeNull()
-    expect(startupProjectFor(groupsOf(WEBSITE, RENDERER), null)).toBeNull()
-  })
-
-  it('needs no project to exist first', () => {
-    expect(startupProjectFor([], null)).toBeNull()
-  })
-})
-
-describe('exactly one launch session per application launch', () => {
+describe('which session a launch opens on', () => {
+  let rows: Conversation[]
+  let remembered: string | null
   let host: StartupSessionHost & { createConversation: ReturnType<typeof vi.fn> }
-  let groups: ProjectGroup[]
-  let lastActive: string | null
 
   beforeEach(() => {
-    groups = groupsOf(project('project_1', 'AgentDock'), project('project_2', 'Renderer'))
-    lastActive = null
+    rows = []
+    remembered = null
     let made = 0
     host = {
-      listProjectTree: () => groups,
-      readLastActiveProjectId: () => lastActive,
+      readLastActiveConversationId: () => remembered,
+      getConversation: (id) => rows.find((row) => row.id === id) ?? null,
+      mostRecentConversation: () => [...rows].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null,
       createConversation: vi.fn((projectId: string | null) => {
         made += 1
-        return { id: `conversation_${made}`, projectId }
+        const row = conversation(`conversation_new_${made}`, projectId)
+        rows.push(row)
+        return row
       })
     }
   })
 
-  it('creates one Unsorted session on the first call', async () => {
-    const session = await new StartupSessionResolver(host).ensure()
+  it('reopens the session the user was last in, and creates nothing', () => {
+    rows = [conversation('recent', 'project_1', '2026-09-13T12:00:00.000Z'), conversation('mine', 'project_2', '2026-09-01T00:00:00.000Z')]
+    remembered = 'mine'
+    expect(resolveStartupSession(host)).toEqual({ projectId: 'project_2', conversationId: 'mine', source: 'remembered' })
+    expect(host.createConversation).not.toHaveBeenCalled()
+  })
 
-    expect(session).toEqual({ projectId: null, conversationId: 'conversation_1' })
-    expect(host.createConversation).toHaveBeenCalledTimes(1)
+  it('reopens a remembered Unsorted session', () => {
+    rows = [conversation('loose', null)]
+    remembered = 'loose'
+    expect(resolveStartupSession(host)).toMatchObject({ projectId: null, conversationId: 'loose' })
+  })
+
+  it('takes the project from the session as it is now, not as it was remembered', () => {
+    // Remembered while Unsorted, filed into a project since.
+    rows = [conversation('moved', 'project_9')]
+    remembered = 'moved'
+    expect(resolveStartupSession(host)).toMatchObject({ projectId: 'project_9', conversationId: 'moved' })
+  })
+
+  it('falls back to the most recent session when the remembered one was deleted', () => {
+    rows = [conversation('older', 'project_1', '2026-09-01T00:00:00.000Z'), conversation('newest', null, '2026-09-13T00:00:00.000Z')]
+    remembered = 'deleted'
+    expect(resolveStartupSession(host)).toEqual({ projectId: null, conversationId: 'newest', source: 'most-recent' })
+    expect(host.createConversation).not.toHaveBeenCalled()
+  })
+
+  it('opens the most recent session when nothing was ever remembered', () => {
+    rows = [conversation('only', 'project_1')]
+    expect(resolveStartupSession(host)).toMatchObject({ conversationId: 'only', source: 'most-recent' })
+  })
+
+  it('creates an Unsorted session only when there is no session at all', () => {
+    expect(resolveStartupSession(host)).toEqual({ projectId: null, conversationId: 'conversation_new_1', source: 'created' })
     expect(host.createConversation).toHaveBeenCalledWith(null)
   })
 
-  it('hands the same session back however many times it is asked for', async () => {
-    // A React remount, an HMR reload, a reconnecting bridge, a second
-    // window: all of these ask again, and none of them is a new launch.
-    const resolver = new StartupSessionResolver(host)
-    const first = await resolver.ensure()
-    const again = await resolver.ensure()
-    const third = await resolver.ensure()
-
-    expect(again).toEqual(first)
-    expect(third).toEqual(first)
-    expect(host.createConversation).toHaveBeenCalledTimes(1)
-  })
-
-  it('creates one session even when several callers race before the first resolves', async () => {
+  it('resolves once per launch, however many times and however concurrently it is asked', async () => {
     const resolver = new StartupSessionResolver(host)
     const [a, b, c] = await Promise.all([resolver.ensure(), resolver.ensure(), resolver.ensure()])
-
-    expect(b).toEqual(a)
-    expect(c).toEqual(a)
+    const later = await resolver.ensure()
+    expect([b, c, later]).toEqual([a, a, a])
     expect(host.createConversation).toHaveBeenCalledTimes(1)
   })
 
-  it('creates another session on the next launch, because that is a new resolver', async () => {
-    // Quitting Orbit ends the main process; launching it builds a new one.
+  it('does not create a second session on the next launch of an empty install', async () => {
     const first = await new StartupSessionResolver(host).ensure()
     const second = await new StartupSessionResolver(host).ensure()
-
-    expect(second).not.toEqual(first)
-    expect(host.createConversation).toHaveBeenCalledTimes(2)
-  })
-
-  it('does not put the session in the last-used project', async () => {
-    lastActive = 'project_2'
-    await expect(new StartupSessionResolver(host).ensure()).resolves.toEqual({
-      projectId: null,
-      conversationId: 'conversation_1'
-    })
-  })
-
-  it('still produces a session on first run, with no project in existence', async () => {
-    groups = []
-    await expect(new StartupSessionResolver(host).ensure()).resolves.toEqual({
-      projectId: null,
-      conversationId: 'conversation_1'
-    })
+    expect(second).toEqual(first)
+    expect(host.createConversation).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -152,42 +144,107 @@ describe('the launch session against the real runtime', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('opens on a brand-new Unsorted session, not the project or conversation last used', async () => {
+  /** Quitting and launching again: a new runtime (and so a new resolver)
+   *  over the same database. */
+  const relaunch = (): OrbitRuntime => new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dir)), new QuietProvider(), dir, '0.1.0')
+
+  it('reopens the conversation last marked active, without creating a session', async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
     const project = runtime.createProject('AgentDock', workspace)
-    const before = runtime.openProject(project.id).conversations[0]!
-    store.writePreferences({ ...store.readPreferences(), lastActiveProjectId: project.id, lastActiveConversationId: before.id })
+    const first = runtime.openProject(project.id).conversations[0]!
+    const second = runtime.createConversation(project.id, 'Fix Login Bug')
+    runtime.markConversationActive(first.id)
+    const before = store.listConversations(project.id).length
 
-    const session = await runtime.ensureStartupSession()
+    const session = await relaunch().ensureStartupSession()
 
-    expect(session).not.toBeNull()
-    expect(session!.projectId).toBeNull()
-    expect(session!.conversationId).not.toBe(before.id)
-    expect(store.requireConversation(session!.conversationId).projectId).toBeNull()
+    expect(session).toEqual({ projectId: project.id, conversationId: first.id })
+    expect(store.listConversations(project.id)).toHaveLength(before)
+    expect(runtime.listUnsortedConversations()).toHaveLength(0)
+    expect(second.id).not.toBe(first.id)
   })
 
-  it('leaves every earlier conversation in place and selectable', async () => {
+  it('makes an explicitly created session the next launch’s target', async () => {
+    const project = runtime.createProject('AgentDock')
+    runtime.markConversationActive(runtime.openProject(project.id).conversations[0]!.id)
+    const created = runtime.createConversation(null)
+    runtime.markConversationActive(created.id)
+
+    await expect(relaunch().ensureStartupSession()).resolves.toEqual({ projectId: null, conversationId: created.id })
+  })
+
+  it('reopens a session in the project it was moved into', async () => {
+    const loose = runtime.createConversation(null)
+    runtime.markConversationActive(loose.id)
+    const project = runtime.createProject('Filed')
+    runtime.assignConversationToProject(loose.id, project.id)
+
+    await expect(relaunch().ensureStartupSession()).resolves.toEqual({ projectId: project.id, conversationId: loose.id })
+    expect(store.readPreferences().lastActiveProjectId).toBe(project.id)
+  })
+
+  it('falls back to the most recent session when the remembered one is deleted', async () => {
+    const project = runtime.createProject('AgentDock')
+    const keep = runtime.openProject(project.id).conversations[0]!
+    const doomed = runtime.createConversation(null)
+    runtime.markConversationActive(doomed.id)
+    await runtime.deleteConversation(doomed.id)
+
+    expect(store.readPreferences().lastActiveConversationId).toBeNull()
+    await expect(relaunch().ensureStartupSession()).resolves.toEqual({ projectId: project.id, conversationId: keep.id })
+    expect(runtime.listUnsortedConversations()).toHaveLength(0)
+  })
+
+  it('ignores a remembered id that names nothing, and never trusts a stale project id', async () => {
+    const loose = runtime.createConversation(null)
+    store.writePreferences({ ...store.readPreferences(), lastActiveProjectId: 'project_gone', lastActiveConversationId: 'conversation_gone' })
+    await expect(relaunch().ensureStartupSession()).resolves.toEqual({ projectId: null, conversationId: loose.id })
+    // Marking an id that does not exist changes nothing.
+    runtime.markConversationActive('conversation_nope')
+    expect(store.readPreferences().lastActiveConversationId).toBe('conversation_gone')
+  })
+
+  it('reopens a session that holds generated artifacts, with them intact', async () => {
+    const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-')))
+    const conversation = runtime.createConversation(null)
+    const run = store.createRun({ projectId: null, conversationId: conversation.id })
+    fs.writeFileSync(path.join(workspace, 'chart.csv'), 'a,b\n1,2\n')
+    new ArtifactService(store, new FileStorage(dir)).registerOutput({ projectId: null, conversationId: conversation.id, runId: run.id, sourcePath: path.join(workspace, 'chart.csv'), sourceRoot: workspace })
+    runtime.createConversation(null) // a newer, unrelated session
+    runtime.markConversationActive(conversation.id)
+
+    const next = relaunch()
+    await expect(next.ensureStartupSession()).resolves.toEqual({ projectId: null, conversationId: conversation.id })
+    expect(next.openUnsorted().artifacts.map((artifact) => artifact.creatorRunId)).toEqual([run.id])
+  })
+
+  it('keeps the active session when the renderer writes an older preferences object', () => {
+    const a = runtime.createConversation(null)
+    const b = runtime.createConversation(null)
+    runtime.markConversationActive(a.id)
+    const stale = store.readPreferences()
+    runtime.markConversationActive(b.id)
+
+    runtime.setPreferences({ ...stale, sidebarWidth: 300 })
+
+    expect(store.readPreferences()).toMatchObject({ sidebarWidth: 300, lastActiveConversationId: b.id })
+  })
+
+  it('opens on a session the user already has when one exists, instead of making a new one', async () => {
     const project = runtime.createProject('AgentDock')
     const first = runtime.openProject(project.id).conversations[0]!
     const second = runtime.createConversation(project.id, 'Fix Login Bug')
 
     const session = await runtime.ensureStartupSession()
 
-    // The project's own sessions are untouched; the launch session is
-    // Unsorted and sits outside them.
     const ids = runtime.openProject(project.id).conversations.map((item) => item.id)
-    expect(ids).toContain(first.id)
-    expect(ids).toContain(second.id)
-    expect(ids).not.toContain(session!.conversationId)
-    expect(runtime.listUnsortedConversations().map((item) => item.id)).toContain(session!.conversationId)
-    // Still reachable, which is what selecting one in the sidebar does.
-    expect(store.getConversation(second.id)?.title).toBe('Fix Login Bug')
+    expect(ids).toEqual(expect.arrayContaining([first.id, second.id]))
+    expect(ids).toHaveLength(2)
+    expect([first.id, second.id]).toContain(session!.conversationId)
+    expect(runtime.listUnsortedConversations()).toHaveLength(0)
   })
 
-  it('gives the launch session every ordinary new-session default', async () => {
-    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-root-'))
-    const project = runtime.createProject('AgentDock', workspace)
-
+  it('gives a session created for an empty install every ordinary new-session default', async () => {
     const session = await runtime.ensureStartupSession()
     const conversation = store.requireConversation(session!.conversationId)
 
@@ -198,26 +255,18 @@ describe('the launch session against the real runtime', () => {
     expect(conversation.permissionMode).toBe(DEFAULT_PERMISSION_MODE)
     expect(conversation.transport).toBe('structured')
     expect(conversation.providerId).toBe('antigravity')
-    // Empty until the provider reports one, and null folder means it
-    // inherits the project's.
     expect(conversation.nativeConversationId).toBeNull()
     expect(conversation.workingDirectory).toBeNull()
     expect(conversation.projectId).toBeNull()
-    expect(store.getProject(project.id)?.rootPath).toBe(workspace)
   })
 
-  it('adds exactly one session per launch, and no project', async () => {
-    const project = runtime.createProject('AgentDock')
-    const before = runtime.openProject(project.id).conversations.length
-
+  it('resolves once per launch, however often it is asked', async () => {
     await runtime.ensureStartupSession()
     await runtime.ensureStartupSession()
     await runtime.ensureStartupSession()
 
-    // One Unsorted session, and the project is exactly as it was.
     expect(runtime.listUnsortedConversations()).toHaveLength(1)
-    expect(runtime.openProject(project.id).conversations).toHaveLength(before)
-    expect(runtime.listProjects()).toHaveLength(1)
+    expect(runtime.listProjects()).toHaveLength(0)
   })
 
   it('still opens on a usable session when no project exists at all', async () => {
@@ -231,7 +280,6 @@ describe('the launch session against the real runtime', () => {
   })
 
   it('still names the launch session from its first prompt', async () => {
-    runtime.createProject('AgentDock')
     const session = await runtime.ensureStartupSession()
 
     await runtime.sendMessage({

@@ -132,12 +132,12 @@ describe('App', () => {
         setRoot: vi.fn()
       },
       dialog: { pickFolder: vi.fn(async () => '/home/dev/chosen') },
-      // Mirrors the main process: one launch session, created on the first
-      // call and handed back to every later caller, so a remount or a reload
-      // cannot produce a second one. The real one is made through the same
-      // createConversation the New Session control uses (asserted in
-      // test/main/startupSession.test.ts); here it is built directly so the
-      // create spy keeps counting only the sessions a test itself asks for.
+      // Stands in for the session the main process resolved for this launch,
+      // memoized and handed back to every later caller. Which session that is
+      // — the remembered one, the most recent, or a new one — is the main
+      // process's rule, pinned in test/main/startupSession.test.ts and
+      // test/renderer/startupSession.test.tsx; here it is simply a session
+      // built directly, so the create spy counts only what a test asks for.
       startup: {
         session: vi.fn(async () => {
           launchSession ??= (async (): Promise<StartupSession | null> => {
@@ -196,7 +196,8 @@ describe('App', () => {
           )
           return sessions[projectId]!.find((item) => item.id === conversationId)!
         }),
-        setWorkingDirectory: vi.fn()
+        setWorkingDirectory: vi.fn(),
+        markActive: vi.fn(async () => undefined)
       },
       data: { clearAll: vi.fn() },
       defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
@@ -232,7 +233,7 @@ describe('App', () => {
         thumbnail: vi.fn(async () => null),
         pathForFile: vi.fn(() => null)
       },
-      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), describe: vi.fn(), open: vi.fn(), reveal: vi.fn() },
       repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }
@@ -288,26 +289,24 @@ describe('App', () => {
     await waitFor(() => expect(api.projects.open).toHaveBeenCalledWith('project_1'))
   })
 
-  it('opens on the fresh launch session rather than the conversation last used', async () => {
-    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' }
+  it('opens on the session the main process resolved, selected in the sidebar', async () => {
     await boot()
 
-    // The remembered conversation is still there and still selectable — it
-    // just is not what Orbit reopened into.
     const header = document.querySelector('.chrome') as HTMLElement
     await waitFor(() => expect(within(header).getByText('New Session')).toBeInTheDocument())
-    expect(within(header).queryByText('Improve Orbit UI')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Improve Orbit UI/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^New Session/ })).toHaveAttribute('aria-current', 'true')
   })
 
-  it('remembers the project, which is where the next launch puts its session', async () => {
+  it('records the open session for the next launch by id only, never through a preferences write', async () => {
     await boot()
-    await waitFor(() =>
-      expect(api.preferences.set).toHaveBeenCalledWith(
-        expect.objectContaining({ lastActiveProjectId: 'project_1', lastActiveConversationId: LAUNCH_SESSION_ID })
-      )
-    )
+    await waitFor(() => expect(api.conversations.markActive).toHaveBeenCalledWith(LAUNCH_SESSION_ID))
+
+    await userEvent.click(screen.getByRole('button', { name: /^Improve Orbit UI/ }))
+    await waitFor(() => expect(api.conversations.markActive).toHaveBeenLastCalledWith('conversation_1'))
+    for (const [written] of vi.mocked(api.preferences.set).mock.calls) {
+      expect(written).not.toMatchObject({ lastActiveConversationId: 'conversation_1' })
+    }
   })
 
   it('opens the sidebar at the stored width, and persists a new one only when the drag ends', async () => {

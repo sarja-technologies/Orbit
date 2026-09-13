@@ -25,8 +25,12 @@ import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInterac
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
 import { findRecentConversationId } from './nativeConversationHistory'
+import { processKey, snapshotExecution, terminateExecution, type ProcessInfo, type TerminateOptions, type TerminationReport } from '@main/process/processTree'
 
-type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'retiring' | 'waiting_for_interaction'
+/** 'stopping': the user's Stop has been acknowledged by agy, and the
+ *  processes the cancelled turn started are being terminated. Busy, so no
+ *  next turn can start until they are gone. */
+type SessionState = 'idle' | 'bootstrapping' | 'ready' | 'running' | 'retiring' | 'waiting_for_interaction' | 'stopping'
 
 /** A handover in progress: the previous process is being terminated, and
  *  until it is confirmed gone it is still this conversation's owner.
@@ -107,6 +111,11 @@ export interface PtySessionDeps {
    *  plain Node/vitest, making the "successfully loaded, awaiting paste
    *  confirmation" path otherwise impossible to exercise in a unit test. */
   writeImageToClipboard?: (imagePath: string) => boolean
+  /** Process-tree termination. Overridable for tests; the real one is used
+   *  only when a transport reports a real process id. */
+  terminate?: (options: TerminateOptions) => Promise<TerminationReport>
+  /** Process snapshots. Overridable for tests. */
+  snapshot?: (options: Omit<TerminateOptions, 'graceMs' | 'snapshot'>) => Promise<ProcessInfo[]>
 }
 
 export class AntigravityPtySession {
@@ -134,6 +143,14 @@ export class AntigravityPtySession {
   private pending: PendingInteraction | null = null
   private interactionCounter = 0
   private cancelRequested = false
+  /** Processes under agy when the current turn started, taken so a Stop
+   *  terminates only what that turn launched — a dev server an earlier turn
+   *  started on purpose, or agy's own long-lived helpers, are left alone. */
+  private turnBaseline: Promise<Set<string>> | null = null
+  /** Resolvers for Stops waiting on the current run's cancellation. */
+  private cancelWaiters: Array<() => void> = []
+  /** Runs whose `run.cancelled` has been emitted. Exactly once per run. */
+  private readonly cancelledRuns = new Set<ID>()
   /** The one activity row currently shown as running for this turn, if any
    *  — see `observeActivity`. Null means nothing is live, which is the
    *  state every turn ending must leave behind. */
@@ -421,11 +438,24 @@ export class AntigravityPtySession {
    *  is never left hanging, not so the session can pretend a live process
    *  stopped existing. */
   private async forceRetire(retired: IAntigravityPtyTransport, record: Retirement): Promise<boolean> {
+    // Taken while agy is alive: once it exits, the commands it ran in
+    // process groups of their own are reparented and no longer look like its.
+    const tree = retired.pid !== undefined ? await (this.deps.snapshot ?? snapshotExecution)({ rootPid: retired.pid, includeRoot: false }).catch(() => []) : []
+    const reapLeftovers = async (): Promise<void> => {
+      if (tree.length === 0) return
+      await (this.deps.terminate ?? terminateExecution)({ rootPid: retired.pid!, includeRoot: false, snapshot: tree }).catch(() => undefined)
+    }
     retired.kill()
-    if (await this.awaitExit(retired, RETIRE_TIMEOUT_MS)) return true
+    if (await this.awaitExit(retired, RETIRE_TIMEOUT_MS)) {
+      await reapLeftovers()
+      return true
+    }
     console.warn('[antigravity-pty] the previous agy process did not exit when asked; escalating to SIGKILL.')
     retired.kill('SIGKILL')
-    if (await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)) return true
+    if (await this.awaitExit(retired, RETIRE_FORCE_TIMEOUT_MS)) {
+      await reapLeftovers()
+      return true
+    }
     console.warn('[antigravity-pty] the previous agy process survived SIGKILL; this conversation is blocked until it exits.')
     record.blocked = true
     void retired.whenExited().then(() => {
@@ -508,7 +538,10 @@ export class AntigravityPtySession {
     this.emit({ type: 'interaction.resolved', interactionId: resolvedId, outcome })
   }
 
-  cancel(): void {
+  /** Stops the current turn. Resolves once the run is reported cancelled —
+   *  agy has abandoned the turn and every process the turn started is gone —
+   *  or at once when there is nothing to stop. Safe to call repeatedly. */
+  cancel(): Promise<void> {
     // CRITICAL (real bug, review round 4): a run does not always have a
     // process to interrupt. While a model change is retiring the previous
     // agy, `transport` is deliberately null and the replacement is only
@@ -524,9 +557,17 @@ export class AntigravityPtySession {
     // conversation's owner until it genuinely exits.
     if (this.awaitingDeferredSpawn()) {
       this.cancelDeferredRun()
-      return
+      return Promise.resolve()
     }
-    if (this.state === 'idle' || !this.transport?.isRunning) return
+    const runId = this.currentRunId
+    if (runId !== null && this.cancelledRuns.has(runId)) return Promise.resolve()
+    const settled = new Promise<void>((resolve) => this.cancelWaiters.push(resolve))
+    // Already stopping: this Stop joins the one under way.
+    if (this.cancelRequested || this.state === 'stopping') return settled
+    if (this.state === 'idle' || !this.transport?.isRunning) {
+      this.resolveCancelWaiters()
+      return settled
+    }
     // Stop is acknowledged in the activity feed straight away: the row the
     // user was watching stops counting the moment they ask it to, rather
     // than when the transport eventually settles.
@@ -542,6 +583,67 @@ export class AntigravityPtySession {
       this.emit({ type: 'interaction.resolved', interactionId: resolvedId, outcome: 'cancelled' })
     }
     this.transport.cancelTurn()
+    return settled
+  }
+
+  private resolveCancelWaiters(): void {
+    const waiters = this.cancelWaiters
+    this.cancelWaiters = []
+    for (const resolve of waiters) resolve()
+  }
+
+  /** `run.cancelled` for the current run, at most once however many paths
+   *  reach it (the settle, the process exiting mid-stop, a second Stop). */
+  private emitCancelledOnce(): void {
+    const runId = this.currentRunId
+    if (runId !== null && !this.cancelledRuns.has(runId)) {
+      this.cancelledRuns.add(runId)
+      this.emit({ type: 'run.cancelled' })
+    }
+    this.resolveCancelWaiters()
+  }
+
+  /** Snapshots what is already running under agy as a turn begins. */
+  private captureTurnBaseline(): void {
+    const pid = this.transport?.pid
+    this.turnBaseline = null
+    if (pid === undefined) return
+    const snapshot = this.deps.snapshot ?? snapshotExecution
+    this.turnBaseline = snapshot({ rootPid: pid, includeRoot: false })
+      .then((processes) => new Set(processes.map(processKey)))
+      .catch(() => new Set<string>())
+  }
+
+  /** Terminates what the cancelled turn launched, then reports it cancelled.
+   *
+   *  agy stays: it is this conversation's live session. What goes is every
+   *  process agy started during the turn in a process group of its own —
+   *  which is how agy runs a `run_command` (captured live), and why its
+   *  Escape alone cannot be relied on to end them. Processes that were
+   *  already there when the turn began are not this turn's. */
+  private async finishCancelledTurn(transport: IAntigravityPtyTransport, runId: ID): Promise<void> {
+    const pid = transport.pid
+    try {
+      if (pid !== undefined) {
+        const baseline = (await this.turnBaseline) ?? new Set<string>()
+        const terminate = this.deps.terminate ?? terminateExecution
+        const report = await terminate({
+          rootPid: pid,
+          includeRoot: false,
+          include: (process, root) => process.pgid !== root?.pgid && !baseline.has(processKey(process))
+        })
+        if (report.targeted > 0) {
+          console.info(`[antigravity-pty] Stop terminated ${report.targeted} process(es) the turn started for run ${runId}${report.survivors.length ? `; ${report.survivors.length} survived` : ''}.`)
+        }
+      }
+    } catch {
+      // Termination never throws by contract; this only guards a test double.
+    }
+    // Still the same run on the same process: a session torn down meanwhile
+    // has already reported the ending through handleExit.
+    if (this.currentRunId !== runId || this.transport !== transport || this.state !== 'stopping') return
+    this.state = 'ready'
+    this.emitCancelledOnce()
   }
 
   /** True while the current run has no process of its own and is waiting on
@@ -609,6 +711,15 @@ export class AntigravityPtySession {
     return retirement ? retirement.done : true
   }
 
+  /** Resolves once a real process this session was retiring — and the
+   *  process tree under it — has been dealt with. Immediate when there is no
+   *  real process (a test double) or nothing being retired. */
+  async whenProcessTreeRetired(): Promise<void> {
+    const retirement = this.retirement
+    if (!retirement || retirement.transport.pid === undefined) return
+    await retirement.done
+  }
+
   /** Resolves once nothing this session owns is still running. */
   async whenOwnershipReleased(): Promise<void> {
     const owner = this.transport ?? this.retirement?.transport
@@ -638,6 +749,7 @@ export class AntigravityPtySession {
    *  clipboard content is saved once and restored afterward regardless of
    *  how many attachments succeeded. */
   private async deliverPrompt(prompt: string, images: ImageAttachment[]): Promise<void> {
+    this.captureTurnBaseline()
     if (images.length === 0) {
       this.beginStreaming(prompt)
       this.transport?.sendPrompt(prompt)
@@ -928,8 +1040,17 @@ export class AntigravityPtySession {
     this.completeCurrentActivity()
     if (this.cancelRequested) {
       this.cancelRequested = false
+      const transport = this.transport
+      const runId = this.currentRunId
+      // A real process: the turn's own commands are terminated before the
+      // run is reported over, so nothing it started can outlive it.
+      if (transport?.pid !== undefined && runId !== null) {
+        this.state = 'stopping'
+        void this.finishCancelledTurn(transport, runId)
+        return
+      }
       this.state = 'ready'
-      this.emit({ type: 'run.cancelled' })
+      this.emitCancelledOnce()
       return
     }
     this.state = 'ready'
@@ -953,8 +1074,8 @@ export class AntigravityPtySession {
       this.pending = null
       this.emit({ type: 'interaction.resolved', interactionId: resolvedId, outcome: 'cancelled' })
     }
-    if (wasCancelled) {
-      this.emit({ type: 'run.cancelled' })
+    if (wasCancelled || this.cancelWaiters.length > 0) {
+      this.emitCancelledOnce()
       return
     }
     this.emit({

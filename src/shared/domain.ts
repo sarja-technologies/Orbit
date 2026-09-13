@@ -119,7 +119,9 @@ export type ArtifactType =
 
 export interface Artifact {
   id: ID
-  projectId: ID
+  /** Null for an output an Unsorted session produced. It is owned through
+   *  `creatorConversationId`, and moves into a project with its session. */
+  projectId: ID | null
   creatorConversationId: ID | null
   creatorRunId: ID | null
   type: ArtifactType

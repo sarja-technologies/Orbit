@@ -31,12 +31,43 @@ export class OrbitDatabase {
     this.runMigrations()
     this.relaxProjectOwnership()
     this.backfillTitleState()
+    this.enableForeignKeys()
+    this.repairOrphanedRows()
     this.persist()
   }
 
-  /** Lets a session belong to no project at all.
+  /** CRITICAL (real bug): `PRAGMA foreign_keys` is per connection, and
+   *  sql.js's `export()` — which `persist()` calls after every write — closes
+   *  and reopens the connection, silently turning enforcement back off. The
+   *  schema's `ON DELETE CASCADE` / `SET NULL` therefore never ran after the
+   *  first write: deleting a session left its messages, runs, run events and
+   *  artifact versions behind. It is re-enabled after every reopen. */
+  private enableForeignKeys(): void {
+    this.requireDb().run('PRAGMA foreign_keys = ON')
+  }
+
+  /** Repairs what the foreign-key bug above left behind, exactly as the
+   *  schema's own ON DELETE rules would have. Idempotent: a no-op once clean.
+   *  Only ever removes rows whose owner row no longer exists. */
+  private repairOrphanedRows(): void {
+    const statements = [
+      'DELETE FROM run_events WHERE run_id NOT IN (SELECT id FROM runs)',
+      'DELETE FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)',
+      'DELETE FROM runs WHERE conversation_id NOT IN (SELECT id FROM conversations)',
+      'UPDATE messages SET run_id = NULL WHERE run_id IS NOT NULL AND run_id NOT IN (SELECT id FROM runs)',
+      // An Unsorted session's artifacts belong to that session alone.
+      'DELETE FROM artifacts WHERE project_id IS NULL AND (creator_conversation_id IS NULL OR creator_conversation_id NOT IN (SELECT id FROM conversations))',
+      'DELETE FROM artifacts WHERE project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)',
+      'UPDATE artifacts SET creator_conversation_id = NULL WHERE creator_conversation_id IS NOT NULL AND creator_conversation_id NOT IN (SELECT id FROM conversations)',
+      'UPDATE artifacts SET creator_run_id = NULL WHERE creator_run_id IS NOT NULL AND creator_run_id NOT IN (SELECT id FROM runs)',
+      'DELETE FROM artifact_versions WHERE artifact_id NOT IN (SELECT id FROM artifacts)'
+    ]
+    for (const statement of statements) this.exec(statement)
+  }
+
+  /** Lets a session — and what it produced — belong to no project at all.
    *
-   *  SQLite cannot drop a NOT NULL constraint in place, so the three tables
+   *  SQLite cannot drop a NOT NULL constraint in place, so the tables
    *  that carry a session's ownership are rebuilt with a nullable
    *  `project_id`. Everything is copied across first and the swap happens
    *  inside one transaction, so an interrupted run leaves the old table
@@ -50,7 +81,9 @@ export class OrbitDatabase {
     const tables: Array<{ name: string; columns: string }> = [
       { name: 'conversations', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' },
       { name: 'runs', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' },
-      { name: 'messages', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' }
+      { name: 'messages', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' },
+      // Outputs an Unsorted session produced — see the artifacts table.
+      { name: 'artifacts', columns: 'project_id TEXT REFERENCES projects(id) ON DELETE CASCADE' }
     ]
     const pending = tables.filter((table) => this.columnIsNotNull(table.name, 'project_id'))
     if (pending.length === 0) return
@@ -178,6 +211,8 @@ export class OrbitDatabase {
   persist(): void {
     if (!this.db) return
     const bytes = this.db.export()
+    // export() reopened the connection; see enableForeignKeys.
+    this.enableForeignKeys()
     fs.writeFileSync(this.dbPath, Buffer.from(bytes))
   }
 

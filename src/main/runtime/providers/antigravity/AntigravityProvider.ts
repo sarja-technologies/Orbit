@@ -7,13 +7,15 @@ import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { ID, ModelOption, ProviderStatus } from '@shared/domain'
 import type { RuntimeEvent } from '@shared/runtime-events'
-import type { AgentProvider, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
+import type { AgentProvider, GeneratedOutput, GeneratedOutputQuery, ProviderSendInput, RespondToInteractionInput } from '@main/runtime/provider'
 import { nowIso } from '@main/util/ids'
 import { AntigravityPtySession, type PtySessionDeps } from './AntigravityPtySession'
 import { checkClipboardCapability } from './clipboardCapability'
 import { fetchModels, normalizeModels, resolveInvocation } from './modelCatalog'
 import { describeToolActivity } from './toolActivity'
+import { defaultBrainRoot, findGeneratedOutputs } from './generatedOutputs'
 import { permissionArgs } from '@shared/permissionMode'
+import { terminateExecution, type TerminateOptions, type TerminationReport } from '@main/process/processTree'
 
 type AgyEvent = {
   event: 'init' | 'step_update' | 'result'
@@ -24,7 +26,22 @@ type AgyEvent = {
 interface ActiveRun {
   child: ChildProcessWithoutNullStreams; input: ProviderSendInput; onEvent: (event: RuntimeEvent) => void
   text: string; nativeConversationId: string | null; cancelled: boolean; settled: boolean; stderr: string[]; headlessDenials: string[]
+  /** The one in-flight Stop for this run. A second Stop joins it. */
+  stopping: Promise<void> | null
+  /** Resolves when the agy process has really exited. */
+  exited: Promise<void>
 }
+
+/** Terminates an execution's process tree. Overridable for tests. */
+export type TerminateExecution = (options: TerminateOptions) => Promise<TerminationReport>
+
+/** How long a stopped agy is given to exit after its tree was terminated,
+ *  before the run is reported cancelled anyway. The tree termination has
+ *  already force-killed it by then; this only bounds a wedged exit event. */
+const STOP_EXIT_TIMEOUT_MS = 3000
+/** How long quitting waits for live PTY sessions' process trees to be torn
+ *  down. Bounded so quitting is never held hostage by a wedged process. */
+const SHUTDOWN_WAIT_MS = 8000
 
 export class AntigravityProvider implements AgentProvider {
   private readonly activeRuns = new Map<string, ActiveRun>()
@@ -46,8 +63,23 @@ export class AntigravityProvider implements AgentProvider {
       new AntigravityPtySession(deps, conversationId),
     /** Overridable for tests — the default spawns the real `agy models`,
      *  which unit tests must not do. */
-    private readonly fetchModelCatalog: (executable: string) => Promise<ModelOption[]> = fetchModels
+    private readonly fetchModelCatalog: (executable: string) => Promise<ModelOption[]> = fetchModels,
+    /** agy's per-conversation output folder root. Overridable for tests. */
+    private readonly brainRoot: () => string = defaultBrainRoot,
+    /** Process-tree termination. Overridable for tests. */
+    private readonly terminate: TerminateExecution = terminateExecution
   ) {}
+
+  /** Images agy's `generate_image` tool saved into its own conversation
+   *  folder during a turn — see generatedOutputs.ts for the live evidence
+   *  and why the workspace never sees them. */
+  findGeneratedOutputs(query: GeneratedOutputQuery): GeneratedOutput[] {
+    try {
+      return findGeneratedOutputs(query, this.brainRoot())
+    } catch {
+      return []
+    }
+  }
 
   async getStatus(): Promise<ProviderStatus> {
     const executable = await this.resolveExecutable()
@@ -98,7 +130,7 @@ export class AntigravityProvider implements AgentProvider {
     if (input.transport === 'pty') {
       let session = this.ptySessions.get(input.conversationId)
       if (!session) {
-        session = this.createPtySession({ executable, invocationArgs: (send) => this.invocationArgs(send) }, input.conversationId)
+        session = this.createPtySession({ executable, invocationArgs: (send) => this.invocationArgs(send), terminate: this.terminate }, input.conversationId)
         this.ptySessions.set(input.conversationId, session)
       }
       session.send(input, onEvent)
@@ -109,15 +141,22 @@ export class AntigravityProvider implements AgentProvider {
     if (input.nativeConversationId) args.push('--conversation', input.nativeConversationId)
     // Attachments are scoped additional roots, never arbitrary filesystem access.
     for (const dir of unique(input.attachments.map((file) => dirname(file.storedPath)))) args.push('--add-dir', dir)
-    const child = spawn(executable, args, { cwd: input.workspacePath, stdio: 'pipe', shell: false })
-    const active: ActiveRun = { child, input, onEvent, text: '', nativeConversationId: input.nativeConversationId, cancelled: false, settled: false, stderr: [], headlessDenials: [] }
+    // A process group of its own on POSIX, so Stop can address this
+    // execution as a unit without ever touching Orbit's own group. (Not on
+    // Windows, where `detached` means a new console window; the tree is
+    // terminated through `taskkill /T` there instead.)
+    const child = spawn(executable, args, { cwd: input.workspacePath, stdio: 'pipe', shell: false, detached: process.platform !== 'win32' })
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+    const active: ActiveRun = { child, input, onEvent, text: '', nativeConversationId: input.nativeConversationId, cancelled: false, settled: false, stderr: [], headlessDenials: [], stopping: null, exited }
     this.activeRuns.set(input.runId, active)
     createInterface({ input: child.stdout }).on('line', (line) => this.handleLine(active, line))
-    child.stderr.on('data', (chunk: Buffer) => { active.stderr.push(chunk.toString('utf8').trim()); if (active.stderr.length > 10) active.stderr.shift() })
+    child.stderr.on('data', (chunk: Buffer) => { if (active.cancelled) return; active.stderr.push(chunk.toString('utf8').trim()); if (active.stderr.length > 10) active.stderr.shift() })
     child.on('error', (error) => this.fail(active, 'provider.start_failed', `Antigravity failed to start: ${error.message}`))
     child.on('exit', (code, signal) => {
       if (active.settled) return
-      if (active.cancelled) return this.cancelled(active)
+      // A stopped run is settled by its Stop, once the whole tree is gone —
+      // not by agy exiting, which happens before its commands are dealt with.
+      if (active.cancelled) return
       this.fail(active, 'provider.exited', `Antigravity exited before returning a result (${code ?? signal ?? 'unknown'}). ${active.stderr.join(' ').trim()}`.trim())
     })
   }
@@ -137,16 +176,41 @@ export class AntigravityProvider implements AgentProvider {
     return args
   }
 
+  /** Stops a run and everything it started.
+   *
+   *  Resolves only once the execution is really over: agy and every process
+   *  its tools launched have been terminated (politely, then forcibly), and
+   *  `run.cancelled` has been emitted. Idempotent — a second Stop, or agy
+   *  exiting on its own meanwhile, joins the one already under way. */
   async cancelRun(runId: string): Promise<void> {
     const active = this.activeRuns.get(runId)
     if (active && !active.settled) {
       active.cancelled = true
-      active.child.kill('SIGTERM')
-      setTimeout(() => { if (!active.settled) this.cancelled(active) }, 250)
-      return
+      active.stopping ??= this.stopStructuredRun(active)
+      return active.stopping
     }
+    // A PTY Stop returns once Escape is delivered. agy acknowledges it on its
+    // own schedule; the run stays 'cancelling' — busy, and shown as stopping
+    // — and `run.cancelled` is emitted only after the turn's processes are
+    // gone (see AntigravityPtySession.finishCancelledTurn).
     const session = [...this.ptySessions.values()].find((candidate) => candidate.currentRun === runId)
-    session?.cancel()
+    void session?.cancel()
+  }
+
+  private async stopStructuredRun(active: ActiveRun): Promise<void> {
+    const pid = active.child.pid
+    if (pid !== undefined && active.child.exitCode === null && active.child.signalCode === null) {
+      // agy's commands run in process groups of their own, which outlive agy
+      // (captured live) — so the whole tree is terminated, not just agy.
+      const report = await this.terminate({ rootPid: pid, includeRoot: true }).catch(() => null)
+      if (report && report.targeted > 0) {
+        console.info(`[antigravity] Stop terminated ${report.targeted} process(es) for run ${active.input.runId}${report.survivors.length ? `; ${report.survivors.length} survived` : ''}.`)
+      }
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    await Promise.race([active.exited, new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_EXIT_TIMEOUT_MS) })])
+    if (timer) clearTimeout(timer)
+    this.cancelled(active)
   }
 
   async respondToInteraction(input: RespondToInteractionInput): Promise<void> {
@@ -174,12 +238,22 @@ export class AntigravityProvider implements AgentProvider {
   }
 
   async shutdown(): Promise<void> {
-    await Promise.all([...this.activeRuns.keys()].map((runId) => this.cancelRun(runId)))
-    for (const session of this.ptySessions.values()) session.shutdown()
+    const sessions = [...this.ptySessions.values()]
     this.ptySessions.clear()
+    for (const session of sessions) session.shutdown()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    await Promise.all([
+      ...[...this.activeRuns.keys()].map((runId) => this.cancelRun(runId)),
+      // Each session's retirement terminates its agy and everything under it.
+      Promise.race([Promise.all(sessions.map((session) => session.whenProcessTreeRetired())), new Promise<void>((resolve) => { timer = setTimeout(resolve, SHUTDOWN_WAIT_MS) })])
+    ])
+    if (timer) clearTimeout(timer)
   }
 
   private handleLine(active: ActiveRun, line: string): void {
+    // A stopped run's late output — including the `result` agy writes while
+    // it is torn down — is not this run's answer and reaches nobody.
+    if (active.cancelled || active.settled) return
     let raw: AgyEvent
     try { raw = JSON.parse(line) as AgyEvent } catch { return }
     if (raw.event === 'init') {
@@ -267,20 +341,13 @@ export class AntigravityProvider implements AgentProvider {
       } else this.fail(active, 'provider.failed', result.error ?? 'Antigravity reported an error.')
     }
   }
-  // Artifact discovery deliberately does NOT live here any more.
-  //
-  // What was here read `parameters.path` / `file_path` / `filename`. agy
-  // names its parameters in PascalCase — `TargetFile`, `AbsolutePath` (see
-  // toolActivity.ts, captured live) — so none of those keys ever existed
-  // and the discovery never fired once. Had it fired it would have
-  // registered every source file an agent wrote as an artifact, and it
-  // could only ever have worked on this transport: a PTY turn has no tool
-  // stream at all, only a screen.
-  //
-  // It is now the runtime's job, from a workspace media scan diffed across
-  // the turn — real filesystem evidence, identical on both transports, and
-  // scoped to media Orbit can actually preview. See main/artifacts/
-  // mediaScan.ts.
+  // Artifact discovery does not live in the stream handler. agy's tool
+  // events carry no output path (`generate_image` reports only ImageName and
+  // Prompt, captured live on 1.2.2), a file written by `run_command` never
+  // appears as a write at all, and a PTY turn has no tool stream. Outputs
+  // are established from the filesystem when the turn ends instead: the
+  // runtime diffs the workspace, and `findGeneratedOutputs` above reads
+  // agy's own conversation folder. See main/artifacts/outputScan.ts.
   private complete(active: ActiveRun, finalText: string, usage?: Record<string, unknown>): void {
     if (active.settled) return
     active.settled = true
@@ -299,7 +366,8 @@ export class AntigravityProvider implements AgentProvider {
    *  having to remember to check. */
   private fail(active: ActiveRun, code: string, message: string): void {
     if (active.settled) return
-    if (active.cancelled) return this.cancelled(active)
+    // A stopped run is settled by stopStructuredRun once its tree is gone.
+    if (active.cancelled) return
     active.settled = true; this.emit(active, { type: 'run.failed', error: { code, message, retryable: false } }); this.activeRuns.delete(active.input.runId)
   }
   private cancelled(active: ActiveRun): void {

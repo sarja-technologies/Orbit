@@ -25,6 +25,13 @@ export function describeRuntimeError(error: RuntimeErrorInfo): ErrorView {
         category: 'retryable',
         details
       }
+    case 'app.interrupted':
+      return {
+        title: 'Orbit closed before this response finished',
+        body: 'Your conversation is safe. Send your message again to continue.',
+        category: 'retryable',
+        details: null
+      }
     case 'provider.not_installed':
       return {
         title: 'Antigravity isn’t installed',

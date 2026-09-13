@@ -41,6 +41,7 @@ export const IPC_CHANNELS = {
   conversationsSetPermissionMode: 'orbit:conversations:set-permission-mode',
   clipboardWriteText: 'orbit:clipboard:write-text',
   conversationsSetWorkingDirectory: 'orbit:conversations:set-working-directory',
+  conversationsMarkActive: 'orbit:conversations:mark-active',
   dialogPickFolder: 'orbit:dialog:pick-folder',
   startupSession: 'orbit:startup:session',
   dataClear: 'orbit:data:clear',
@@ -60,6 +61,8 @@ export const IPC_CHANNELS = {
   artifactsImport: 'orbit:artifacts:import',
   artifactsContent: 'orbit:artifacts:content',
   artifactsReveal: 'orbit:artifacts:reveal',
+  artifactsDescribe: 'orbit:artifacts:describe',
+  artifactsOpen: 'orbit:artifacts:open',
   referencesCreate: 'orbit:references:create',
   repositoryState: 'orbit:repository:state'
 } as const
@@ -214,11 +217,28 @@ export interface ArtifactContent {
   previewKind: Artifact['previewKind']
   name: string
   mimeType: string | null
+  /** False when Orbit's stored copy is gone from disk. Everything else about
+   *  the artifact is still known; there is simply nothing left to show. */
+  available: boolean
   dataUrl?: string
   text?: string
-  location: string
   byteSize: number
 }
+
+/** What a conversation card needs to draw one artifact. Deliberately
+ *  path-free: the renderer identifies an artifact by id and nothing else. */
+export interface ArtifactSummary {
+  artifactId: ID
+  /** Whether Orbit's stored copy still exists. */
+  available: boolean
+  byteSize: number | null
+  /** A downscaled image preview, for formats shown inline. */
+  previewDataUrl: string | null
+  canOpen: boolean
+  canReveal: boolean
+}
+
+export type ArtifactActionResult = { ok: true } | { ok: false; reason: 'missing' | 'not-openable' | 'failed' }
 
 export interface OrbitApi {
   system: {
@@ -274,6 +294,10 @@ export interface OrbitApi {
     setModel(input: SetConversationModelInput): Promise<Conversation>
     setPermissionMode(input: SetConversationPermissionModeInput): Promise<Conversation>
     setWorkingDirectory(input: SetConversationWorkingDirectoryInput): Promise<Conversation>
+    /** Records the session on screen as the one the next launch reopens.
+     *  Takes only an id; the main process reads its project from the
+     *  database. */
+    markActive(conversationId: ID): Promise<void>
   }
   /** Narrow clipboard capability. The renderer cannot use
    *  `navigator.clipboard`: a packaged Orbit loads over file://, which is
@@ -324,7 +348,12 @@ export interface OrbitApi {
     list(projectId: ID): Promise<Artifact[]>
     import(input: ImportArtifactInput): Promise<Artifact[]>
     getContent(artifactId: ID): Promise<ArtifactContent>
-    reveal(artifactId: ID): Promise<void>
+    /** Card data for the conversation. Never rejects for a missing file. */
+    describe(artifactId: ID): Promise<ArtifactSummary>
+    /** Opens the artifact in the OS's default app. The main process picks
+     *  and re-validates the file; the renderer only names the artifact. */
+    open(artifactId: ID): Promise<ArtifactActionResult>
+    reveal(artifactId: ID): Promise<ArtifactActionResult>
   }
   references: {
     create(input: CreateReferenceInput): Promise<Reference>

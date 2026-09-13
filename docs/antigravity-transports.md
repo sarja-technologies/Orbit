@@ -64,7 +64,7 @@ Two real captured shapes, both handled by the same generic detector:
 
 Orbit never auto-approves either shape — every permission/trust prompt is surfaced to the user via `interaction.required` and only resolved by an explicit `interactions.respond` call. Responses are translated to the real keystrokes: numbered/lettered options send the literal key + Enter; arrow-menu options send N down-arrows (`\x1b[B`) + Enter, relying on the confirmed-live fact that the affirmative option is always the one initially highlighted.
 
-Cancel (Escape) is the verified in-turn cancel key; Ctrl+C is NOT used (it's reserved for exiting the whole session and needs a second press).
+Cancel (Escape) is the verified in-turn cancel key; Ctrl+C is NOT used (it's reserved for exiting the whole session and needs a second press). Escape alone is not trusted to end what the turn launched: see ARCHITECTURE.md "Stop terminates the whole execution" for the turn-scoped process-group termination that follows it.
 
 ## Native conversation ID capture (via agy's own history file)
 
@@ -286,6 +286,34 @@ against recorded frames and captured event shapes.
   Instructions", "Analyzing the Directive") is still included in the extracted
   response, as it was before this change — it is indistinguishable from an
   ordinary unindented heading on the screen.
+
+## Generated files
+
+**Captured live, agy 1.2.2.** Asked to generate an image on the structured transport, agy emitted:
+
+```text
+init          tools: [..., "generate_image", ...]
+step_update   tool generate_image ACTIVE  parameters {ImageName: "small_mountain", Prompt: "..."}
+step_update   tool generate_image DONE    (same parameters — no output path)
+step_update   agent_response ... "I have generated a picture of a snow-capped mountain landscape for you."
+result        SUCCESS
+```
+
+The workspace stayed empty. The image was written to agy's own per-conversation folder:
+
+```text
+~/.gemini/antigravity-cli/brain/<conversation_id>/
+  small_mountain_1789304888495.jpg          generated output (name = ImageName + _<epoch ms>)
+  *.md, *.md.metadata.json                  agy's planning documents
+  .user_uploaded/uploaded_media_<ms>.png    images the user pasted in
+  .tempmediaStorage/media_<ms>.png          agy scratch media
+  .system_generated/logs/transcript.jsonl   steps, incl. USER_INPUT and the tool's "saved at" output
+  .system_generated/steps/<n>/output.txt    that step's output
+```
+
+So an event-based detector can never find generated images, and a workspace-only scan never does either. `generatedOutputs.ts` reads only **top-level, non-hidden image/video files** in the conversation's own folder written since the turn started. The conversation id comes from `init` (structured), from the session (PTY, from its second turn), and — because a PTY session's first turn has no id anywhere Orbit can read — from agy's own `transcript.jsonl`: the folder touched during the turn whose `USER_INPUT` for this turn contains the prompt. A conversation id is only used if it is a UUID, so no path can be smuggled through it. The tool's step type was `GENERATE_IMAGE` on an older build and `GENERIC` on 1.2.2, which is why nothing depends on it.
+
+Files the agent writes into the project (a script rendering a chart, `zip`, a PDF export) come from the runtime's workspace diff instead; see ARCHITECTURE.md "Generated files".
 
 ## Native image attachment
 

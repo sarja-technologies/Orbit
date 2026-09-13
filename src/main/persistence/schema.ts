@@ -70,9 +70,12 @@ CREATE TABLE IF NOT EXISTS run_events (
   sequence INTEGER NOT NULL
 );
 
+-- project_id is nullable for the same reason a conversation's is: an
+-- Unsorted session produces real outputs too. Such an artifact is owned
+-- through creator_conversation_id until the session is filed into a project.
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   creator_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
   creator_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   type TEXT NOT NULL,
@@ -128,6 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id
 CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_events_run ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(creator_run_id);
 CREATE INDEX IF NOT EXISTS idx_files_project ON project_files(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_references_target ON references_table(project_id, target_type, target_id);
 `

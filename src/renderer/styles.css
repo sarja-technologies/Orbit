@@ -2950,6 +2950,202 @@ body.is-resizing {
   padding: var(--space-1) var(--space-2);
 }
 
+/* ---------- files a turn produced ---------- */
+
+/* Under the reply that produced them, on the assistant rail. Quiet surfaces
+   in the same register as sent attachments: the reply is the message, and
+   these are what it handed over. */
+.turn-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  max-width: var(--chat-measure);
+}
+
+.turn-artifact-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.turn-artifact-image {
+  margin: 0;
+  width: min(320px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.turn-artifact-image-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--chat-assistant-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  cursor: zoom-in;
+}
+
+.turn-artifact-image-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.turn-artifact-image-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.turn-artifact-image-button img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
+}
+
+.turn-artifact-image-placeholder {
+  display: block;
+  aspect-ratio: 1;
+}
+
+.turn-artifact-caption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+}
+
+.turn-artifact-caption .turn-artifact-name {
+  flex: 1;
+}
+
+.turn-artifact-files {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.turn-artifact-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  max-width: 460px;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  background: var(--chat-assistant-bg);
+  border: 1px solid var(--chat-assistant-border);
+  border-radius: var(--radius-sm);
+}
+
+.turn-artifact-images .turn-artifact-file {
+  width: min(320px, 100%);
+}
+
+.turn-artifact-file.is-unavailable {
+  background: transparent;
+  border-style: dashed;
+}
+
+.turn-artifact-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-xs);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.turn-artifact-file.is-unavailable .turn-artifact-icon {
+  color: var(--text-muted);
+  background: var(--bg-hover);
+}
+
+.turn-artifact-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.turn-artifact-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-ui);
+  color: var(--text-primary);
+}
+
+.turn-artifact-caption .turn-artifact-name {
+  font-size: var(--text-meta);
+  color: var(--text-secondary);
+}
+
+.turn-artifact-meta {
+  font-size: var(--text-meta);
+  color: var(--text-muted);
+}
+
+.turn-artifact-problem {
+  margin: 0;
+  font-size: var(--text-meta);
+  color: var(--attention);
+}
+
+.turn-artifact-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+}
+
+.turn-artifact-actions button.ghost {
+  font-size: var(--text-meta);
+}
+
+.turn-artifact-actions.is-compact button.ghost {
+  padding: 2px var(--space-2);
+}
+
+.artifact-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.artifact-viewer-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+
+/* Absolutely placed so the image is sized by the stage, never the other way
+   round — a tall image must shrink to fit, not push the footer away. */
+.artifact-viewer-stage img {
+  position: absolute;
+  inset: var(--space-3);
+  width: calc(100% - 2 * var(--space-3));
+  height: calc(100% - 2 * var(--space-3));
+  object-fit: contain;
+}
+
+.artifact-viewer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
 .drop-overlay {
   position: absolute;
   inset: var(--space-3);

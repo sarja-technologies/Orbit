@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
-import type { MediaKind } from '@shared/mediaArtifacts'
-import { mediaAddedMessage } from '@shared/mediaArtifacts'
+import type { MediaKind } from '@shared/outputArtifacts'
+import { mediaAddedMessage } from '@shared/outputArtifacts'
 
 export interface ArtifactNotice {
   /** The artifact's own id — also the dedupe key, so one registration

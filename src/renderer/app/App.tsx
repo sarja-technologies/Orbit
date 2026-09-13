@@ -39,7 +39,7 @@ import { ProviderLogoSprite } from './components/ProviderLogo'
 import { applyActivity, emptyActivity, finalizeActivity, pruneActivity, type ActivityState } from './lib/activity'
 import { agentIdentity } from './lib/agentIdentity'
 import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
-import { mediaKindFor } from '@shared/mediaArtifacts'
+import { mediaKindFor } from '@shared/outputArtifacts'
 import { ArtifactToasts, type ArtifactNotice } from './components/ArtifactToast'
 import { RuntimeEventBatcher, type RuntimeEventBatch } from './lib/runtimeEventBatcher'
 import { describeInteraction, describeResolution } from './lib/interactionCopy'
@@ -135,6 +135,10 @@ export function App(): JSX.Element {
   const runningRunByConversationRef = useRef<Record<string, string>>({})
 
   runningRunByConversationRef.current = runningRunByConversation
+  /** The session on screen, readable from the runtime-event handler, which
+   *  is subscribed once and would otherwise see the first render's value. */
+  const activeConversationIdRef = useRef<ID | null>(null)
+  activeConversationIdRef.current = workspace.activeConversationId
 
   const projects = useMemo(() => tree.map((group) => group.project), [tree])
   const activeProject = projects.find((project) => project.id === workspace.activeProjectId) ?? null
@@ -270,27 +274,23 @@ export function App(): JSX.Element {
     void persistModel(activeConversation.id, activeConversation.model, effort)
   }, [activeConversation, models, preferences])
 
-  // Remember where the user is. The next launch uses the project to decide
-  // where its fresh session goes; the conversation id is kept as a record of
-  // position and deliberately does not reopen anything. Written only when it
-  // actually changes, and only once a real session is open.
   /** Session settings are launch flags: the turn agy runs is decided by
    *  what is persisted, not by what the composer is showing. Every write
    *  chains onto this, and Send waits on it, so the selected state and the
    *  state the runtime launches with can never disagree. */
   const sessionSettingsRef = useRef<Promise<unknown>>(Promise.resolve())
 
-  const lastActiveRef = useRef<string>('')
+  // Remember where the user is, so the next launch reopens it. Any session
+  // counts — Unsorted ones included — and only the id is sent: the main
+  // process reads the session's project from the database, and owns these
+  // fields outright so no other preference write can roll them back.
+  const markedActiveRef = useRef<ID | null>(null)
   useEffect(() => {
-    const projectId = workspace.activeProjectId
     const conversationId = workspace.activeConversationId
-    if (!projectId || !conversationId) return
-    const signature = `${projectId}:${conversationId}`
-    if (lastActiveRef.current === signature) return
-    lastActiveRef.current = signature
-    if (preferences.lastActiveProjectId === projectId && preferences.lastActiveConversationId === conversationId) return
-    savePreferences({ ...preferences, lastActiveProjectId: projectId, lastActiveConversationId: conversationId })
-  }, [workspace.activeProjectId, workspace.activeConversationId, preferences])
+    if (!conversationId || markedActiveRef.current === conversationId) return
+    markedActiveRef.current = conversationId
+    void getOrbitApi()?.conversations.markActive?.(conversationId).catch(() => undefined)
+  }, [workspace.activeConversationId])
 
   if (startupError) return <StartupError message={startupError.message} detail={startupError.detail} />
 
@@ -311,14 +311,12 @@ export function App(): JSX.Element {
       .list()
       .then(setModels)
       .catch(() => setModels([]))
-    // Every launch opens on one brand-new Unsorted session, never on
-    // whatever conversation happened to be open last time and never inside
-    // whichever project happened to be last. The main process decides and
-    // creates it — see startupSession.ts — because it is the only place
-    // that knows an *application launch* from a renderer remount, an HMR
-    // reload or a bridge reconnect. Asking again here is therefore safe:
-    // it returns the same session rather than making a second one.
-    // Projects and their sessions stay in the sidebar, untouched.
+    // Orbit reopens the session the user was last in. The main process
+    // resolves it before anything is drawn — the remembered session if it
+    // still exists, else the most recent one, and a new session only when
+    // there are none (see startupSession.ts) — so no blank session is ever
+    // created and then switched away from. It memoizes that answer for the
+    // launch, so asking again after a remount or reload is safe.
     const startup = await orbit.startup.session().catch(() => null)
     if (startup) {
       if (startup.projectId) {
@@ -469,11 +467,13 @@ export function App(): JSX.Element {
     }
     if (event.type === 'artifact.produced') {
       setSelectedArtifactId(event.artifact.id)
-      // Only media gets a toast. A user-imported file or any other
-      // artifact is something the user already knows about, and announcing
-      // it would be noise.
+      // Only media gets a toast, and only for a session the user is not
+      // looking at: in the session on screen the output is drawn right under
+      // the reply, and announcing it as well would say the same thing twice.
+      // The run's own ending, which follows immediately, reloads the
+      // workspace — so nothing is refreshed here per artifact.
       const kind = mediaKindFor(event.artifact.name)
-      if (kind) {
+      if (kind && event.conversationId !== activeConversationIdRef.current) {
         setArtifactNotices((current) =>
           // Keyed by artifact id, so the same registration can never be
           // announced twice however many times the event is delivered.
@@ -482,7 +482,6 @@ export function App(): JSX.Element {
             : [...current, { artifactId: event.artifact.id, name: event.artifact.name, kind }]
         )
       }
-      void openWorkspace(event.projectId, event.conversationId)
     }
     if (event.type === 'run.notice') setNotice(event.message)
     if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
@@ -1010,6 +1009,7 @@ export function App(): JSX.Element {
               messages={activeMessages}
               runs={workspace.runs}
               projectFiles={workspace.projectFiles}
+              artifacts={workspace.artifacts}
               thumbnails={thumbnails}
               activeRunId={activeRunId}
               streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}

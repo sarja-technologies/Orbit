@@ -88,6 +88,9 @@ export interface IAntigravityPtyTransport {
    *  replacement `agy` must not exist while its predecessor still does. */
   readonly isRunning: boolean
   readonly mediaAttachedCount: number
+  /** The real OS process id, once spawned. Absent for test doubles, which
+   *  have no process tree to terminate. */
+  readonly pid?: number | undefined
   start(handlers: AntigravityPtyHandlers): void
   sendPrompt(prompt: string): void
   respond(pending: PtyInteraction, optionId: string): boolean
@@ -163,6 +166,10 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
 
   get isRunning(): boolean {
     return this.running
+  }
+
+  get pid(): number | undefined {
+    return this.proc?.pid
   }
 
   get mediaAttachedCount(): number {

@@ -18,7 +18,7 @@ import type {
   RuntimeErrorInfo,
   SystemStatus
 } from '@shared/domain'
-import type { ArtifactContent, SendMessageInput, StartupSession } from '@shared/contracts'
+import type { ArtifactActionResult, ArtifactContent, ArtifactSummary, SendMessageInput, StartupSession } from '@shared/contracts'
 import type { RuntimeEvent } from '@shared/runtime-events'
 import type { AgentProvider } from './provider'
 import type { OrbitStore } from '@main/persistence/store'
@@ -29,7 +29,10 @@ import { resolveDefaultModel, resolveDefaultPermissionMode } from '@shared/newSe
 import type { PermissionMode } from '@shared/permissionMode'
 import { transportForTurn } from '@shared/transportPolicy'
 import { DEFAULT_SESSION_TITLE, deriveTitleForPrompt } from '@shared/sessionTitle'
-import { newOrChangedMedia, scanMedia, type MediaFile } from '@main/artifacts/mediaScan'
+import { newOrChangedOutputs, scanOutputs, type OutputFile } from '@main/artifacts/outputScan'
+import { selectTurnOutputs, type TurnEnding, type TurnOutputCandidate } from '@main/artifacts/turnOutputs'
+import { imagesLookAlike } from '@main/artifacts/imageSimilarity'
+import { removeUnreferencedCopies, sweepArtifactStorage } from '@main/artifacts/artifactStorageGc'
 import { readRepositoryState } from '@main/git/repositoryState'
 import { NO_REPOSITORY, type RepositoryState } from '@shared/repositoryActions'
 import { nowIso } from '@main/util/ids'
@@ -37,13 +40,21 @@ import { StartupSessionResolver } from '@main/startup/startupSession'
 
 interface ActiveRunState {
   text: string
-  /** Media present in the workspace when the turn started, and the folder
-   *  it was taken in. Diffed when the turn ends to find what the agent
-   *  genuinely produced — see artifacts/mediaScan.ts for why this is a
-   *  filesystem diff rather than a reading of the tool stream. Null when
-   *  the session has no project, which is the one case Orbit cannot store
-   *  an artifact for (artifacts are project-scoped in the schema). */
-  media: { workspacePath: string; before: Map<string, MediaFile> } | null
+  /** The folder this turn runs in. */
+  workspacePath: string
+  /** What the turn's outputs are established against when it ends — see
+   *  registerProducedOutputs. Cleared once used, so a run's outputs are
+   *  registered at most once. */
+  outputs: {
+    /** Candidate outputs present in the workspace when the turn started. */
+    before: Map<string, OutputFile>
+    startedAtMs: number
+    /** What the user sent, for providers that must find their own output
+     *  folder by it (see GeneratedOutputQuery). */
+    prompt: string
+    /** Updated as the provider reports it. */
+    nativeConversationId: string | null
+  } | null
 }
 
 export class OrbitRuntime extends EventEmitter {
@@ -60,8 +71,9 @@ export class OrbitRuntime extends EventEmitter {
    *  length of the launch — so no renderer-side lifecycle can make a
    *  second one. */
   private readonly startupSession = new StartupSessionResolver({
-    listProjectTree: () => this.store.listProjectTree(),
-    readLastActiveProjectId: () => this.store.readPreferences().lastActiveProjectId,
+    readLastActiveConversationId: () => this.store.readPreferences().lastActiveConversationId,
+    getConversation: (conversationId) => this.store.getConversation(conversationId),
+    mostRecentConversation: () => this.store.mostRecentConversation(),
     createConversation: (projectId) => this.createConversation(projectId)
   })
 
@@ -109,10 +121,9 @@ export class OrbitRuntime extends EventEmitter {
     return project
   }
 
-  /** The one fresh session this launch opens on. Creates it on the first
-   *  call and returns that same session to every call afterwards, so a
-   *  remount or reload cannot litter the project with duplicates. Null on
-   *  first run, when no project exists to hold it. */
+  /** The session this launch opens on — the one the user was last in, when
+   *  it still exists (see startupSession.ts). Resolved once per launch, so a
+   *  remount or reload gets the same answer and can never add a session. */
   async ensureStartupSession(): Promise<StartupSession | null> {
     return this.startupSession.ensure()
   }
@@ -197,8 +208,28 @@ export class OrbitRuntime extends EventEmitter {
     return this.store.readPreferences()
   }
 
+  /** Where the user is is not a preference the renderer writes wholesale: a
+   *  preferences object captured before the last selection would otherwise
+   *  silently put the user back in an older session. Those two fields are
+   *  owned by markConversationActive and always kept as stored. */
   setPreferences(preferences: OrbitPreferences): OrbitPreferences {
-    return this.store.writePreferences(preferences)
+    const stored = this.store.readPreferences()
+    return this.store.writePreferences({
+      ...preferences,
+      lastActiveProjectId: stored.lastActiveProjectId,
+      lastActiveConversationId: stored.lastActiveConversationId
+    })
+  }
+
+  /** Records the session the user is in, for the next launch to reopen.
+   *  Unsorted sessions included. The project is taken from the conversation
+   *  row, never from the caller. An id that does not exist changes nothing. */
+  markConversationActive(conversationId: ID): OrbitPreferences {
+    const conversation = this.store.getConversation(conversationId)
+    const stored = this.store.readPreferences()
+    if (!conversation) return stored
+    if (stored.lastActiveConversationId === conversation.id && stored.lastActiveProjectId === conversation.projectId) return stored
+    return this.store.writePreferences({ ...stored, lastActiveConversationId: conversation.id, lastActiveProjectId: conversation.projectId })
   }
 
   renameConversation(conversationId: ID, title: string): Conversation {
@@ -211,7 +242,37 @@ export class OrbitRuntime extends EventEmitter {
   async deleteConversation(conversationId: ID): Promise<void> {
     const conversation = this.store.requireConversation(conversationId)
     await this.provider.releaseConversation(conversationId)
-    this.store.deleteConversation(conversation.id)
+    // The rows go first; only then are the copies they named reclaimed, and
+    // only those no remaining row still refers to. See artifactStorageGc.ts.
+    const locations = this.store.deleteConversation(conversation.id)
+    this.reclaimStorage(locations)
+  }
+
+  /** Deletes an artifact and reclaims its stored copy once nothing refers to
+   *  it. The original the copy was made from is never touched. */
+  deleteArtifact(artifactId: ID): void {
+    if (!this.store.getArtifact(artifactId)) return
+    this.reclaimStorage(this.store.deleteArtifact(artifactId))
+  }
+
+  /** Best-effort: a copy that cannot be removed now stays unreferenced, and
+   *  the next storage sweep reclaims it. Never a reason for a delete to fail. */
+  private reclaimStorage(locations: string[]): void {
+    try {
+      removeUnreferencedCopies(locations, this.dataDir, this.store)
+    } catch {
+      // See above.
+    }
+  }
+
+  /** Reconciles Orbit's artifact storage with the database. Run at startup,
+   *  before anything can be writing a copy. */
+  sweepArtifactStorage(): ReturnType<typeof sweepArtifactStorage> {
+    try {
+      return sweepArtifactStorage(this.dataDir, this.store, { minAgeMs: 0 })
+    } catch {
+      return { removed: [], failed: [] }
+    }
   }
 
   async sendMessage(input: SendMessageInput): Promise<Run> {
@@ -245,13 +306,17 @@ export class OrbitRuntime extends EventEmitter {
     })
     const workspacePath = this.resolveWorkspacePath(project, conversation)
     // Taken before anything runs, so "new since this turn started" is a
-    // fact rather than a guess. Only for a session in a project: an
-    // artifact row requires one (artifacts.project_id is NOT NULL), so
-    // scanning for an Unsorted session would find media it could not then
-    // register.
+    // fact rather than a guess. For every session, Unsorted included —
+    // what a session produces belongs to it whether or not it has a project.
     this.activeRuns.set(run.id, {
       text: '',
-      media: project ? { workspacePath, before: scanMedia(workspacePath) } : null
+      workspacePath,
+      outputs: {
+        before: this.scanWorkspaceOutputs(workspacePath),
+        startedAtMs: Date.now(),
+        prompt: input.content,
+        nativeConversationId: conversation.nativeConversationId
+      }
     })
     // An Unsorted session keeps its own save directory beside its workspace,
     // so nothing it produces lands in a project it does not belong to.
@@ -338,7 +403,12 @@ export class OrbitRuntime extends EventEmitter {
   }
 
   async cancelRun(runId: ID): Promise<Run> {
-    this.store.updateRunState(runId, 'cancelling')
+    // Idempotent. A run that has already ended stays ended — a late or
+    // repeated Stop must never turn a finished run back into a stopping one —
+    // and a second Stop on a stopping run joins the one under way.
+    const current = this.store.requireRun(runId)
+    if (TERMINAL_RUN_STATES.has(current.state)) return current
+    if (current.state !== 'cancelling') this.store.updateRunState(runId, 'cancelling')
     await this.provider.cancelRun(runId)
     // Read back rather than returning the 'cancelling' snapshot above: a run
     // stopped while it was waiting on a model-change retirement has no live
@@ -438,16 +508,61 @@ export class OrbitRuntime extends EventEmitter {
     return this.artifactService.getContent(artifactId)
   }
 
-  async revealArtifact(artifactId: ID): Promise<void> {
-    await this.artifactService.reveal(artifactId)
+  describeArtifact(artifactId: ID): ArtifactSummary {
+    return this.artifactService.describe(artifactId)
+  }
+
+  openArtifact(artifactId: ID): Promise<ArtifactActionResult> {
+    return this.artifactService.open(artifactId)
+  }
+
+  revealArtifact(artifactId: ID): Promise<ArtifactActionResult> {
+    return this.artifactService.reveal(artifactId)
   }
 
   createReference(projectId: ID, artifactId: ID, destinationConversationId: ID): Reference {
     return this.store.createReference({ projectId, artifactId, destinationConversationId })
   }
 
+  /** Stops every live execution — the provider terminates each agy and the
+   *  process tree under it — and then gives each run that was still going
+   *  its real ending, so no turn is left 'running' forever in history. */
   async shutdown(): Promise<void> {
+    const interrupted = [...this.activeRuns.keys()]
     await this.provider.shutdown()
+    for (const runId of interrupted) {
+      const run = safeRequireRun(this.store, runId)
+      if (!run || TERMINAL_RUN_STATES.has(run.state)) continue
+      this.handleProviderEvent({
+        type: 'run.cancelled',
+        projectId: run.projectId,
+        conversationId: run.conversationId,
+        runId: run.id,
+        providerId: 'antigravity',
+        createdAt: nowIso()
+      })
+    }
+  }
+
+  /** Settles runs a previous launch never finished — Orbit crashed or was
+   *  killed mid-turn, so nothing recorded their ending. Called at startup,
+   *  before anything can be running. Each gets a failed ending that says
+   *  plainly what happened, rather than a turn that looks in progress
+   *  forever with no reply beneath it. Returns how many were settled. */
+  recoverInterruptedRuns(): number {
+    const stale = this.store.listUnfinishedRuns()
+    for (const run of stale) {
+      this.store.createMessage({
+        projectId: run.projectId,
+        conversationId: run.conversationId,
+        runId: run.id,
+        role: 'assistant',
+        content: 'Orbit closed before this response finished',
+        status: 'failed'
+      })
+      this.store.updateRunState(run.id, 'failed', { code: 'app.interrupted', message: 'Orbit closed before this response finished', retryable: true })
+    }
+    return stale.length
   }
 
   /** Where Antigravity actually runs: the session's own folder, else the
@@ -480,56 +595,115 @@ export class OrbitRuntime extends EventEmitter {
     return managed
   }
 
-  /** Registers media that appeared in the workspace during this turn.
-   *
-   *  Everything here is evidence-based: a file is registered only if it is
-   *  genuinely new, or genuinely changed, since the snapshot taken when the
-   *  turn started, and only if it is media Orbit can preview. An agent
-   *  writing source files produces nothing here, which is the point — those
-   *  stay in Files.
-   *
-   *  Deliberately best-effort. A media scan must never be able to fail a
-   *  turn: the answer the user was waiting for matters more than a preview
-   *  of a file they can still open from disk. */
-  private registerProducedMedia(event: RuntimeEvent, active: ActiveRunState | undefined): void {
-    const snapshot = active?.media
-    if (!snapshot || !event.projectId) return
-    // Taken once. Clearing it means a second terminal event for the same
-    // run — which the guard above this already drops — could never
-    // re-register the same files.
-    active.media = null
-
-    let produced: MediaFile[]
+  private scanWorkspaceOutputs(workspacePath: string): Map<string, OutputFile> {
     try {
-      produced = newOrChangedMedia(snapshot.before, scanMedia(snapshot.workspacePath))
+      return scanOutputs(workspacePath, [this.dataDir])
     } catch {
-      return
+      return new Map()
     }
+  }
 
-    for (const file of produced) {
-      try {
-        const artifact = this.artifactService.registerProviderArtifact({
-          projectId: event.projectId,
+  /** Registers the files this turn handed to the user, attributed to it.
+   *
+   *  Two kinds of evidence, both read off the filesystem so they hold on
+   *  either transport: deliverables that appeared or changed in the
+   *  workspace since the turn started, and files the provider's own tools
+   *  generated outside it (agy's image generation — see
+   *  providers/antigravity/generatedOutputs.ts). turnOutputs.ts decides
+   *  which of those become cards; this only gathers and records them.
+   *
+   *  Deliberately best-effort. Finding outputs must never be able to fail a
+   *  turn: the answer the user was waiting for matters more than a card for
+   *  a file they can still find on disk. */
+  private registerProducedOutputs(event: RuntimeEvent, active: ActiveRunState | undefined): void {
+    const snapshot = active?.outputs
+    if (!active || !snapshot) return
+    // Taken once, so a second ending for the same run — which the terminal
+    // guard already drops — could never register the same files twice.
+    active.outputs = null
+
+    const ending: TurnEnding = event.type === 'run.completed' ? 'completed' : event.type === 'run.cancelled' ? 'cancelled' : 'failed'
+    try {
+      const candidates: TurnOutputCandidate[] = newOrChangedOutputs(snapshot.before, this.scanWorkspaceOutputs(active.workspacePath)).map((file) => ({
+        filePath: file.filePath,
+        root: active.workspacePath,
+        displayName: path.basename(file.filePath),
+        byteSize: file.byteSize,
+        modifiedMs: file.modifiedMs,
+        origin: 'workspace',
+        created: file.created
+      }))
+
+      const nativeConversationId =
+        (event.type === 'run.completed' ? event.nativeConversationId : null) ??
+        snapshot.nativeConversationId ??
+        this.store.getConversation(event.conversationId)?.nativeConversationId ??
+        null
+      const generated =
+        this.provider.findGeneratedOutputs?.({
           conversationId: event.conversationId,
-          runId: event.runId,
-          sourcePath: file.filePath,
-          metadata: { detectedBy: 'workspace-media-scan' }
-        })
-        const produced: RuntimeEvent = {
-          type: 'artifact.produced',
-          projectId: event.projectId,
-          conversationId: event.conversationId,
-          runId: event.runId,
-          providerId: 'antigravity',
-          createdAt: nowIso(),
-          artifact
+          nativeConversationId,
+          prompt: snapshot.prompt,
+          startedAtMs: snapshot.startedAtMs
+        }) ?? []
+      for (const output of generated) candidates.push({ ...output, created: true })
+      if (candidates.length === 0) return
+
+      const selected = selectTurnOutputs({
+        candidates,
+        ending,
+        finalText: event.type === 'run.completed' ? event.finalText || active.text : '',
+        alreadyRegistered: generated.length > 0 ? this.registeredOriginals(event.conversationId) : [],
+        imagesLookAlike
+      })
+
+      for (const output of selected) {
+        try {
+          const artifact = this.artifactService.registerOutput({
+            projectId: event.projectId,
+            conversationId: event.conversationId,
+            runId: event.runId,
+            sourcePath: output.filePath,
+            sourceRoot: output.root,
+            displayName: output.displayName,
+            metadata: {
+              detectedBy: output.origin === 'workspace' ? 'workspace-scan' : 'provider-output-folder',
+              turnEnding: ending
+            }
+          })
+          this.announceArtifact(event, artifact)
+        } catch {
+          // One unreadable file must not stop the rest from registering.
         }
-        this.store.addRunEvent(produced)
-        this.emit('event', produced)
-      } catch {
-        // One unreadable file must not stop the rest from registering.
       }
+    } catch {
+      // See above: never a reason for the turn itself to fail.
     }
+  }
+
+  /** Where earlier turns' provider outputs came from, with their content. */
+  private registeredOriginals(conversationId: ID): Array<{ originalPath: string; contentHash: string }> {
+    const registered: Array<{ originalPath: string; contentHash: string }> = []
+    for (const artifact of this.store.listConversationArtifacts(conversationId)) {
+      const originalPath = artifact.metadata.originalPath
+      const version = artifact.currentVersionId ? this.store.getArtifactVersion(artifact.currentVersionId) : null
+      if (typeof originalPath === 'string' && version) registered.push({ originalPath, contentHash: version.contentHash })
+    }
+    return registered
+  }
+
+  private announceArtifact(event: RuntimeEvent, artifact: Artifact): void {
+    const produced: RuntimeEvent = {
+      type: 'artifact.produced',
+      projectId: event.projectId,
+      conversationId: event.conversationId,
+      runId: event.runId,
+      providerId: 'antigravity',
+      createdAt: nowIso(),
+      artifact
+    }
+    this.store.addRunEvent(produced)
+    this.emit('event', produced)
   }
 
   private handleProviderEvent(event: RuntimeEvent): void {
@@ -550,9 +724,21 @@ export class OrbitRuntime extends EventEmitter {
       this.store.addRunEvent(event)
       return
     }
+    // Output that arrives after a run ended — the tail of a stopped
+    // process's stream, a screen redraw — belongs to nothing any more. It is
+    // kept for diagnostics and reaches no transcript. Interaction events are
+    // deliberately not included: agy can raise a prompt just after its turn
+    // was reported complete, and that prompt still needs an answer.
+    if (STALE_AFTER_END.has(event.type) && TERMINAL_RUN_STATES.has(run.state)) {
+      this.store.addRunEvent(event)
+      return
+    }
 
     if (event.type === 'text.delta') active && (active.text += event.delta)
-    if (event.type === 'run.started' && event.nativeConversationId) this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
+    if (event.type === 'run.started' && event.nativeConversationId) {
+      this.store.updateConversationNativeId(event.conversationId, event.nativeConversationId)
+      if (active?.outputs) active.outputs.nativeConversationId = event.nativeConversationId
+    }
     if (event.type === 'interaction.required' && event.canRespond) this.store.updateRunState(event.runId, 'waiting_for_interaction')
     // Defensive only. An `ask` session is already on the PTY before its
     // turn starts (see transportForTurn), so normal Ask First never reaches
@@ -568,46 +754,30 @@ export class OrbitRuntime extends EventEmitter {
     if (event.type === 'interaction.resolved' && event.outcome !== 'cancelled' && run.state === 'waiting_for_interaction') {
       this.store.updateRunState(event.runId, 'running')
     }
-    if (event.type === 'artifact.discovered' && event.projectId) {
+    // A provider naming an exact output path. The path is untrusted: it is
+    // only registered if it is a real file inside this turn's workspace, and
+    // a bad one is ignored rather than failing a turn that otherwise worked.
+    if (event.type === 'artifact.discovered' && active) {
       try {
         const artifact = this.artifactService.registerProviderArtifact({
           projectId: event.projectId,
           conversationId: event.conversationId,
           runId: event.runId,
           sourcePath: event.sourcePath,
-          metadata: event.metadata ?? {}
+          sourceRoot: active.workspacePath,
+          metadata: { ...(event.metadata ?? {}), detectedBy: 'provider-event' }
         })
-        const produced: RuntimeEvent = {
-          type: 'artifact.produced',
-          projectId: event.projectId,
-          conversationId: event.conversationId,
-          runId: event.runId,
-          providerId: 'antigravity',
-          createdAt: nowIso(),
-          artifact
-        }
-        this.store.addRunEvent(produced)
-        this.emit('event', produced)
-      } catch (error) {
-        const failed: RuntimeEvent = {
-          type: 'run.failed',
-          projectId: event.projectId,
-          conversationId: event.conversationId,
-          runId: event.runId,
-          providerId: 'antigravity',
-          createdAt: nowIso(),
-          error: normalizeError(error)
-        }
-        this.handleProviderEvent(failed)
-        return
+        this.announceArtifact(event, artifact)
+      } catch {
+        // Outside the workspace, missing, or not a regular file.
       }
     }
-    // Media the turn actually produced, registered before the run is
-    // marked finished so the artifacts are already there when the renderer
-    // reloads the project on completion. Runs for every ending — a
-    // cancelled or failed turn can still have written an image before it
-    // stopped, and that file is just as real.
-    if (isTerminalEvent(event)) this.registerProducedMedia(event, active)
+    // Outputs the turn actually produced, registered before the run is
+    // marked finished so they are already there when the renderer reloads
+    // on completion. Runs for every ending — a cancelled or failed turn can
+    // still have finished writing a file before it stopped — but a turn
+    // that did not complete keeps only provably finished files.
+    if (isTerminalEvent(event)) this.registerProducedOutputs(event, active)
 
     if (event.type === 'run.completed') {
       const text = event.finalText || active?.text || ''
@@ -656,6 +826,8 @@ export class OrbitRuntime extends EventEmitter {
  *  deliberately absent: a run that has been asked to stop has not stopped
  *  yet, and its real ending is still to come. */
 const TERMINAL_RUN_STATES: ReadonlySet<Run['state']> = new Set<Run['state']>(['completed', 'failed', 'cancelled'])
+
+const STALE_AFTER_END: ReadonlySet<RuntimeEvent['type']> = new Set<RuntimeEvent['type']>(['text.delta', 'tool.activity', 'step.started', 'artifact.discovered', 'run.notice'])
 
 function isTerminalEvent(event: RuntimeEvent): boolean {
   return event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'

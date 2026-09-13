@@ -45,6 +45,15 @@ async function bootstrap(): Promise<void> {
   const artifactService = new ArtifactService(store, storage)
   const provider = new AntigravityProvider()
   runtime = new OrbitRuntime(store, artifactService, provider, dataDir, app.getVersion())
+  // Before anything can run: a turn a previous launch never finished (Orbit
+  // crashed or was killed mid-turn) gets an honest ending.
+  runtime.recoverInterruptedRuns()
+  // Before any turn can be writing a copy: reclaim artifact copies no row
+  // refers to, and copies an interrupted write left unfinished.
+  const swept = runtime.sweepArtifactStorage()
+  if (swept.removed.length > 0 || swept.failed.length > 0) {
+    console.info(`[orbit] artifact storage: reclaimed ${swept.removed.length} unreferenced file(s)${swept.failed.length ? `, ${swept.failed.length} could not be removed` : ''}.`)
+  }
   // Start reading the model catalogue immediately, so the first session a
   // user creates already knows the default model's real reasoning tiers.
   runtime.warmModelCatalogue()

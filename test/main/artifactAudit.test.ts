@@ -152,16 +152,59 @@ describe('an artifact opens correctly', () => {
   it('reports a missing artifact rather than returning something wrong', () => {
     expect(() => artifacts.getContent('artifact_nope')).toThrow(/not found/i)
   })
+
+  it('reports a deleted stored copy as unavailable instead of throwing', () => {
+    const project = store.createProject('Audit')
+    const artifact = artifacts.importUserArtifacts(project.id, [sourceFile('gone.png', 'PNGDATA')])[0]!
+    fs.rmSync(artifact.location)
+
+    const content = artifacts.getContent(artifact.id)
+    expect(content.available).toBe(false)
+    expect(content.dataUrl).toBeUndefined()
+    // No filesystem path ever reaches the renderer through content.
+    expect(JSON.stringify(content)).not.toContain(dir)
+  })
 })
 
-describe('the known limitation is real and explicit', () => {
-  it('an Unsorted session’s snapshot carries no artifacts', () => {
-    // artifacts.project_id is NOT NULL, so a session belonging to no
-    // project cannot own one. The media scan is skipped for those rather
-    // than finding media it could not register. Documented here so the
-    // constraint is visible rather than surprising.
-    store.createConversation(null, 'Unsorted')
+describe('an Unsorted session can own artifacts', () => {
+  it('lists an Unsorted session’s outputs in its snapshot', () => {
+    // artifacts.project_id used to be NOT NULL, which made this impossible.
+    const conversation = store.createConversation(null, 'Unsorted')
+    const run = store.createRun({ projectId: null, conversationId: conversation.id })
+    artifacts.registerOutput({ projectId: null, conversationId: conversation.id, runId: run.id, sourcePath: sourceFile('draft.png'), sourceRoot: source })
 
-    expect(store.openUnsortedSnapshot().artifacts).toEqual([])
+    const listed = store.openUnsortedSnapshot().artifacts
+    expect(listed.map((artifact) => [artifact.name, artifact.projectId, artifact.creatorRunId])).toEqual([['draft.png', null, run.id]])
+    expect(store.openUnsortedSnapshot().artifactVersions).toHaveLength(1)
+  })
+
+  it('migrates a database whose artifacts table still requires a project', async () => {
+    const project = store.createProject('Legacy')
+    const kept = artifacts.importUserArtifacts(project.id, [sourceFile('legacy.png')])[0]!
+    // Rebuild the table the way every database before this change had it.
+    // Without a rename, which would rewrite artifact_versions' reference.
+    db.exec('PRAGMA foreign_keys = OFF')
+    db.exec('CREATE TEMP TABLE artifacts_old AS SELECT * FROM artifacts')
+    db.exec('DROP TABLE artifacts')
+    db.exec(`CREATE TABLE artifacts (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      creator_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      creator_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+      type TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, location TEXT NOT NULL,
+      preview_kind TEXT NOT NULL, mime_type TEXT, metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, current_version_id TEXT)`)
+    db.exec('INSERT INTO artifacts SELECT * FROM artifacts_old')
+    db.exec('DROP TABLE artifacts_old')
+    db.exec('PRAGMA foreign_keys = ON')
+    db.close()
+
+    await openDatabase()
+    expect(store.openProjectSnapshot(project.id).artifacts.map((artifact) => artifact.id)).toEqual([kept.id])
+    const conversation = store.createConversation(null, 'Unsorted')
+    const run = store.createRun({ projectId: null, conversationId: conversation.id })
+    expect(() =>
+      artifacts.registerOutput({ projectId: null, conversationId: conversation.id, runId: run.id, sourcePath: sourceFile('after.png'), sourceRoot: source })
+    ).not.toThrow()
   })
 })

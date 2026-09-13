@@ -53,12 +53,13 @@ const FIX_LOGIN = conversation({ id: 'conversation_1', projectId: 'project_1', t
 const OLDER = conversation({ id: 'conversation_2', projectId: 'project_1', title: 'Older Work' })
 const SIDECAR_SESSION = conversation({ id: 'conversation_3', projectId: 'project_2', title: 'Sidecar Notes' })
 
-/** Orbit opens on one brand-new session per application launch.
+/** Orbit reopens the session the user was last in.
  *
  *  These tests drive the renderer against a stand-in for the main process
- *  that keeps the real invariant: the launch session is created once and
- *  handed back to every later caller, so only quitting and launching again
- *  produces another one. */
+ *  that keeps its real rules (test/main/startupSession.test.ts pins the real
+ *  thing): the remembered session if it still exists, else the most recent,
+ *  and a new Unsorted session only when there is none — resolved once per
+ *  launch and handed back to every later caller. */
 describe('opening Orbit', () => {
   let api: OrbitApi
   let preferences: OrbitPreferences
@@ -129,7 +130,11 @@ describe('opening Orbit', () => {
       startup: {
         session: vi.fn(async () => {
           launch ??= (async (): Promise<StartupSession | null> => {
-            // Unsorted: no project is chosen for it, and none needs to exist.
+            const all = [...unsortedSessions, ...projects.flatMap((project) => sessions[project.id] ?? [])]
+            const remembered = all.find((item) => item.id === preferences.lastActiveConversationId)
+            if (remembered) return { projectId: remembered.projectId, conversationId: remembered.id }
+            // The stand-in's recency order: Unsorted first, then projects.
+            if (all[0]) return { projectId: all[0].projectId, conversationId: all[0].id }
             const made = await api.conversations.create({ projectId: null })
             unsortedSessions = [made, ...unsortedSessions]
             return { projectId: null, conversationId: made.id }
@@ -170,7 +175,11 @@ describe('opening Orbit', () => {
           )
           return unsortedSessions.find((item) => item.id === conversationId)!
         }),
-        setWorkingDirectory: vi.fn()
+        setWorkingDirectory: vi.fn(),
+        // The main process records it; the next launch reads it back.
+        markActive: vi.fn(async (conversationId: string) => {
+          preferences = { ...preferences, lastActiveConversationId: conversationId }
+        })
       },
       data: { clearAll: vi.fn() },
       defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
@@ -194,7 +203,7 @@ describe('opening Orbit', () => {
       runs: { cancel: vi.fn(), onEvent: vi.fn(() => () => undefined) },
       interactions: { respond: vi.fn() },
       files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn(), thumbnail: vi.fn(async () => null), pathForFile: vi.fn(() => null) },
-      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), describe: vi.fn(), open: vi.fn(), reveal: vi.fn() },
       repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }
@@ -210,50 +219,89 @@ describe('opening Orbit', () => {
     return view
   }
 
-  it('lands in a brand-new session, created for this launch', async () => {
+  it('reopens the conversation that was active last time, without creating one', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_2', lastActiveConversationId: 'conversation_3' }
     await open()
 
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
-    // Unsorted: no project is chosen for the launch session.
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null })
-    await waitFor(() => expect(within(header()).getByText(DEFAULT_SESSION_TITLE)).toBeInTheDocument())
+    await waitFor(() => expect(within(header()).getByText('Sidecar Notes')).toBeInTheDocument())
+    expect(api.projects.open).toHaveBeenCalledWith('project_2')
+    expect(screen.getByRole('button', { name: /^Sidecar Notes/ })).toHaveAttribute('aria-current', 'true')
+    expect(api.conversations.create).not.toHaveBeenCalled()
   })
 
-  it('selects that new session, and hands the composer over ready to type', async () => {
+  it('hands the composer over ready to type in the reopened session', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_1' }
     await open()
 
-    const row = await screen.findByRole('button', { name: /^New Session/ })
-    await waitFor(() => expect(row).toHaveAttribute('aria-current', 'true'))
+    await waitFor(() => expect(within(header()).getByText('Fix Login Bug')).toBeInTheDocument())
     await waitFor(() => expect(screen.getByLabelText('Message Antigravity')).toHaveFocus())
   })
 
-  it('does not reopen the conversation that was active last time', async () => {
-    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' }
+  it('falls back to an existing session when the remembered one was deleted', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_deleted', lastActiveConversationId: 'conversation_gone' }
     await open()
 
-    await waitFor(() => expect(within(header()).getByText(DEFAULT_SESSION_TITLE)).toBeInTheDocument())
-    expect(within(header()).queryByText('Fix Login Bug')).not.toBeInTheDocument()
+    await waitFor(() => expect(within(header()).getByText('Fix Login Bug')).toBeInTheDocument())
+    expect(api.conversations.create).not.toHaveBeenCalled()
+  })
+
+  it('reopens a remembered Unsorted session', async () => {
+    unsortedSessions = [conversation({ id: 'conversation_loose', projectId: null as unknown as string, title: 'Loose Thoughts' })]
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_loose' }
+    await open()
+
+    await waitFor(() => expect(within(header()).getByText('Loose Thoughts')).toBeInTheDocument())
+    expect(api.projects.openUnsorted).toHaveBeenCalled()
+    expect(api.conversations.create).not.toHaveBeenCalled()
+  })
+
+  it('remembers the session the user moves to, and the next launch reopens it', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_1' }
+    const first = await open()
+    await waitFor(() => expect(within(header()).getByText('Fix Login Bug')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByRole('button', { name: /^Older Work/ }))
+    await waitFor(() => expect(api.conversations.markActive).toHaveBeenLastCalledWith('conversation_2'))
+    first.unmount()
+
+    relaunch()
+    await open()
+    await waitFor(() => expect(within(header()).getByText('Older Work')).toBeInTheDocument())
+    expect(api.conversations.create).not.toHaveBeenCalled()
+  })
+
+  it('makes a session the user creates the one the next launch reopens', async () => {
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_1' }
+    const first = await open()
+    await waitFor(() => expect(within(header()).getByText('Fix Login Bug')).toBeInTheDocument())
+
+    await userEvent.click(screen.getByLabelText('New session in AgentDock'))
+    await waitFor(() => expect(api.conversations.markActive).toHaveBeenLastCalledWith('conversation_new_1'))
+    first.unmount()
+
+    relaunch()
+    await open()
+    await waitFor(() => expect(api.projects.open).toHaveBeenLastCalledWith('project_1'))
+    await waitFor(() => expect(screen.getByRole('button', { name: /^New Session/ })).toHaveAttribute('aria-current', 'true'))
+    expect(api.conversations.create).toHaveBeenCalledTimes(1)
   })
 
   it('keeps every project conversation in the sidebar, and lets one be opened by hand', async () => {
-    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_1', lastActiveConversationId: 'conversation_1' }
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_3' }
     await open()
 
-    // The launch session is Unsorted, so the project has to be expanded to
-    // see its sessions — they are still there, and none was deleted.
     await userEvent.click(screen.getByRole('button', { name: 'AgentDock' }))
     expect(await screen.findByRole('button', { name: /^Fix Login Bug/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Older Work/ })).toBeInTheDocument()
 
-    // And still selectable after the launch session has taken the floor.
     await userEvent.click(screen.getByRole('button', { name: /^Fix Login Bug/ }))
     await waitFor(() => expect(within(header()).getByText('Fix Login Bug')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: /^Fix Login Bug/ })).toHaveAttribute('aria-current', 'true')
   })
 
-  it('creates one session for the launch, however many times the renderer asks', async () => {
-    // Standing in for a remount, an HMR reload or a reconnecting bridge:
-    // the renderer starts over, the application has not.
+  it('resolves one session for the launch, however many times the renderer asks', async () => {
+    projects = []
+    sessions = {}
     let view = await open()
     view.unmount()
     view = await open()
@@ -270,33 +318,28 @@ describe('opening Orbit', () => {
     view.rerender(<App />)
     view.rerender(<App />)
 
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(api.startup.session).toHaveBeenCalled())
+    expect(api.conversations.create).not.toHaveBeenCalled()
   })
 
-  it('creates another fresh session the next time Orbit is launched', async () => {
+  it('does not create a blank session on a relaunch when sessions exist', async () => {
     const first = await open()
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
     first.unmount()
-
     relaunch()
     await open()
 
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(2))
-    // The earlier launch session is still there — nothing is cleaned up.
-    expect(unsortedSessions).toHaveLength(2)
+    expect(api.conversations.create).not.toHaveBeenCalled()
+    expect(unsortedSessions).toHaveLength(0)
     expect(sessions.project_1).toHaveLength(2)
   })
 
-  it('does not put the fresh session in the project the user was last in', async () => {
-    preferences = { ...EMPTY_PREFERENCES, lastActiveProjectId: 'project_2', lastActiveConversationId: 'conversation_3' }
-    await open()
-
-    // Neither the project nor the conversation is reopened: launching lands
-    // somewhere new, with nothing chosen.
-    expect(api.conversations.create).toHaveBeenCalledWith({ projectId: null })
-    expect(api.projects.open).not.toHaveBeenCalled()
-    expect(api.projects.openUnsorted).toHaveBeenCalled()
-  })
+  /** A brand-new Unsorted session that the user was last in — the world the
+   *  Unsorted-session tests below start from. */
+  const rememberFreshUnsorted = (): void => {
+    unsortedSessions = [conversation({ id: 'conversation_new_1', projectId: null as unknown as string, title: DEFAULT_SESSION_TITLE })]
+    created = 1
+    preferences = { ...EMPTY_PREFERENCES, lastActiveConversationId: 'conversation_new_1' }
+  }
 
   it('needs no project to exist at all', async () => {
     projects = []
@@ -324,6 +367,7 @@ describe('opening Orbit', () => {
   })
 
   it('opens the launch session on Orbit’s concrete default model, not “Default model”', async () => {
+    rememberFreshUnsorted()
     await open()
 
     const trigger = await screen.findByRole('button', { name: 'Model and reasoning' })
@@ -333,6 +377,7 @@ describe('opening Orbit', () => {
   })
 
   it('gives the launch session the ordinary permission default', async () => {
+    rememberFreshUnsorted()
     await open()
 
     const permissions = await screen.findByRole('button', { name: 'Permissions' })
@@ -340,6 +385,7 @@ describe('opening Orbit', () => {
   })
 
   it('changes the model of an Unsorted session, visibly and immediately', async () => {
+    rememberFreshUnsorted()
     // The reported bug: the launch session lives in the Unsorted list, and
     // the optimistic update only ever touched the project tree — so picking
     // a model appeared to do nothing at all.
@@ -359,6 +405,7 @@ describe('opening Orbit', () => {
   })
 
   it('switches the model of an Unsorted session more than once', async () => {
+    rememberFreshUnsorted()
     await open()
     const trigger = (): HTMLElement => screen.getByRole('button', { name: 'Model and reasoning' })
     await waitFor(() => expect(trigger()).toBeEnabled())
@@ -380,6 +427,7 @@ describe('opening Orbit', () => {
   })
 
   it('changes the permission mode of an Unsorted session, visibly and immediately', async () => {
+    rememberFreshUnsorted()
     await open()
     const permissions = await screen.findByRole('button', { name: 'Permissions' })
     expect(permissions).toHaveTextContent(/Ask first/i)
@@ -395,6 +443,7 @@ describe('opening Orbit', () => {
   })
 
   it('switches an Unsorted session back to Ask first', async () => {
+    rememberFreshUnsorted()
     await open()
     await userEvent.click(await screen.findByRole('button', { name: 'Permissions' }))
     await userEvent.click(screen.getByRole('menuitemradio', { name: /Bypass permissions/ }))
@@ -408,6 +457,7 @@ describe('opening Orbit', () => {
   })
 
   it('sends from the Unsorted session with no project, and says so to the runtime', async () => {
+    rememberFreshUnsorted()
     // The reported failure came from here: the composer sent projectId null
     // and the IPC validator rejected it before the runtime was reached.
     await open()
@@ -422,6 +472,7 @@ describe('opening Orbit', () => {
   })
 
   it('offers no attachment control it cannot honour in an Unsorted session', async () => {
+    rememberFreshUnsorted()
     await open()
 
     // Attachments are stored against a project, so rather than a control
@@ -432,6 +483,7 @@ describe('opening Orbit', () => {
   })
 
   it('shows the launch session as belonging to no project, and still usable', async () => {
+    rememberFreshUnsorted()
     await open()
 
     // "No project" is a state, not an error: the composer is ready.
@@ -440,8 +492,9 @@ describe('opening Orbit', () => {
   })
 
   it('still makes a session inside a project in one click', async () => {
+    rememberFreshUnsorted()
     await open()
-    await waitFor(() => expect(api.conversations.create).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(within(header()).getByText(DEFAULT_SESSION_TITLE)).toBeInTheDocument())
 
     await userEvent.click(screen.getByLabelText('New session in AgentDock'))
 

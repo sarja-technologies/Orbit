@@ -133,7 +133,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
       // so the app opens the project on its existing one.
       startup: { session: vi.fn(async () => null) },
       preferences: { get: vi.fn(async () => ({ ...EMPTY_PREFERENCES })), set: vi.fn(async (next) => next) },
-      conversations: { create: vi.fn(), listUnsorted: vi.fn(async () => []), assignProject: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn() },
+      conversations: { create: vi.fn(), listUnsorted: vi.fn(async () => []), assignProject: vi.fn(), rename: vi.fn(), delete: vi.fn(), setTransport: vi.fn(), setModel: vi.fn(), setPermissionMode: vi.fn(), setWorkingDirectory: vi.fn(), markActive: vi.fn(async () => undefined) },
       data: { clearAll: vi.fn() },
       defaults: { modelStatus: vi.fn(async () => ({ modelId: ORBIT_DEFAULT_MODEL_ID, source: 'factory' as const, missingModelId: null })) },
       clipboard: { writeText: vi.fn(async () => true) },
@@ -148,7 +148,7 @@ describe('streaming hand-off to the persisted assistant message', () => {
       },
       interactions: { respond: vi.fn() },
       files: { attach: vi.fn(), attachPaths: vi.fn(), attachImage: vi.fn(), thumbnail: vi.fn(async () => null), pathForFile: vi.fn(() => null) },
-      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), reveal: vi.fn() },
+      artifacts: { list: vi.fn(), import: vi.fn(), getContent: vi.fn(), describe: vi.fn(), open: vi.fn(), reveal: vi.fn() },
       repository: { state: vi.fn(async () => NO_REPOSITORY) },
       references: { create: vi.fn() }
     }

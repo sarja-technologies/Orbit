@@ -21,13 +21,15 @@ interface MessageBlockProps {
   /** Who answered — the session's model, so a turn is marked with the AI
    *  that produced it rather than with Orbit's own logo. */
   identity?: AgentIdentity
+  /** The turn produced files, which are drawn under this block. */
+  hasArtifacts?: boolean
 }
 
 /** One message in the work-session transcript. Side carries the speaker:
  *  the reader's own turns sit right in a sent bubble, Antigravity's sit
  *  left in its own surface. The label and timestamp confirm that read
  *  rather than being the only thing that provides it. */
-function MessageBlockView({ message, showRole, attachments, thumbnails, error, identity }: MessageBlockProps): JSX.Element {
+function MessageBlockView({ message, showRole, attachments, thumbnails, error, identity, hasArtifacts = false }: MessageBlockProps): JSX.Element | null {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   // Stopping a run is a normal thing to do, not a fault. It gets a quiet
   // note that names what happened and nothing else: no warning colour, no
@@ -38,6 +40,8 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
   // live session. Either way, say so rather than leaving a blank gap the
   // reader has to interpret.
   if (message.role === 'assistant' && message.content.trim().length === 0) {
+    // Files are the answer: the cards below say what the turn did.
+    if (hasArtifacts) return null
     return <div className="transcript-note chat-rail">This turn finished without any text to show.</div>
   }
 

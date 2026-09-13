@@ -47,4 +47,36 @@ export interface AgentProvider {
    *  conversation is deleted so an interactive session is never orphaned. */
   releaseConversation(conversationId: ID): Promise<void>
   shutdown(): Promise<void>
+  /** Optional: files the provider's own tools generated OUTSIDE the
+   *  workspace during a turn. Synchronous and never throws. A provider that
+   *  only ever writes into the workspace does not implement it — the
+   *  runtime's workspace scan already covers that. */
+  findGeneratedOutputs?(query: GeneratedOutputQuery): GeneratedOutput[]
+}
+
+/** What the runtime knows about a finished turn when it asks the provider
+ *  for files the provider generated outside the workspace. */
+export interface GeneratedOutputQuery {
+  conversationId: ID
+  /** The native conversation id as best known when the turn ended — null on
+   *  a turn where the runtime never learned one. */
+  nativeConversationId: string | null
+  /** What the user sent this turn. */
+  prompt: string
+  /** When Orbit started the turn, in epoch milliseconds. */
+  startedAtMs: number
+}
+
+/** A file the provider's own tooling generated outside the workspace. */
+export interface GeneratedOutput {
+  /** Absolute path, as found on disk. Revalidated before any use. */
+  filePath: string
+  /** The folder it was found in. Opening it later is only ever allowed
+   *  while it is still physically inside this folder. */
+  root: string
+  /** The name to show — the provider may know a better one than the file's. */
+  displayName: string
+  byteSize: number
+  modifiedMs: number
+  origin: 'provider-generated'
 }
