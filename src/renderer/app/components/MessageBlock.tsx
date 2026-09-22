@@ -1,8 +1,9 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { Message, ProjectFile, RuntimeErrorInfo } from '@shared/domain'
 import { Markdown } from './Markdown'
 import { ChatRow } from './ChatRow'
 import { describeRuntimeError } from '../lib/errorCopy'
+import { reportPreview } from '../lib/reportPreview'
 import { isImage } from '../lib/attachments'
 import type { AgentIdentity } from '../lib/agentIdentity'
 import { MessageActions } from './MessageActions'
@@ -59,13 +60,45 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
       // nothing else.
       actions={<MessageActions text={message.content} label={isUser ? 'your message' : 'reply'} />}
     >
-      {isUser ? <div className="chat-user-text">{message.content}</div> : <Markdown source={message.content} />}
+      {isUser ? <div className="chat-user-text">{message.content}</div> : <AssistantBody content={message.content} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
     </ChatRow>
   )
 }
 
 export const MessageBlock = memo(MessageBlockView)
+
+/** A settled reply. A long report opens on its own opening, with the rest
+ *  one click away — see lib/reportPreview.ts for the rules that decide
+ *  that, including the one that keeps anything resembling a failure fully
+ *  expanded.
+ *
+ *  Once the reader opens a report it stays open: the fold is about the
+ *  first read of a long transcript, not a control they have to keep
+ *  fighting. */
+function AssistantBody({ content }: { content: string }): JSX.Element {
+  const view = useMemo(() => reportPreview(content), [content])
+  const [expanded, setExpanded] = useState(false)
+
+  if (!view.collapsible || expanded) return <Markdown source={content} />
+
+  return (
+    <div className="report-fold">
+      {/* The real opening of the real message — never a generated
+          summary. The fade is decoration on top of it; the button below
+          carries the meaning and states exactly how much is behind it. */}
+      <div className="report-fold-preview">
+        <Markdown source={view.preview} />
+      </div>
+      <button type="button" className="report-fold-more" onClick={() => setExpanded(true)}>
+        Show full report
+        <span className="report-fold-count">
+          {view.hiddenLines} more {view.hiddenLines === 1 ? 'line' : 'lines'}
+        </span>
+      </button>
+    </div>
+  )
+}
 
 /** A run the user stopped. Deliberately in the same quiet register as any
  *  other transcript note — the conversation is intact, the composer is
