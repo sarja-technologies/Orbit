@@ -181,7 +181,7 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
    *  work": the answer is written into the very same process). */
   sendPrompt(prompt: string): void {
     this.pendingSignature = null
-    this.write(`${prompt}\r`)
+    this.write(`${promptKeystrokes(prompt)}\r`)
   }
 
   /** Translates a semantic interaction response into the correct native
@@ -334,4 +334,24 @@ export class AntigravityPtyTransport implements IAntigravityPtyTransport {
     this.wasReady = ready
     if (readyEdge) handlers.onReadyForInput()
   }
+}
+
+/** The keystrokes that deliver a prompt body, with the one carriage return
+ *  that submits it appended by the caller.
+ *
+ *  `\r` is the submit key for agy's interactive TUI, so a `\r` *inside* the
+ *  prompt is a second Enter — it ends the turn early and sends the rest of
+ *  the user's text as a separate one. A multi-line prompt reaches Orbit as
+ *  `\n` from the composer's textarea, but not every route is a textarea: a
+ *  prompt that has been round-tripped through a file, a Windows clipboard,
+ *  or an external tool carries CRLF, and a lone `\r` can survive a paste
+ *  from a classic-Mac-era source. Normalizing the body to `\n` keeps the
+ *  turn whole no matter where the text came from, and changes nothing for
+ *  a prompt that was already LF-only.
+ *
+ *  A trailing newline is dropped rather than translated: it would submit
+ *  the turn one keystroke early and leave the caller's `\r` to open an
+ *  empty second one. */
+export function promptKeystrokes(prompt: string): string {
+  return prompt.replace(/\r\n?/g, '\n').replace(/\n+$/, '')
 }

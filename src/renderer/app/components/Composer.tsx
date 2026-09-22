@@ -2,7 +2,7 @@ import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent } from 'reac
 import type { Conversation, ID, ModelOption, Project, ReasoningEffort } from '@shared/domain'
 import type { PermissionMode } from '@shared/permissionMode'
 import type { DraftAttachment } from '../lib/attachments'
-import { imageItemsFromClipboard } from '../lib/attachments'
+import { imageItemsFromClipboard, pasteIntent } from '../lib/attachments'
 import { AttachMenu } from './AttachMenu'
 import type { AttachmentPickerCategory } from '@shared/attachmentPicker'
 import { AttachmentChip } from './AttachmentChip'
@@ -119,12 +119,15 @@ export function Composer({
     }
   }
 
-  // Only real image payloads become attachments — ordinary copied text
-  // must fall through to the textarea untouched.
+  // Only an image-only clipboard becomes an attachment. Text on the
+  // clipboard always wins and falls through to the textarea untouched —
+  // see pasteIntent for why "there is an image item" was the wrong
+  // question to ask.
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
-    const imageItems = imageItemsFromClipboard(event.clipboardData?.items)
-    if (imageItems.length === 0) return
-    const files = imageItems.map((item) => item.getAsFile()).filter((file): file is File => file !== null)
+    if (pasteIntent(event.clipboardData) !== 'attach-images') return
+    const files = imageItemsFromClipboard(event.clipboardData?.items)
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
     if (files.length === 0) return
     event.preventDefault()
     onPasteImages(files)

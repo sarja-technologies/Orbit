@@ -113,3 +113,30 @@ export function imageItemsFromClipboard(items: DataTransferItemList | null | und
   if (!items) return []
   return Array.from(items).filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
 }
+
+/** What a paste into the composer should actually do.
+ *
+ *  The composer used to ask only "are there image items?" and, if so,
+ *  swallow the paste with `preventDefault()`. That is wrong for a very
+ *  ordinary clipboard: copying a table out of a spreadsheet, a block out of
+ *  a PDF viewer, or formatted text out of almost any Mac app puts a
+ *  *rendered image* on the clipboard alongside the text. The image branch
+ *  won, the real text was silently dropped, and Cmd+V looked broken.
+ *
+ *  So the text wins whenever there is any. An image-only clipboard (a
+ *  screenshot, an image copied from a page) still becomes an attachment,
+ *  which is the case the branch was built for.
+ */
+export function pasteIntent(clipboard: DataTransfer | null | undefined): 'text' | 'attach-images' {
+  if (!clipboard) return 'text'
+  // `getData` is only readable synchronously inside the paste event, which
+  // is exactly where this is called from.
+  let text = ''
+  try {
+    text = clipboard.getData('text/plain') ?? ''
+  } catch {
+    text = ''
+  }
+  if (text.length > 0) return 'text'
+  return imageItemsFromClipboard(clipboard.items).length > 0 ? 'attach-images' : 'text'
+}
