@@ -1,8 +1,8 @@
 import { memo, useMemo } from 'react'
-import type { Artifact, Conversation, ID, Message, Project, ProjectFile, Run } from '@shared/domain'
+import type { Artifact, Conversation, ID, Message, ModelOption, Project, ProjectFile, Run } from '@shared/domain'
 import type { InteractionRequiredEvent } from '@shared/runtime-events'
 import { hasRunningStep, type ActivityState } from '../lib/activity'
-import type { AgentIdentity } from '../lib/agentIdentity'
+import { agentIdentity, runModelId, type AgentIdentity } from '../lib/agentIdentity'
 import { Markdown } from './Markdown'
 import { MessageBlock, ErrorNote } from './MessageBlock'
 import { ChatRow, PendingReply, ReplyingBadge } from './ChatRow'
@@ -30,10 +30,15 @@ interface WorkSessionProps {
   activeRunId: ID | null
   streamText: string
   activityByRun: Record<string, ActivityState>
-  /** Who is answering in this session — resolved once by App from the real
-   *  model selection, so every row that represents the working AI uses the
-   *  same identity. */
+  /** Who is answering in this session — resolved by App from the session's
+   *  current model selection. Used for a turn that has no recorded model of
+   *  its own, and for any row that represents the session rather than one
+   *  past turn. */
   identity: AgentIdentity
+  /** The real catalogue, so a past turn can be labelled with the model it
+   *  actually ran on rather than with whatever the session is set to now.
+   *  Optional: with no catalogue, every turn falls back to `identity`. */
+  models?: readonly ModelOption[]
   /** The user pressed Stop and the run has not finished tearing down yet.
    *  A deliberate lifecycle state, shown as such rather than as a stall. */
   stopping: boolean
@@ -57,6 +62,7 @@ export function WorkSession({
   streamText,
   activityByRun,
   identity,
+  models = EMPTY_MODELS,
   stopping,
   pendingInteraction,
   unavailableInteraction,
@@ -117,6 +123,31 @@ export function WorkSession({
     return next
   }, [messages])
 
+  /** The identity a given run's turn is labelled with: the model that run
+   *  actually ran on, resolved against the real catalogue.
+   *
+   *  Every row used to take the session's *current* selection, so switching
+   *  a session from Gemini to Claude silently restamped the whole history
+   *  with Claude's name and mark — a claim about who answered that was
+   *  simply untrue. A run written before Orbit recorded its model has
+   *  nothing better to fall back on than that selection, so it still gets
+   *  it; every new turn carries its own.
+   *
+   *  Results are cached by model id so a settled MessageTurn keeps getting
+   *  the same object and its memo barrier still holds. */
+  const identityForRun = useMemo(() => {
+    const cache = new Map<string, AgentIdentity>()
+    return (runId: ID | null | undefined): AgentIdentity => {
+      const recorded = runId ? runModelId(runsById.get(runId)?.metadata) : null
+      if (!recorded) return identity
+      const cached = cache.get(recorded)
+      if (cached) return cached
+      const resolved = agentIdentity(models, recorded)
+      cache.set(recorded, resolved)
+      return resolved
+    }
+  }, [identity, models, runsById])
+
   // Everything that can change the transcript's height, as one value. The
   // ResizeObserver inside the hook is what actually guarantees a landing at
   // the bottom; this only lets the ordinary cases pin before paint.
@@ -132,6 +163,8 @@ export function WorkSession({
     unavailableInteraction?.interactionId ?? '',
     staleInteraction ? '1' : '0'
   ].join('|')
+
+  const liveIdentity = identityForRun(activeRunId)
 
   const { viewportRef, contentRef, bottomRef, showJumpToLatest, onScroll, jumpToLatest } = useTranscriptScroll(
     conversation?.id ?? null,
@@ -168,13 +201,18 @@ export function WorkSession({
                 activity={activity}
                 resolved={resolved}
                 artifacts={message.role === 'assistant' && message.runId ? (artifactsByRun.get(message.runId) ?? EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS}
-                identity={identity}
+                identity={identityForRun(message.runId)}
               />
             )
           })}
 
           {activeRunId ? (
             <div className="turn">
+              {/* The live run is labelled the same way a settled one is —
+                  from the run's own recorded model. Changing the session's
+                  model mid-flight retires and respawns the process, so the
+                  row must not silently adopt the new name before the
+                  replacement turn has actually started. */}
               {resolvedRecords
                 .filter((record) => record.runId === activeRunId)
                 .map((record) => (
@@ -190,7 +228,7 @@ export function WorkSession({
                 <ChatRow
                   role="assistant"
                   showIdentity
-                  identity={identity}
+                  identity={liveIdentity}
                   status={<ReplyingBadge label={stopping ? 'Stopping' : 'Replying'} />}
                   bubbleClassName="is-streaming"
                 >
@@ -206,7 +244,7 @@ export function WorkSession({
                   The activity rail below carries the specifics; this line
                   only says which of the two phases the turn is in. */}
               {!pendingInteraction && !streamText ? (
-                <PendingReply identity={identity} {...pendingLabel(identity.name, activityByRun[activeRunId], stopping)} />
+                <PendingReply identity={liveIdentity} {...pendingLabel(liveIdentity.name, activityByRun[activeRunId], stopping)} />
               ) : null}
 
               {/* Tool work is subordinate to the reply: indented onto the
@@ -214,7 +252,7 @@ export function WorkSession({
                   This is where the real command, path or status lives. */}
               {!pendingInteraction && hasSteps(activityByRun[activeRunId]) ? (
                 <div className="chat-aside">
-                  <LiveActivity activity={activityByRun[activeRunId]!} identity={identity} />
+                  <LiveActivity activity={activityByRun[activeRunId]!} identity={liveIdentity} />
                 </div>
               ) : null}
 
@@ -277,6 +315,7 @@ export function WorkSession({
 const EMPTY_ATTACHMENTS: ProjectFile[] = []
 const EMPTY_RESOLVED: ResolvedRecord[] = []
 const EMPTY_ARTIFACTS: Artifact[] = []
+const EMPTY_MODELS: readonly ModelOption[] = []
 
 /** A run is given an activity state the moment it starts, so the state
  *  existing says nothing. Only recorded steps do — and without this the

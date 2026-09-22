@@ -1015,6 +1015,7 @@ export function App(): JSX.Element {
               streamText={activeRunId ? streamTextByRun[activeRunId] ?? '' : ''}
               activityByRun={activityByRun}
               identity={identity}
+              models={models}
               stopping={Boolean(activeRunId && stoppingRunIds.includes(activeRunId))}
               pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
               unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}

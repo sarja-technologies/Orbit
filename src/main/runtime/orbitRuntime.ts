@@ -301,7 +301,16 @@ export class OrbitRuntime extends EventEmitter {
       conversationId: conversation.id,
       metadata: {
         attachmentFileIds: input.attachmentFileIds ?? [],
-        referencedArtifactIds: input.referencedArtifactIds ?? []
+        referencedArtifactIds: input.referencedArtifactIds ?? [],
+        // The model this turn actually runs on, recorded now because the
+        // session's selection is a live setting the user can change
+        // afterward. Without it the transcript had only the *current*
+        // selection to label past turns with, so switching models silently
+        // re-attributed every earlier reply to a model that never saw it.
+        // This is the same value handed to the provider below, so it is a
+        // record of what was sent rather than a second opinion about it.
+        model: conversation.model,
+        reasoningEffort: conversation.reasoningEffort
       }
     })
     const workspacePath = this.resolveWorkspacePath(project, conversation)

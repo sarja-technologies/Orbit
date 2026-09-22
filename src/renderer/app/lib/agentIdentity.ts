@@ -56,3 +56,15 @@ export function agentIdentity(models: readonly ModelOption[], selectedModelId: s
 export function agentVendor(identity: AgentIdentity): string | null {
   return identity.provider ? PROVIDERS[identity.provider].vendor : null
 }
+
+/** The model a finished run actually ran on, as recorded on the run when
+ *  the turn was sent, or null when the run predates that record.
+ *
+ *  Runs written before Orbit recorded this carry no model at all. Those
+ *  fall back to the session's current selection at the call site — the only
+ *  datum that exists for them — which is exactly the behaviour every turn
+ *  used to get. New turns no longer need the fallback. */
+export function runModelId(metadata: Record<string, unknown> | undefined): string | null {
+  const recorded = metadata?.['model']
+  return typeof recorded === 'string' && recorded.trim().length > 0 ? recorded : null
+}
