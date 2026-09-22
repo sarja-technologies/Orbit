@@ -1279,11 +1279,17 @@ body.is-resizing {
   margin-top: var(--space-3);
 }
 
-/* Wide content cannot widen the bubble past the measure: each scrolls in
-   its own box instead, so one long code line or table never stretches the
-   transcript sideways. */
-.chat-bubble pre,
-.chat-bubble table {
+/* Wide content cannot widen the bubble past the measure: it scrolls in its
+   own box instead, so one long code line never stretches the transcript
+   sideways.
+
+   A table is deliberately NOT in this rule. It is clamped through its own
+   `.table-scroll` wrapper, which carries exactly these two declarations —
+   and `max-width` on the <table> was actively harmful: it made the table
+   unable to exceed the scroll container it sits in, so the container never
+   had anything to scroll and the columns were squeezed to fit instead,
+   which is how a five-column table ended up one word per line. */
+.chat-bubble pre {
   max-width: 100%;
   overflow-x: auto;
 }
@@ -1551,6 +1557,71 @@ body.is-resizing {
   border-top: 1px solid var(--border);
 }
 
+/* ---------- folded reports ---------- */
+
+/* A long reply opens on its own opening, with the rest behind one button.
+   See lib/reportPreview.ts for which replies fold and which never do.
+
+   The fold is laid out as the bubble's own flow, not as an overlay: the
+   preview is real rendered Markdown and the button is a real sibling
+   underneath it, so nothing is positioned over content the reader might
+   otherwise want to select or copy. */
+.report-fold {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The fade is the only thing that says "this continues". It is drawn as a
+   pseudo-element over the last rows rather than as an opacity on the text,
+   so the preview stays fully selectable and fully legible right up to the
+   edge it fades at. */
+.report-fold-preview {
+  position: relative;
+}
+
+.report-fold-preview::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--chat-assistant-bg));
+}
+
+/* Deliberately a full-width, always-visible row rather than a hover
+   affordance: the reader has to be able to see that there is more without
+   discovering it. */
+.report-fold-more {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+  font-weight: 550;
+}
+
+.report-fold-more:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.report-fold-count {
+  color: var(--text-muted);
+  font-weight: 450;
+}
+
+.report-fold-more:hover .report-fold-count {
+  color: var(--text-secondary);
+}
+
 /* ---------- tables ---------- */
 
 /* The scroll container, not the table, is what scrolls. `overflow-x` on a
@@ -1568,9 +1639,17 @@ body.is-resizing {
 }
 
 .prose table {
-  /* `auto` lets a column with a long cell blow past the container; fixed
-     shares the width out and lets the cells wrap instead. */
-  width: 100%;
+  /* Columns are sized by their content, then the whole table fills the box
+     if that leaves room. This is the pairing that makes the wrapper's
+     `overflow-x` mean something: `width: 100%` alone let the browser
+     squeeze every column down to fit the bubble, so a wide table was never
+     scrolled — it was crushed, and short values wrapped one word per line
+     under headers that would not wrap at all. `max-content` lets the table
+     be as wide as it needs, `min-width` keeps a two-column table from
+     floating in a half-empty bordered box, and the cell cap below stops a
+     paragraph-length cell from making it absurdly wide. */
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 13px;
   line-height: 1.55;
@@ -1585,6 +1664,10 @@ body.is-resizing {
      words mid-character to avoid widening a column. Long unbroken tokens
      (a path, a URL) still get to break rather than force a scroll. */
   overflow-wrap: break-word;
+  /* The counterweight to `max-content`: a column sizes to its content only
+     up to a readable measure, past which the cell wraps. Without it one
+     prose-heavy cell would set the width of the entire table. */
+  max-width: 34ch;
 }
 
 .prose th[data-align='center'],
@@ -1601,7 +1684,11 @@ body.is-resizing {
   background: var(--bg-hover);
   color: var(--text-secondary);
   font-weight: 650;
-  white-space: nowrap;
+  /* No `nowrap`. It used to be what kept headers legible while the table
+     was being squeezed; with content-sized columns a short header already
+     never wraps, and forcing it meant one long header ("Compilation
+     target") could widen its column past the cell cap above and make every
+     row scroll for it. */
 }
 
 /* Row separators only. Vertical rules turn a small table into a grid and

@@ -259,9 +259,16 @@ describe('bubbles are sized by their content', () => {
   })
 
   it('does not let wide content stretch the transcript sideways', () => {
-    const rule = ruleFor('.chat-bubble pre,\n.chat-bubble table')
+    const rule = ruleFor('.chat-bubble pre')
     expect(rule).toMatch(/max-width:\s*100%/)
     expect(rule).toMatch(/overflow-x:\s*auto/)
+  })
+
+  it('clamps a table through its wrapper and never through the table', () => {
+    // A <table> carrying `max-width: 100%` cannot exceed the scroll
+    // container it sits in, so the container has nothing to scroll and the
+    // browser crushes the columns instead. The wrapper is the clamp.
+    expect(STYLES).not.toMatch(/\.chat-bubble table\s*\{/)
   })
 })
 

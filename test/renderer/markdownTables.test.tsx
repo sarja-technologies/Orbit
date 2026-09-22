@@ -199,6 +199,26 @@ describe('a wide table cannot stretch the conversation', () => {
     expect(ruleFor('.prose th,\n.prose td')).toMatch(/overflow-wrap:\s*break-word/)
   })
 
+  it('sizes columns by their content so the wrapper has something to scroll', () => {
+    // `width: 100%` alone let the browser squeeze every column down to fit
+    // the bubble, so a wide table was never scrolled — it was crushed, and
+    // short values wrapped one word per line. `max-content` is what makes
+    // the wrapper's overflow-x mean anything.
+    const rule = ruleFor('.prose table')
+    expect(rule).toMatch(/width:\s*max-content/)
+    expect(rule).toMatch(/min-width:\s*100%/)
+  })
+
+  it('caps a cell so one prose-heavy column cannot set the whole width', () => {
+    expect(ruleFor('.prose th,\n.prose td')).toMatch(/max-width:\s*\d+ch/)
+  })
+
+  it('never forces a header to stay on one line', () => {
+    // With content-sized columns a short header already never wraps, and
+    // forcing it let one long header widen its column past the cell cap.
+    expect(ruleFor('.prose thead th')).not.toMatch(/white-space:\s*nowrap/)
+  })
+
   it('styles the table for the dark surface it renders on', () => {
     // Explicit colours from the theme's own tokens — never a browser
     // default that would render as black-on-dark.
