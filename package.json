@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:agy": "ORBIT_REAL_AGY=1 vitest run test/main/antigravity-live.test.ts",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run typecheck && npm run test && npm run build",
+    "test:e2e": "npm run build && node test/e2e/scenarios.mjs"
   },
   "dependencies": {
     "@xterm/headless": "^6.0.0",
