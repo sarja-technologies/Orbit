@@ -24,7 +24,8 @@ import { readScreenActivity } from '@main/terminal/TerminalActivityReader'
 import { AntigravityPtyTransport, type IAntigravityPtyTransport, type PtyInteraction } from './AntigravityPtyTransport'
 import { checkClipboardCapability, type ClipboardCapability } from './clipboardCapability'
 import { restoreClipboard, saveCurrentClipboard, writeImageToClipboard, type SavedClipboard } from './nativeClipboardImage'
-import { findRecentConversationId } from './nativeConversationHistory'
+import { findRecentConversationId, type ConversationIdLookup } from './nativeConversationHistory'
+import { promptKeystrokes } from './AntigravityPtyTransport'
 import { processKey, snapshotExecution, terminateExecution, type ProcessInfo, type TerminateOptions, type TerminationReport } from '@main/process/processTree'
 
 /** 'stopping': the user's Stop has been acknowledged by agy, and the
@@ -49,6 +50,10 @@ interface Retirement {
   blocked: boolean
 }
 
+/** How many of this session's own prompts are kept for identifying its
+ *  native conversation. Only recent ones can still be inside agy's bounded
+ *  history tail, so remembering more would buy nothing. */
+const MAX_REMEMBERED_PROMPTS = 50
 const MEDIA_PASTE_CONFIRM_TIMEOUT_MS = 8000
 const MEDIA_PASTE_POLL_INTERVAL_MS = 200
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
@@ -101,7 +106,7 @@ export interface PtySessionDeps {
   /** Overridable for tests — defaults to the real findRecentConversationId,
    *  which reads agy's own history file and would otherwise make unit
    *  tests depend on the real machine's home directory. */
-  findConversationId?: (workspacePath: string) => string | null
+  findConversationId?: (lookup: ConversationIdLookup) => string | null
   /** Overridable for tests — defaults to the real checkClipboardCapability,
    *  which would otherwise make unit tests depend on the real machine's
    *  installed clipboard helpers. */
@@ -140,6 +145,16 @@ export class AntigravityPtySession {
    *  onward, resume across an Orbit restart is expected to work (see
    *  docs/antigravity-transports.md for the live verification). */
   private nativeConversationId: string | null = null
+  /** Every prompt this session has actually written into its terminal, and
+   *  when the first one went out. Together they are what lets the native
+   *  conversation id be recognized as THIS session's rather than as
+   *  whichever session last used the same folder — see
+   *  nativeConversationHistory.ts for the cross-wiring this prevents.
+   *
+   *  Recorded post-normalization, because that is the text agy receives
+   *  and therefore the text it logs. */
+  private readonly deliveredPrompts: string[] = []
+  private firstDeliveryAtMs: number | null = null
   private pending: PendingInteraction | null = null
   private interactionCounter = 0
   private cancelRequested = false
@@ -805,11 +820,28 @@ export class AntigravityPtySession {
     }
   }
 
+  /** Remembers a prompt this session put on the wire, and when the first
+   *  one went out. Deduplicated because re-sending the same text must not
+   *  grow the list without bound, and bounded for the same reason — only
+   *  the recent ones can still be in agy's history tail anyway. */
+  private recordDelivery(prompt: string): void {
+    this.firstDeliveryAtMs ??= Date.now()
+    if (this.deliveredPrompts.includes(prompt)) return
+    this.deliveredPrompts.push(prompt)
+    if (this.deliveredPrompts.length > MAX_REMEMBERED_PROMPTS) this.deliveredPrompts.shift()
+  }
+
   /** Arms progressive reading for the prompt that is about to be written.
    *  Nothing is streamed until this has run, so a screen still showing the
    *  previous turn can never be read as this turn's answer. */
   private beginStreaming(prompt: string): void {
     this.deliveredPrompt = prompt
+    // The single choke point every delivered prompt passes through, so
+    // this is where the session's own record of what it sent is kept.
+    // agy logs the text it receives, which is the normalized keystrokes,
+    // not the raw string — matching on anything else would silently never
+    // match a CRLF or trailing-newline prompt.
+    this.recordDelivery(promptKeystrokes(prompt))
     this.streamedText = ''
     this.divergedFrames = 0
     this.sawPromptEcho = false
@@ -1057,7 +1089,11 @@ export class AntigravityPtySession {
     this.text = this.settleText()
     if (!this.nativeConversationId && this.currentInput) {
       const lookup = this.deps.findConversationId ?? findRecentConversationId
-      this.nativeConversationId = lookup(this.currentInput.workspacePath)
+      this.nativeConversationId = lookup({
+        workspacePath: this.currentInput.workspacePath,
+        notBeforeMs: this.firstDeliveryAtMs ?? Date.now(),
+        prompts: this.deliveredPrompts
+      })
     }
     this.emit({ type: 'run.completed', finalText: this.text, nativeConversationId: this.nativeConversationId })
   }

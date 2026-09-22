@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ConversationIdLookup } from '../../src/main/runtime/providers/antigravity/nativeConversationHistory'
 import { AntigravityPtySession } from '../../src/main/runtime/providers/antigravity/AntigravityPtySession'
 import type { AntigravityPtyHandlers, IAntigravityPtyTransport, PtyInteraction } from '../../src/main/runtime/providers/antigravity/AntigravityPtyTransport'
 import type { ClipboardCapability } from '../../src/main/runtime/providers/antigravity/clipboardCapability'
@@ -85,7 +86,7 @@ function baseInput(overrides: Partial<ProviderSendInput> = {}): ProviderSendInpu
 
 function harness(
   options: {
-    findConversationId?: (workspacePath: string) => string | null
+    findConversationId?: (lookup: ConversationIdLookup) => string | null
     checkClipboardCapability?: () => ClipboardCapability
     writeImageToClipboard?: (imagePath: string) => boolean
   } = {}
@@ -145,12 +146,73 @@ describe('AntigravityPtySession state machine', () => {
   })
 
   it('opportunistically captures a native conversation id from the injected history lookup when none is known yet', () => {
-    const { session, transports, events, onEvent } = harness({ findConversationId: (workspacePath) => (workspacePath === '/tmp/workspace' ? 'found-native-id' : null) })
+    const { session, transports, events, onEvent } = harness({
+      findConversationId: ({ workspacePath }) => (workspacePath === '/tmp/workspace' ? 'found-native-id' : null)
+    })
     session.send(baseInput(), onEvent)
     transports[0]!.handlers!.onReadyForInput() // deliver prompt
     transports[0]!.handlers!.onReadyForInput() // turn completes -> capture attempted
     const completed = events.find((e) => e.type === 'run.completed') as { nativeConversationId?: string | null } | undefined
     expect(completed?.nativeConversationId).toBe('found-native-id')
+  })
+
+  it('identifies its conversation by the prompts it actually delivered, not by the folder alone', () => {
+    // The workspace alone cannot identify a conversation: every session in
+    // an Orbit project shares that project's folder. The lookup is handed
+    // this session's own delivered prompts and the time it began, which is
+    // what stops it adopting a neighbouring session's conversation — see
+    // nativeConversationHistory.ts.
+    const seen: ConversationIdLookup[] = []
+    const { session, transports, onEvent } = harness({
+      findConversationId: (lookup) => {
+        seen.push(lookup)
+        return null
+      }
+    })
+    const before = Date.now()
+    session.send(baseInput({ prompt: 'Summarize this repository' }), onEvent)
+    transports[0]!.handlers!.onReadyForInput() // deliver prompt
+    transports[0]!.handlers!.onReadyForInput() // turn completes -> capture attempted
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.workspacePath).toBe('/tmp/workspace')
+    expect(seen[0]!.prompts).toContain('Summarize this repository')
+    expect(seen[0]!.notBeforeMs).toBeGreaterThanOrEqual(before)
+  })
+
+  it('remembers every prompt of a multi-turn session, so a later turn can still be identified', () => {
+    const seen: ConversationIdLookup[] = []
+    const { session, transports, onEvent } = harness({
+      findConversationId: (lookup) => {
+        seen.push(lookup)
+        return null
+      }
+    })
+    session.send(baseInput({ prompt: 'first turn' }), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onReadyForInput()
+    session.send(baseInput({ runId: 'run_2', prompt: 'second turn' }), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+
+    expect(seen.at(-1)!.prompts).toEqual(expect.arrayContaining(['first turn', 'second turn']))
+  })
+
+  it('records the prompt as agy receives it, so a CRLF prompt can still be matched', () => {
+    // agy logs the text it is sent. The transport normalizes the body
+    // before writing it, so matching on the raw string would silently
+    // never match.
+    const seen: ConversationIdLookup[] = []
+    const { session, transports, onEvent } = harness({
+      findConversationId: (lookup) => {
+        seen.push(lookup)
+        return null
+      }
+    })
+    session.send(baseInput({ prompt: 'line one\r\nline two\r\n' }), onEvent)
+    transports[0]!.handlers!.onReadyForInput()
+    transports[0]!.handlers!.onReadyForInput()
+
+    expect(seen[0]!.prompts).toContain('line one\nline two')
   })
 
   it('does not overwrite an already-known native conversation id with a lookup', () => {

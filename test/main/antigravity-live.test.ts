@@ -244,6 +244,78 @@ describe('AntigravityProvider live PTY integration', () => {
   )
 })
 
+/** Two Orbit sessions in ONE project folder must never end up sharing a
+ *  native Antigravity conversation.
+ *
+ *  This is the real shape of the cross-wiring bug: sessions in a project
+ *  all run in that project's folder, so the workspace path cannot identify
+ *  a conversation. Capturing "the most recent conversation id recorded for
+ *  this workspace" gave the second session the first one's id, and it then
+ *  resumed into a history the user never put there. */
+describe('two PTY sessions sharing one workspace', () => {
+  it.runIf(live)(
+    'never captures each other’s native conversation id, and never sees each other’s context',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-agy-shared-ws-'))
+      dirs.push(dir)
+      const provider = new AntigravityProvider()
+
+      const driveTurn = (conversationId: string, runId: string, nativeConversationId: string | null, prompt: string) =>
+        new Promise<RuntimeEvent[]>((resolve, reject) => {
+          const events: RuntimeEvent[] = []
+          const onEvent = (event: RuntimeEvent) => {
+            events.push(event)
+            if (event.type === 'interaction.required' && event.canRespond) {
+              void provider
+                .respondToInteraction({ conversationId, runId, interactionId: event.interactionId, optionId: event.options[0]!.id })
+                .catch(reject)
+            }
+            if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') resolve(events)
+          }
+          void provider
+            .sendMessage({ ...input(dir, prompt), conversationId, runId, nativeConversationId, transport: 'pty' }, onEvent)
+            .catch(reject)
+        })
+
+      const capturedId = (events: RuntimeEvent[]): string | null => {
+        const completed = events.find((e) => e.type === 'run.completed') as { nativeConversationId?: string | null } | undefined
+        return completed?.nativeConversationId ?? null
+      }
+
+      // Session A establishes a fact, then takes a second turn so agy mints
+      // and logs an id for it.
+      await driveTurn('shared-ws-a', 'a-run-1', null, 'Remember this secret word for later: ALPHA-ONYX-11. Do not run any shell commands. Just acknowledge.')
+      const aSecond = await driveTurn('shared-ws-a', 'a-run-2', null, 'Just reply with the word "alpha-noted", nothing else.')
+      const aId = capturedId(aSecond)
+      expect(aId, 'session A should capture its own native conversation id').toMatch(/^[0-9a-f-]{20,}$/i)
+      await provider.releaseConversation('shared-ws-a')
+
+      // Session B is a DIFFERENT Orbit session in the SAME folder. Its
+      // first turn is logged without an id, which is exactly the entry the
+      // old workspace-only scan walked past on its way to session A's.
+      const bFirst = await driveTurn('shared-ws-b', 'b-run-1', null, 'Remember this secret word for later: BRAVO-INDIGO-22. Do not run any shell commands. Just acknowledge.')
+      expect(capturedId(bFirst), 'session B must not adopt an id on its first turn').toBeNull()
+
+      const bSecond = await driveTurn('shared-ws-b', 'b-run-2', null, 'Just reply with the word "bravo-noted", nothing else.')
+      const bId = capturedId(bSecond)
+      expect(bId, 'session B should capture an id of its own').toMatch(/^[0-9a-f-]{20,}$/i)
+
+      // The whole point: two sessions, two conversations.
+      expect(bId, 'session B must not have captured session A’s conversation').not.toBe(aId)
+
+      // And the isolation is real, not just a different string: B has
+      // never been told A's secret.
+      const bAsked = await driveTurn('shared-ws-b', 'b-run-3', bId, 'What secret word did I ask you to remember earlier in this conversation? Reply with only that word.')
+      const bAnswer = (bAsked.find((e) => e.type === 'run.completed') as { finalText?: string } | undefined)?.finalText ?? ''
+      expect(bAnswer).toContain('BRAVO-INDIGO-22')
+      expect(bAnswer, 'session B must never see session A’s context').not.toContain('ALPHA-ONYX-11')
+
+      await provider.shutdown()
+    },
+    420_000
+  )
+})
+
 // Issue #2. Both transports are asserted on the same property: real
 // assistant prose reaches Orbit as `text.delta` *while the turn is still
 // running*, not in one lump at completion. The evidence these were built
