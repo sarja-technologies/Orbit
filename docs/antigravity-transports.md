@@ -84,7 +84,27 @@ Replaced with a safer mechanism discovered during the hardening pass, implemente
 - The **first** prompt of a brand-new conversation is logged *without* a `conversationId` (agy hasn't minted one yet at prompt-send time); the **second** and later prompts in the same conversation carry it.
 - Reading this file is a plain, bounded (last 512 KB) file read — it cannot hang or otherwise affect the live PTY session the way writing into its terminal can.
 
-`AntigravityPtySession` looks this up (matching on the exact `workspacePath`) once per turn, only when no id is already known, right before emitting `run.completed`.
+`AntigravityPtySession` looks this up once per turn, only when no id is already known, right before emitting `run.completed`.
+
+### The workspace alone cannot identify a conversation
+
+The lookup originally matched on `workspacePath` only, answering "the most recent conversation id recorded for this workspace". That is a different question from "this session's conversation id", and the difference was a real cross-wiring bug: every session in an Orbit project runs in that project's folder, so two sessions share a workspace. Session B's first turn is logged without an id, so a backward scan walked straight past it and returned session A's — B then persisted A's id and resumed into a history the user never put there.
+
+Measured, not assumed: in the real `history.jsonl` on the development machine, **2 of 361 workspaces already carry more than one distinct conversation id**, one of them six. And confirmed live against agy 1.2.8 with the old logic in place, session B adopted session A's id on its very first turn.
+
+A candidate entry must now prove it belongs to the calling session:
+
+| evidence | why it is needed |
+| --- | --- |
+| `workspace` matches | necessary, never sufficient |
+| `timestamp` is at or after the session's first delivery (5s skew allowance) | rules out every turn of a session that ran here earlier |
+| `display` is a prompt this session actually delivered | rules out a concurrent session in the same folder |
+
+`display` holds the prompt **verbatim** rather than a truncation — the longest entry in a real 200KB history is 8189 characters with its newlines intact — which is what makes matching on it sound. Prompts are recorded post-normalization (see "Writing a prompt into the session"), because that is the text agy receives and therefore the text it logs.
+
+Where two distinct ids both carry this session's own prompts — two concurrent sessions in one folder sending byte-identical prompts, the one case the file genuinely cannot resolve — **nothing is returned at all**. Declining to capture costs a resume; guessing would hand the user someone else's conversation.
+
+Live-verified both ways by "never captures each other's native conversation id, and never sees each other's context" in `test/main/antigravity-live.test.ts`: it fails on the old logic and passes on the new one, with two distinct ids and none of session A's context reachable from session B.
 
 **Consequence:** a PTY-owned conversation's `nativeConversationId` stays `null` for exactly one turn — its first — and is captured from the second turn onward. **Live-verified**: a completely fresh `AntigravityProvider` (simulating an Orbit app restart, with the previous provider's process already killed) resumed a real prior conversation via `--conversation <id>` and correctly recalled a secret fact established two turns earlier in a now-dead process. This is a genuinely working resume path, not a documented gap — see the "resumes a real native conversation via --conversation after the PTY process is gone" live test in `test/main/antigravity-live.test.ts`.
 

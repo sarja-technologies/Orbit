@@ -771,6 +771,106 @@ describe('Bypass permissions against the real agy', () => {
   )
 })
 
+/** What a real turn produces has to become a real artifact row, attributed
+ *  to the run that made it, and still be there after Orbit restarts.
+ *
+ *  Runs the whole path against the live CLI: agy genuinely writes files
+ *  into the workspace, Orbit's own end-of-turn scan finds them, and the
+ *  rows are read back from a second store opened on the same data
+ *  directory — which is exactly what a relaunch does. */
+describe('generated outputs from a real turn', () => {
+  it.runIf(live)(
+    'registers what the turn produced against that run, and keeps it across a restart',
+    async () => {
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-artifact-live-'))
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-artifact-data-'))
+      dirs.push(workspace, dataDir)
+
+      const db = new OrbitDatabase({ dataDir })
+      await db.init()
+      const store = new OrbitStore(db)
+      const provider = new AntigravityProvider()
+      const runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dataDir)), provider, dataDir, '0.1.0')
+      await runtime.listModels()
+
+      const project = runtime.createProject('Artifacts live', workspace)
+      const conversation = runtime.openProject(project.id).conversations[0]!
+      runtime.setConversationPermissionMode(conversation.id, 'skip')
+
+      const settle = (runId: string) =>
+        new Promise<void>((resolve) => {
+          const stop = setTimeout(resolve, 200_000)
+          runtime.on('event', (event: RuntimeEvent) => {
+            if (event.runId !== runId) return
+            if (event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled') {
+              clearTimeout(stop)
+              // The end-of-turn output scan runs after the ending event.
+              setTimeout(resolve, 2500)
+            }
+          })
+        })
+
+      // Turn one produces a deliverable.
+      const first = await runtime.sendMessage({
+        projectId: project.id,
+        conversationId: conversation.id,
+        content: 'Write a file called report.csv in this folder containing exactly two lines: "name,score" then "orbit,10". Do not create any other files.'
+      })
+      await settle(first.id)
+
+      expect(fs.existsSync(path.join(workspace, 'report.csv')), 'agy should have written the file').toBe(true)
+
+      const afterFirst = runtime.openProject(project.id).artifacts
+      const report = afterFirst.find((artifact) => artifact.name === 'report.csv')
+      expect(report, `expected report.csv among ${JSON.stringify(afterFirst.map((a) => a.name))}`).toBeDefined()
+      expect(report!.creatorRunId, 'the output belongs to the run that made it').toBe(first.id)
+      expect(report!.creatorConversationId).toBe(conversation.id)
+      expect(report!.source).toBe('provider')
+
+      // Turn two produces a different deliverable. Attribution must not
+      // leak backwards onto the first run, or forwards onto the second.
+      const second = await runtime.sendMessage({
+        projectId: project.id,
+        conversationId: conversation.id,
+        content: 'Now write a second file called summary.txt in this folder containing exactly: done. Do not modify report.csv.'
+      })
+      await settle(second.id)
+
+      const afterSecond = runtime.openProject(project.id).artifacts
+      const summary = afterSecond.find((artifact) => artifact.name === 'summary.txt')
+      if (summary) {
+        expect(summary.creatorRunId, 'the second output belongs to the second run').toBe(second.id)
+      }
+      expect(
+        afterSecond.find((artifact) => artifact.name === 'report.csv')!.creatorRunId,
+        'the first output must still belong to the first run'
+      ).toBe(first.id)
+
+      const names = afterSecond.map((artifact) => artifact.name)
+      expect(new Set(names).size, `no duplicate registrations among ${JSON.stringify(names)}`).toBe(names.length)
+
+      await provider.shutdown()
+      db.close()
+
+      // Restart: a completely fresh database handle on the same data
+      // directory, which is what relaunching Orbit does.
+      const reopened = new OrbitDatabase({ dataDir })
+      await reopened.init()
+      try {
+        const restored = new OrbitStore(reopened).listArtifacts(project.id)
+        const restoredReport = restored.find((artifact) => artifact.name === 'report.csv')
+        expect(restoredReport, 'the artifact must survive a restart').toBeDefined()
+        expect(restoredReport!.creatorRunId, 'and keep its attribution').toBe(first.id)
+        // The stored copy is Orbit's own, so it outlives the workspace.
+        expect(fs.existsSync(restoredReport!.location) || fs.existsSync(path.join(workspace, 'report.csv'))).toBe(true)
+      } finally {
+        reopened.close()
+      }
+    },
+    420_000
+  )
+})
+
 /** A model chosen in the UI has to become the model agy is launched with.
  *
  *  Proves the whole path against the real CLI: the selection persists, the

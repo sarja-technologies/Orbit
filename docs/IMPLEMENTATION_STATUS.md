@@ -30,7 +30,8 @@ The provider is Electron-main-owned. The renderer has no shell, raw IPC, process
 
 ## Known limitations
 
-- PTY sessions do not capture a resumable native conversation id (an earlier `/help`-scrape approach reliably hung the session live and was removed — see `docs/antigravity-transports.md`). A PTY conversation is fully continuous within one Orbit process lifetime but starts a fresh native conversation if Orbit itself restarts.
+- A PTY conversation's native id is captured from its **second** turn onward, never its first: agy has not minted one at the time the first prompt is logged. So a PTY session whose entire life is one turn starts a fresh native conversation if Orbit restarts. From the second turn on, resume works and is live-verified (`docs/antigravity-transports.md`). This is agy's own timing, not an Orbit gap.
+- Two concurrent PTY sessions in the **same folder** sending **byte-identical** prompts cannot be told apart in agy's history file. Orbit declines to capture an id at all in that case rather than risk resuming the wrong conversation, which costs a resume and never cross-wires. Any difference in prompt text, or any gap between the sessions, resolves it.
 - Structured → PTY and PTY → structured continuation safety is not implemented/verified; PTY is sticky by design (never silently downgrades).
 - Native image attachment on Linux requires a system clipboard helper (`wl-clipboard` or `xclip`) to be installed — Electron's clipboard API is not self-contained here. Not verified on macOS/Windows.
 - `extractResponseText`'s PTY reply reconstruction is a best-effort screen heuristic, not a pixel-perfect transcript of rich formatting.
