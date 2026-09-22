@@ -23,7 +23,7 @@ The provider is Electron-main-owned. The renderer has no shell, raw IPC, process
 ## Verification results
 
 - `npm run typecheck`: passed.
-- `npm run test`: passed (44 tests, 2 skipped without `ORBIT_REAL_AGY=1`).
+- `npm run test`: passed (1112 tests, 11 skipped without `ORBIT_REAL_AGY=1`).
 - `npm run build`: passed — including a real Electron launch smoke check (see `docs/antigravity-transports.md`'s `@xterm/headless` build note; this used to crash on launch).
 - `npm run test:agy` (real signed-in `agy`): passed — structured smoke test, plus a live PTY test covering native question continuity, permission approval (command actually ran), permission denial (command did not run), and stale-interaction rejection, all in one persistent session.
 - Live, manually-driven verification (outside the automated suite, via a small Electron-hosted script — see `docs/antigravity-transports.md`): one native image attachment correctly described by agy, and two sequential native image attachments both correctly distinguished in order.

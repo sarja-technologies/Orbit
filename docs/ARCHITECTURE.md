@@ -92,6 +92,22 @@ The main process resolves the launch session before the renderer draws anything 
 
 `preferences.lastActiveConversationId` / `lastActiveProjectId` are written only through `conversations.markActive(id)`, which the renderer calls whenever the open session changes (Unsorted included); `preferences.set` can no longer overwrite them with a stale object. Deleting the remembered session clears them; assigning it to a project updates the project.
 
+## What the transcript claims about a turn
+
+Every row that represents the working AI is labelled from the run's **own** record, not from the session's live settings. `sendMessage` writes the model and reasoning tier onto `runs.metadata` at the moment the turn is launched, from the same value handed to the provider, so it is a record of what was sent rather than a second opinion about it. The renderer resolves each turn's identity from that record (`renderer/app/lib/agentIdentity.ts`, `runModelId`).
+
+Without it the transcript had only the session's *current* selection to work with, so switching a session's model silently restamped its entire history with a model that had never seen it. Runs written before this carry no model and still fall back to the session selection — the only datum that exists for them.
+
+## Long replies
+
+A settled assistant message longer than a screenful opens on its own opening, with the rest behind one button (`renderer/app/lib/reportPreview.ts`). Three rules keep that honest, each pinned by a test:
+
+- the preview is a real prefix of the real message — never a generated or paraphrased summary — and the button states how many lines are behind it;
+- the cut lands on a blank line outside any fence, so what is shown renders as itself rather than as a fragment. A message with no safe boundary is shown whole;
+- anything in the hidden tail that reads like a problem keeps the message fully expanded. A turn can report a failure and still have *succeeded* as a run, and that report is exactly what must not end up behind a button. The check is deliberately broad and fails open.
+
+Failed and cancelled turns never reach the fold — they have their own presentation. Neither does a reply the reader watched stream in: folding that the instant it settled would hide the text they were reading. The window remembers which runs streamed; reopening Orbit later is when the fold earns its keep.
+
 ## Data integrity: foreign keys
 
 **Real bug fixed:** `PRAGMA foreign_keys` is per connection, and sql.js's `export()` — called after every write to persist the database — reopens the connection, silently turning enforcement off. No `ON DELETE CASCADE` / `SET NULL` had ever run after the first write: deleted sessions left their messages, runs, run events and artifact versions behind. `OrbitDatabase` now re-enables foreign keys after every export, and on open repairs, idempotently, exactly the rows those cascades would have removed or nulled.

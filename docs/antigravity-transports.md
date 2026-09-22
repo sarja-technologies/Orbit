@@ -51,6 +51,14 @@ Interaction IDs (`${runId}:pty:${counter}`) are stable for the life of one on-sc
 
 `respondToInteraction` validates: the run matches the currently active one, the interaction is still the pending one, and the option ID is one of that interaction's own options — a stale, duplicate, wrong-run, or invalid-option response is rejected, never silently accepted (see `AntigravityPtySession.respondToInteraction` and its tests).
 
+### Writing a prompt into the session
+
+`sendPrompt` writes the prompt body followed by exactly one `\r`, which is the TUI's submit key. The body is normalized first (`promptKeystrokes`): every `\r\n` and lone `\r` becomes `\n`, and a trailing newline is dropped.
+
+This is a correctness rule, not tidiness. A `\r` *inside* the body is a second Enter — it ends the turn early and sends the remainder as a separate one. A multi-line prompt reaches Orbit as `\n` from the composer's textarea, but not every route is a textarea: a prompt round-tripped through a file, a Windows clipboard or an external tool carries CRLF. Dropping the trailing newline matters for the same reason — it would submit one keystroke before the caller's own `\r`, which would then open an empty second turn.
+
+Blank lines *within* the prompt are preserved: agy echoes them as blank rows inside the echo block, which `findPromptEcho` already consumes (see "Response text extraction").
+
 ### Native questions have no dedicated UI
 
 Confirmed live (agy 1.1.27, both by direct PTY probing and by AgentDock Pro's own `TerminalInteractionDetector`, which has no `'question'` kind at all): a free-text `ask_question` is **not** a distinct modal in the interactive TUI. Agy just prints the question as ordinary assistant text and returns to the ready footer — identical to a normal turn ending. Orbit's "native question" support is therefore session continuity, not a special widget: the user's next message goes into the same live process. There is no `interaction.required` event of kind `question` for PTY today.
