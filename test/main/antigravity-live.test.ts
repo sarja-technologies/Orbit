@@ -11,6 +11,7 @@ import { ArtifactService } from '../../src/main/artifacts/artifactService'
 import { OrbitRuntime } from '../../src/main/runtime/orbitRuntime'
 import type { ProviderSendInput } from '../../src/main/runtime/provider'
 import type { InteractionRequiredEvent, RuntimeEvent } from '../../src/shared/runtime-events'
+import type { ModelOption } from '../../src/shared/domain'
 import { spawnSync } from 'node:child_process'
 import { PERMISSION_MODES, permissionArgs } from '../../src/shared/permissionMode'
 import { ORBIT_DEFAULT_MODEL_ID } from '../../src/shared/defaultModel'
@@ -889,11 +890,18 @@ describe('a model change against the real agy', () => {
       const store = new OrbitStore(db)
       const provider = new AntigravityProvider()
       const runtime = new OrbitRuntime(store, new ArtifactService(store, new FileStorage(dataDir)), provider, dataDir, '0.1.0')
-      const catalogue = await runtime.listModels()
+      // `agy models` is a live network read and does occasionally come back
+      // short under load — observed once across these runs, with the real
+      // catalogue listing fourteen entries either side of it. Retrying the
+      // real read keeps this test measuring what it is about (that a model
+      // change reaches the CLI) rather than agy's momentary availability.
+      // Nothing is relaxed: the assertion below is unchanged, and a
+      // catalogue that is genuinely single-model still fails it.
+      const catalogue = await readCatalogue(runtime)
 
       // Real ids from the live catalogue — never invented.
       const other = catalogue.find((model) => model.id !== ORBIT_DEFAULT_MODEL_ID)
-      expect(other, 'the live catalogue should offer more than one model').toBeDefined()
+      expect(other, `the live catalogue should offer more than one model, got ${JSON.stringify(catalogue.map((m) => m.id))}`).toBeDefined()
 
       // An Unsorted session: no project, nothing chosen first.
       const session = runtime.createConversation(null)
@@ -951,6 +959,19 @@ function permissionPromptsUnavailableReason(): string | null {
   const blanket = allow.filter((entry): entry is string => typeof entry === 'string').filter((entry) => /^command\(\*\)$|^\*$/.test(entry.trim()))
   if (blanket.length === 0) return null
   return `agy's own settings (${settingsPath}) grant a standing allow-list including ${blanket.join(', ')}, so it approves shell commands without asking`
+}
+
+/** The real `agy models` catalogue, re-read a couple of times if it comes
+ *  back too short to choose a second model from. A transient empty read is
+ *  agy being momentarily unavailable, not Orbit resolving models wrongly. */
+async function readCatalogue(runtime: OrbitRuntime): Promise<ModelOption[]> {
+  let catalogue: ModelOption[] = []
+  for (let attempt = 0; attempt < 3; attempt++) {
+    catalogue = await runtime.listModels()
+    if (catalogue.length > 1) return catalogue
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+  }
+  return catalogue
 }
 
 function input(workspacePath: string, prompt: string): ProviderSendInput {
