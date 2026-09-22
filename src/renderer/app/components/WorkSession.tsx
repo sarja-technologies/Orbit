@@ -39,6 +39,10 @@ interface WorkSessionProps {
    *  actually ran on rather than with whatever the session is set to now.
    *  Optional: with no catalogue, every turn falls back to `identity`. */
   models?: readonly ModelOption[]
+  /** Runs whose reply the reader watched arrive in this window. Those open
+   *  in full rather than folding in their face the instant they settle —
+   *  see MessageBlock's AssistantBody. */
+  watchedRunIds?: ReadonlySet<string>
   /** The user pressed Stop and the run has not finished tearing down yet.
    *  A deliberate lifecycle state, shown as such rather than as a stall. */
   stopping: boolean
@@ -63,6 +67,7 @@ export function WorkSession({
   activityByRun,
   identity,
   models = EMPTY_MODELS,
+  watchedRunIds = EMPTY_WATCHED,
   stopping,
   pendingInteraction,
   unavailableInteraction,
@@ -202,6 +207,7 @@ export function WorkSession({
                 resolved={resolved}
                 artifacts={message.role === 'assistant' && message.runId ? (artifactsByRun.get(message.runId) ?? EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS}
                 identity={identityForRun(message.runId)}
+                watched={Boolean(message.runId && watchedRunIds.has(message.runId))}
               />
             )
           })}
@@ -316,6 +322,7 @@ const EMPTY_ATTACHMENTS: ProjectFile[] = []
 const EMPTY_RESOLVED: ResolvedRecord[] = []
 const EMPTY_ARTIFACTS: Artifact[] = []
 const EMPTY_MODELS: readonly ModelOption[] = []
+const EMPTY_WATCHED: ReadonlySet<string> = new Set<string>()
 
 /** A run is given an activity state the moment it starts, so the state
  *  existing says nothing. Only recorded steps do — and without this the
@@ -350,7 +357,8 @@ const MessageTurn = memo(function MessageTurn({
   activity,
   resolved,
   artifacts,
-  identity
+  identity,
+  watched
 }: {
   message: Message
   showRole: boolean
@@ -361,6 +369,7 @@ const MessageTurn = memo(function MessageTurn({
   resolved: ResolvedRecord[]
   artifacts: Artifact[]
   identity: AgentIdentity
+  watched: boolean
 }): JSX.Element {
   return (
     <div className="turn">
@@ -383,6 +392,7 @@ const MessageTurn = memo(function MessageTurn({
         error={error}
         identity={identity}
         hasArtifacts={artifacts.length > 0}
+        watched={watched}
       />
       {/* What the turn produced, directly under what it said — including a
           stopped or failed turn, which keeps only provably finished files. */}

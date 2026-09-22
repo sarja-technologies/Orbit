@@ -24,13 +24,16 @@ interface MessageBlockProps {
   identity?: AgentIdentity
   /** The turn produced files, which are drawn under this block. */
   hasArtifacts?: boolean
+  /** The reader watched this reply arrive in this window, so it opens in
+   *  full however long it is — see AssistantBody. */
+  watched?: boolean
 }
 
 /** One message in the work-session transcript. Side carries the speaker:
  *  the reader's own turns sit right in a sent bubble, Antigravity's sit
  *  left in its own surface. The label and timestamp confirm that read
  *  rather than being the only thing that provides it. */
-function MessageBlockView({ message, showRole, attachments, thumbnails, error, identity, hasArtifacts = false }: MessageBlockProps): JSX.Element | null {
+function MessageBlockView({ message, showRole, attachments, thumbnails, error, identity, hasArtifacts = false, watched = false }: MessageBlockProps): JSX.Element | null {
   if (message.status === 'failed') return <FailureBlock message={message} error={error ?? null} />
   // Stopping a run is a normal thing to do, not a fault. It gets a quiet
   // note that names what happened and nothing else: no warning colour, no
@@ -60,7 +63,7 @@ function MessageBlockView({ message, showRole, attachments, thumbnails, error, i
       // nothing else.
       actions={<MessageActions text={message.content} label={isUser ? 'your message' : 'reply'} />}
     >
-      {isUser ? <div className="chat-user-text">{message.content}</div> : <AssistantBody content={message.content} />}
+      {isUser ? <div className="chat-user-text">{message.content}</div> : <AssistantBody content={message.content} watched={watched} />}
       {attachments.length > 0 ? <SentAttachments attachments={attachments} thumbnails={thumbnails} /> : null}
     </ChatRow>
   )
@@ -73,12 +76,17 @@ export const MessageBlock = memo(MessageBlockView)
  *  that, including the one that keeps anything resembling a failure fully
  *  expanded.
  *
- *  Once the reader opens a report it stays open: the fold is about the
- *  first read of a long transcript, not a control they have to keep
- *  fighting. */
-function AssistantBody({ content }: { content: string }): JSX.Element {
+ *  `watched` is what stops the fold happening in the reader's face. A
+ *  reply they saw stream in has already been read; folding it the instant
+ *  it settled would collapse the very text they were reading and make them
+ *  click to get it back. The fold is for history — a long transcript on
+ *  reopening — not for the answer that just arrived.
+ *
+ *  Once the reader opens a report it stays open too: the fold is about the
+ *  first read, not a control they have to keep fighting. */
+function AssistantBody({ content, watched = false }: { content: string; watched?: boolean }): JSX.Element {
   const view = useMemo(() => reportPreview(content), [content])
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(watched)
 
   if (!view.collapsible || expanded) return <Markdown source={content} />
 

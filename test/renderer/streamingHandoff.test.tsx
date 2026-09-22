@@ -287,6 +287,32 @@ describe('streaming hand-off to the persisted assistant message', () => {
     expect(document.body.textContent).not.toMatch(/couldn’t be read|went wrong|try again/i)
   })
 
+  it('does not fold a long report in the reader’s face the moment it settles', async () => {
+    // The fold is for history — a long transcript on reopening — not for
+    // the answer that just arrived. Collapsing a report the reader watched
+    // stream in would hide the very text they were reading and make them
+    // click to get it back.
+    const REPORT = [
+      '## What I changed',
+      '',
+      'Renamed the transport helper and moved its callers.',
+      '',
+      ...Array.from({ length: 20 }, (_, index) => `Step ${index + 1}. Updated another caller.\n`)
+    ].join('\n')
+
+    await startRun()
+    emit({ type: 'text.delta', delta: REPORT } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)
+    await screen.findByText('What I changed')
+
+    messages = [message('m1', 'user', 'Tell me about bicycles'), message('m2', 'assistant', REPORT)]
+    emit({ type: 'run.completed', finalText: REPORT, nativeConversationId: null } as Partial<RuntimeEvent> & { type: 'run.completed' }, listener!)
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument())
+    // The whole report is still there, and there is nothing to un-fold.
+    expect(screen.getByText(/Step 20\./)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Show full report/ })).not.toBeInTheDocument()
+  })
+
   it('clears the live run once the refreshed transcript has taken over', async () => {
     await startRun()
     emit({ type: 'text.delta', delta: 'Answer.' } as Partial<RuntimeEvent> & { type: 'text.delta' }, listener!)

@@ -80,6 +80,15 @@ export function App(): JSX.Element {
   const [attachments, setAttachments] = useState<DraftAttachment[]>([])
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({})
   const [streamTextByRun, setStreamTextByRun] = useState<Record<string, string>>({})
+  /** Runs whose reply the reader actually watched arrive in this window.
+   *
+   *  A ref rather than state on purpose: nothing should re-render when it
+   *  grows. It is read once, at the moment the settled message mounts, to
+   *  decide whether a long report opens folded — and by then the deltas
+   *  that populate it have long since flushed. It is deliberately not
+   *  persisted: reopening Orbit later is exactly when the fold earns its
+   *  keep. */
+  const watchedRunIds = useRef<Set<string>>(new Set())
   const [runningRunByConversation, setRunningRunByConversation] = useState<Record<string, string>>({})
   const [activityByRun, setActivityByRun] = useState<Record<string, ActivityState>>({})
   const [pendingByRun, setPendingByRun] = useState<Record<string, InteractionRequiredEvent>>({})
@@ -380,6 +389,9 @@ export function App(): JSX.Element {
         for (const [runId, delta] of Object.entries(batch.textDeltas)) {
           if (!delta) continue
           next[runId] = `${next[runId] ?? ''}${delta}`
+          // Text for this run was on screen as it arrived, so the settled
+          // message must not fold it away the moment the run ends.
+          watchedRunIds.current.add(runId)
           changed = true
         }
         return changed ? next : current
@@ -1016,6 +1028,7 @@ export function App(): JSX.Element {
               activityByRun={activityByRun}
               identity={identity}
               models={models}
+              watchedRunIds={watchedRunIds.current}
               stopping={Boolean(activeRunId && stoppingRunIds.includes(activeRunId))}
               pendingInteraction={activeRunId ? pendingByRun[activeRunId] ?? null : null}
               unavailableInteraction={activeRunId ? unavailableByRun[activeRunId] ?? null : null}
