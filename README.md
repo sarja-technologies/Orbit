@@ -72,3 +72,17 @@ so the deterministic suite needs no installed AGY even on a developer machine.
 Live AGY tests are deliberately excluded (`ORBIT_REAL_AGY=0`): they need a
 signed-in account, network access, and model availability. Green CI does not
 certify live AGY, desktop UI, or Windows PTY/clipboard behavior.
+
+## Licence
+
+Orbit's own source code and documentation are dedicated to the public domain under
+[CC0 1.0 Universal](LICENSE) (SPDX: `CC0-1.0`). Before this change the repository carried no licence file.
+
+CC0 covers only material the project's authors own. It does **not** apply to:
+
+- **Provider logos** in `src/renderer/assets/providers/` (Anthropic, Google Gemini, OpenAI). These are the
+  providers' own marks, used for identification; they remain the property and trademarks of their owners
+  (see `src/renderer/assets/providers/SOURCES.md`).
+- **`ReferenceImagesForAGY.zip`**, a set of screenshots of third-party software (Antigravity) kept as
+  design reference. It has not been cleared for redistribution and is excluded from the CC0 dedication.
+- **npm dependencies**, which keep their own licences and notices.

@@ -1,6 +1,7 @@
 {
   "name": "orbit-by-agentdock",
   "version": "0.1.0",
+  "license": "CC0-1.0",
   "description": "Orbit by AgentDock - a project-oriented Antigravity workspace.",
   "type": "module",
   "main": "out/main/index.js",

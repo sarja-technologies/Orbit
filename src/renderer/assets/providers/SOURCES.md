@@ -1,5 +1,8 @@
 # Provider logo assets
 
+> **Not covered by Orbit's CC0 dedication.** These are third-party marks owned by their respective
+> providers; Orbit's root `LICENSE` does not grant any rights in them.
+
 Every file here is the provider's own published mark, fetched once during
 development and committed so the application never reaches the network to
 render a logo. Nothing here is redrawn, traced or approximated by Orbit.
